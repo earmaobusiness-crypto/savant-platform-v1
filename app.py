@@ -31,34 +31,48 @@ st.markdown(
             padding: 14px 24px !important;
             font-size: 16px !important;
         }
-        .chat-shell { max-width: 920px; margin: 0 auto; padding: 0 16px 200px; }
+        div[data-testid="stTextInput"] input:focus { border-color: #333333 !important; box-shadow: none !important; }
+
         .chat-panel [data-testid="stMarkdown"] p,
         .chat-panel [data-testid="stMarkdown"] li,
         .chat-panel [data-testid="stMarkdown"] strong { color: #E5E5E5 !important; }
+
         .speaker-label {
             font-weight: 600; font-size: 13px; text-transform: uppercase;
-            letter-spacing: 0.1em; margin: 18px 0 6px;
+            letter-spacing: 0.1em; margin: 16px 0 6px;
         }
-        .speaker-you { color: #666; }
-        .speaker-savant { color: #FFF; }
-        .chart-dock {
-            position: fixed; bottom: 72px; left: 0; right: 0; z-index: 900;
-            background: #0B0B0B; border-top: 1px solid #1A1A1A; padding: 10px 16px 12px;
+        .speaker-you { color: #666666; }
+        .speaker-savant { color: #FFFFFF; }
+
+        .tape-strip {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 6px;
+            margin: 8px 0 12px;
         }
-        .chart-dock-inner { max-width: 920px; margin: 0 auto; }
-        .dock-label {
-            font-size: 10px; color: #555; text-transform: uppercase;
-            letter-spacing: 0.08em; font-weight: 700; margin-bottom: 6px;
+        .tape-cell {
+            background: #111;
+            border: 1px solid #1F1F1F;
+            border-radius: 4px;
+            padding: 6px 8px;
+            text-align: center;
         }
-        .input-dock {
-            position: fixed; bottom: 0; left: 0; right: 0; z-index: 950;
-            background: #0B0B0B; border-top: 1px solid #141414; padding: 12px 16px 18px;
-        }
-        .input-dock-inner { max-width: 920px; margin: 0 auto; }
+        .tape-label { font-size: 8px; color: #555; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
+        .tape-value { font-size: 12px; font-weight: 600; color: #FFF; margin-top: 2px; }
+
         .stButton>button {
-            background: #121212 !important; color: #8E8E93 !important;
-            border: 1px solid #222 !important; border-radius: 4px !important;
-            font-size: 11px !important; font-weight: 600 !important;
+            background-color: #121212 !important;
+            color: #8E8E93 !important;
+            border: 1px solid #222222 !important;
+            border-radius: 4px !important;
+            padding: 4px 10px !important;
+            font-size: 11px !important;
+            font-weight: 600 !important;
+        }
+        .stButton>button:hover {
+            color: #FFFFFF !important;
+            border-color: #444444 !important;
+            background-color: #1A1A1A !important;
         }
     </style>
     """,
@@ -97,14 +111,12 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "current_ticker" not in st.session_state:
     st.session_state.current_ticker = None
+if "compare_tickers" not in st.session_state:
+    st.session_state.compare_tickers = []
+if "panel_mode" not in st.session_state:
+    st.session_state.panel_mode = "single"
 if "timeframe" not in st.session_state:
     st.session_state.timeframe = "D"
-if "dock_tickers" not in st.session_state:
-    st.session_state.dock_tickers = []
-if "dock_mode" not in st.session_state:
-    st.session_state.dock_mode = "none"
-if "chart_anchor_idx" not in st.session_state:
-    st.session_state.chart_anchor_idx = None
 if "fullscreen_ticker" not in st.session_state:
     st.session_state.fullscreen_ticker = None
 if "llm_memory" not in st.session_state:
@@ -129,7 +141,6 @@ YF_EXCHANGE_MAP = {
 }
 LIVE_TRUTH_RE = re.compile(r"\n(\[LIVE TRUTH:.*?\]|\[RESPONSE MODE:.*?\])", re.DOTALL)
 CASUAL_TOKENS = ("joke", "bored", "hello", "hi ", "entertain", "philosoph")
-COMPARE_KW = ("compare", " vs ", " versus ", "difference between", "better than", " against ")
 SENTIMENT_KW = ("market sentiment", "macro", "broad market", " spy", " vix", "economy", "the fed", "interest rate")
 TICKER_FILLER = {"LOOK", "AT", "SHOW", "ANALYZE", "CHECK", "TELL", "ME", "SETUP", "SCAN"}
 CASH_TAG_RE = re.compile(r"\$([A-Za-z]{1,5})\b")
@@ -172,11 +183,6 @@ def extract_all_tickers(text: str) -> list[str]:
     return _candidate_tickers(text)
 
 
-def extract_ticker(text: str) -> str | None:
-    tickers = extract_all_tickers(text)
-    return tickers[0] if tickers else None
-
-
 def is_ticker_only_query(text: str, ticker: str) -> bool:
     bare = bare_ticker(ticker)
     words = [w for w in re.findall(r"\b[A-Z]{2,5}\b", text.upper()) if w not in TICKER_IGNORE]
@@ -209,6 +215,30 @@ def classify_query(text: str) -> tuple[str, list[str]]:
     return "chitchat", []
 
 
+def update_chart_panel(mode: str, tickers: list[str]) -> None:
+    """Update left chart panel only when rules say so. Conversation never wiped."""
+    current = st.session_state.current_ticker
+
+    if mode == "compare" and len(tickers) >= 2:
+        st.session_state.panel_mode = "compare"
+        st.session_state.compare_tickers = tickers
+        st.session_state.current_ticker = tickers[0]
+        return
+
+    if mode in ("sentiment", "chitchat"):
+        new_tk = tickers[0] if tickers else None
+        if new_tk and (not current or bare_ticker(new_tk) != bare_ticker(current)):
+            st.session_state.panel_mode = "single"
+            st.session_state.compare_tickers = []
+            st.session_state.current_ticker = new_tk
+        return
+
+    if mode == "initial_ticker" and tickers:
+        st.session_state.panel_mode = "single"
+        st.session_state.compare_tickers = []
+        st.session_state.current_ticker = tickers[0]
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def resolve_tradingview_symbol(ticker: str) -> str:
     if ":" in ticker:
@@ -228,13 +258,34 @@ def get_live_tape_data(ticker: str):
         pct = ((price - prev) / prev) * 100 if price else 0.0
         raw_vol = info.get("volume") or info.get("regularMarketVolume") or 0
         vol = f"{raw_vol:,}" if raw_vol else "N/A"
-        return price, pct, vol, name
+        high = info.get("dayHigh", price)
+        low = info.get("dayLow", price)
+        vwap_val = (high + low + price) / 3 if price else 0.0
+        return price, pct, vol, f"${vwap_val:.2f}" if vwap_val else "N/A", name
     except Exception:
-        return 0.0, 0.0, "N/A", bare_ticker(ticker)
+        return 0.0, 0.0, "N/A", "N/A", bare_ticker(ticker)
+
+
+def render_tape_strip(ticker: str) -> None:
+    price, pct, vol, vwap, name = get_live_tape_data(ticker)
+    change_color = "#34C759" if pct >= 0 else "#FF3B30"
+    st.markdown(
+        f"""
+        <div class="tape-strip">
+            <div class="tape-cell"><div class="tape-label">{name}</div>
+                <div class="tape-value">{bare_ticker(ticker)} · ${price:,.2f}</div></div>
+            <div class="tape-cell"><div class="tape-label">Change</div>
+                <div class="tape-value" style="color:{change_color}">{pct:+.2f}%</div></div>
+            <div class="tape-cell"><div class="tape-label">Volume</div><div class="tape-value">{vol}</div></div>
+            <div class="tape-cell"><div class="tape-label">VWAP</div><div class="tape-value">{vwap}</div></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def build_live_truth_block(ticker: str) -> str:
-    price, pct, vol, name = get_live_tape_data(ticker)
+    price, pct, vol, _, name = get_live_tape_data(ticker)
     return (
         f"\n[LIVE TRUTH: Ticker={bare_ticker(ticker)}, Company={name}, "
         f"Price=${price:,.2f}, Change={pct:+.2f}%, Vol={vol}]"
@@ -258,72 +309,23 @@ def build_groq_messages(mode: str, tickers: list[str]) -> list[dict[str, str]]:
     return messages
 
 
-def tv_iframe_html(ticker: str, interval: str, height: int, frame_id: str) -> str:
+def render_tradingview_iframe(ticker: str, interval: str, height: int, frame_id: str) -> None:
     symbol = urllib.parse.quote(resolve_tradingview_symbol(ticker), safe="")
     src = (
         "https://s.tradingview.com/widgetembed/"
         f"?frameElementId={frame_id}&symbol={symbol}&interval={interval}"
         f"&theme=dark&style=1&timezone=Etc%2FUTC&locale=en&allow_symbol_change=0"
     )
-    return (
-        f'<iframe id="{frame_id}" src="{src}" width="100%" height="{height}" frameborder="0" '
-        f'allowtransparency="true" allowfullscreen="true" allow="fullscreen" scrolling="no" '
-        f'style="border-radius:6px;border:1px solid #1F1F1F;"></iframe>'
-    )
-
-
-def render_chart_iframe(ticker: str, interval: str, height: int, frame_id: str) -> None:
     components.html(
-        f'<div style="width:100%;height:{height}px;overflow:hidden;">'
-        f"{tv_iframe_html(ticker, interval, height, frame_id)}</div>",
+        f"""
+        <div style="width:100%;height:{height}px;border-radius:8px;overflow:hidden;border:1px solid #1F1F1F;">
+            <iframe id="{frame_id}" src="{src}" width="100%" height="{height}" frameborder="0"
+                allowtransparency="true" allowfullscreen="true" allow="fullscreen" scrolling="no"
+                style="border-radius:8px;"></iframe>
+        </div>
+        """,
         height=height + 8,
     )
-
-
-def render_fullscreen_overlay() -> None:
-    tk = st.session_state.fullscreen_ticker
-    if not tk:
-        return
-    _, close_col = st.columns([0.85, 0.15])
-    with close_col:
-        if st.button("✕ Close", key="close_fs", use_container_width=True):
-            st.session_state.fullscreen_ticker = None
-            st.rerun()
-    st.markdown(f"**Full Screen — {bare_ticker(tk)}**")
-    render_chart_iframe(tk, st.session_state.timeframe, 560, f"fs_{bare_ticker(tk)}")
-
-
-def update_chart_dock(mode: str, tickers: list[str]) -> tuple[str, list[str]]:
-    current = st.session_state.current_ticker
-
-    if mode == "compare" and len(tickers) >= 2:
-        st.session_state.dock_mode = "compare"
-        st.session_state.dock_tickers = tickers
-        st.session_state.current_ticker = tickers[0]
-        return "compare", tickers
-
-    if mode == "sentiment":
-        st.session_state.dock_mode = "keep"
-        return "keep", st.session_state.dock_tickers
-
-    new_tk = tickers[0] if tickers else None
-    if mode == "chitchat":
-        if new_tk and (not current or bare_ticker(new_tk) != bare_ticker(current)):
-            st.session_state.dock_mode = "single"
-            st.session_state.dock_tickers = [new_tk]
-            st.session_state.current_ticker = new_tk
-            return "single", [new_tk]
-        st.session_state.dock_mode = "keep"
-        return "keep", st.session_state.dock_tickers
-
-    if mode == "initial_ticker" and new_tk:
-        st.session_state.dock_mode = "single"
-        st.session_state.dock_tickers = [new_tk]
-        st.session_state.current_ticker = new_tk
-        return "single", [new_tk]
-
-    st.session_state.dock_mode = "keep"
-    return "keep", st.session_state.dock_tickers
 
 
 def run_groq_analysis(mode: str, tickers: list[str]) -> str:
@@ -349,7 +351,7 @@ def handle_user_message(user_raw_input: str) -> None:
         return
 
     mode, tickers = classify_query(user_raw_input)
-    chart_action, dock_tickers = update_chart_dock(mode, tickers)
+    update_chart_panel(mode, tickers)
 
     st.session_state.chat_history.append({"speaker": "You", "text": user_raw_input})
     st.session_state.llm_memory.append({"role": "user", "content": user_raw_input})
@@ -357,19 +359,9 @@ def handle_user_message(user_raw_input: str) -> None:
     ai_analysis = run_groq_analysis(mode, tickers)
     st.session_state.llm_memory.append({"role": "assistant", "content": ai_analysis})
 
-    savant_idx = len(st.session_state.chat_history)
     st.session_state.chat_history.append(
-        {
-            "speaker": "Savant",
-            "text": ai_analysis,
-            "ai_text": ai_analysis,
-            "mode": mode,
-            "chart_action": chart_action,
-            "chart_tickers": list(dock_tickers),
-        }
+        {"speaker": "Savant", "text": ai_analysis, "ai_text": ai_analysis, "mode": mode}
     )
-    if chart_action in ("single", "compare"):
-        st.session_state.chart_anchor_idx = savant_idx
 
 
 def process_chat_submission() -> None:
@@ -380,79 +372,101 @@ def process_chat_submission() -> None:
     st.session_state.chat_input = ""
 
 
-st.markdown("<div class='chat-shell chat-panel'>", unsafe_allow_html=True)
+# ── SPLIT SCREEN (original layout) ───────────────────────────────────────────
+col_chart, col_chat = st.columns([0.85, 1.15])
 
-_, reset_col = st.columns([0.75, 0.25])
-with reset_col:
-    if st.button("RESET MEMORY", key="reset_btn", use_container_width=True):
-        st.session_state.chat_history = []
-        st.session_state.current_ticker = None
-        st.session_state.dock_tickers = []
-        st.session_state.dock_mode = "none"
-        st.session_state.chart_anchor_idx = None
-        st.session_state.fullscreen_ticker = None
-        st.session_state.llm_memory = [{"role": "system", "content": SYSTEM_PROMPT}]
-        st.rerun()
+with col_chart:
+    st.markdown("<div style='height:1vh;'></div>", unsafe_allow_html=True)
 
-if st.session_state.fullscreen_ticker:
-    render_fullscreen_overlay()
+    if st.session_state.fullscreen_ticker:
+        tk = st.session_state.fullscreen_ticker
+        if st.button("✕ Close Full Screen", key="close_fs", use_container_width=True):
+            st.session_state.fullscreen_ticker = None
+            st.rerun()
+        render_tradingview_iframe(tk, st.session_state.timeframe, 520, f"fs_{bare_ticker(tk)}")
 
-if not st.session_state.chat_history:
-    st.markdown("<div style='height:20vh;'></div>", unsafe_allow_html=True)
-    st.markdown(
-        "<div style='text-align:center;color:#222;font-size:24px;font-weight:300;'>"
-        "Savant Apprentice</div>",
-        unsafe_allow_html=True,
-    )
-else:
-    anchor = st.session_state.chart_anchor_idx
-    for index, msg in enumerate(st.session_state.chat_history):
-        label = "speaker-you" if msg["speaker"] == "You" else "speaker-savant"
-        st.markdown(f'<div class="speaker-label {label}">{msg["speaker"]}</div>', unsafe_allow_html=True)
-        st.markdown(msg.get("ai_text") or msg.get("text", ""))
-        if index == anchor and msg.get("chart_action") in ("single", "compare"):
-            tickers = msg.get("chart_tickers") or []
-            if tickers:
-                names = ", ".join(bare_ticker(t) for t in tickers)
-                st.caption(f"Chart dock updated here — {names}")
-
-st.markdown("</div>", unsafe_allow_html=True)
-
-if st.session_state.dock_tickers:
-    st.markdown("<div class='chart-dock'><div class='chart-dock-inner'>", unsafe_allow_html=True)
-
-    if st.session_state.dock_mode == "compare":
-        st.markdown('<div class="dock-label">Compare — click Expand for full screen</div>', unsafe_allow_html=True)
-        cols = st.columns(min(len(st.session_state.dock_tickers), 4))
-        for i, tk in enumerate(st.session_state.dock_tickers[:4]):
-            with cols[i]:
+    elif st.session_state.panel_mode == "compare" and st.session_state.compare_tickers:
+        st.markdown(
+            '<div style="font-size:11px;color:#555;text-transform:uppercase;'
+            'letter-spacing:0.08em;font-weight:700;margin-bottom:8px;">Compare Charts</div>',
+            unsafe_allow_html=True,
+        )
+        cols = st.columns(min(len(st.session_state.compare_tickers), 2))
+        for i, tk in enumerate(st.session_state.compare_tickers[:4]):
+            with cols[i % 2]:
                 st.markdown(f"**{bare_ticker(tk)}**")
-                render_chart_iframe(tk, st.session_state.timeframe, 130, f"mini_{i}_{bare_ticker(tk)}")
-                if st.button("Expand", key=f"exp_{i}_{bare_ticker(tk)}", use_container_width=True):
+                render_tradingview_iframe(tk, st.session_state.timeframe, 160, f"cmp_{i}_{bare_ticker(tk)}")
+                if st.button("Expand", key=f"exp_{bare_ticker(tk)}", use_container_width=True):
                     st.session_state.fullscreen_ticker = tk
                     st.rerun()
-    elif st.session_state.dock_tickers:
-        tk = st.session_state.dock_tickers[0]
-        st.markdown(f'<div class="dock-label">Live Chart — {bare_ticker(tk)}</div>', unsafe_allow_html=True)
+
+    elif st.session_state.current_ticker:
+        tk = st.session_state.current_ticker
+        st.markdown(
+            f'<div style="font-size:11px;color:#555;text-transform:uppercase;'
+            f'letter-spacing:0.08em;font-weight:700;margin-bottom:8px;">'
+            f"Live Chart — {bare_ticker(tk)}</div>",
+            unsafe_allow_html=True,
+        )
+        render_tape_strip(tk)
+
         tf_cols = st.columns(6)
-        for i, label in enumerate(TF_MAP):
+        for i, t_label in enumerate(TF_MAP):
             with tf_cols[i]:
-                if st.button(label, key=f"dock_tf_{label}"):
-                    st.session_state.timeframe = TF_MAP[label]
+                if st.button(t_label, key=f"panel_tf_{t_label}"):
+                    st.session_state.timeframe = TF_MAP[t_label]
                     st.rerun()
-        render_chart_iframe(tk, st.session_state.timeframe, 280, f"dock_{bare_ticker(tk)}")
-        if st.button("Full Screen", key="dock_fullscreen"):
+
+        render_tradingview_iframe(tk, st.session_state.timeframe, 420, f"panel_{bare_ticker(tk)}")
+        if st.button("Full Screen", key="panel_fullscreen", use_container_width=True):
             st.session_state.fullscreen_ticker = tk
             st.rerun()
 
-    st.markdown("</div></div>", unsafe_allow_html=True)
+    else:
+        st.markdown("<div style='height:18vh;'></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='text-align:center;color:#333;font-size:14px;font-weight:300;'>"
+            "Chart panel ready.<br>Enter a ticker in the chat to load TradingView."
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
-st.markdown("<div class='input-dock'><div class='input-dock-inner'>", unsafe_allow_html=True)
-st.text_input(
-    "Input",
-    placeholder="Ticker (AEHL) · follow-up · compare AAPL vs NVDA · macro sentiment...",
-    label_visibility="collapsed",
-    key="chat_input",
-    on_change=process_chat_submission,
-)
-st.markdown("</div></div>", unsafe_allow_html=True)
+with col_chat:
+    st.markdown("<div class='chat-panel'>", unsafe_allow_html=True)
+
+    _, reset_col = st.columns([0.7, 0.3])
+    with reset_col:
+        if st.button("RESET MEMORY", key="clean_memory_cta", use_container_width=True):
+            st.session_state.chat_history = []
+            st.session_state.current_ticker = None
+            st.session_state.compare_tickers = []
+            st.session_state.panel_mode = "single"
+            st.session_state.fullscreen_ticker = None
+            st.session_state.llm_memory = [{"role": "system", "content": SYSTEM_PROMPT}]
+            st.rerun()
+
+    if not st.session_state.chat_history:
+        st.markdown("<div style='height:14vh;'></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='text-align:center;color:#222;font-size:22px;font-weight:300;"
+            "letter-spacing:0.04em;'>Savant Apprentice</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        for msg in st.session_state.chat_history:
+            label_class = "speaker-you" if msg["speaker"] == "You" else "speaker-savant"
+            st.markdown(
+                f'<div class="speaker-label {label_class}">{msg["speaker"]}</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(msg.get("ai_text") or msg.get("text", ""))
+
+    st.markdown("<div style='height:2vh;'></div>", unsafe_allow_html=True)
+    st.text_input(
+        "Input",
+        placeholder="Ask Savant anything — e.g. $AEHL, follow-up, compare AAPL vs NVDA...",
+        label_visibility="collapsed",
+        key="chat_input",
+        on_change=process_chat_submission,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
