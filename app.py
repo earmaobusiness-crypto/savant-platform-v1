@@ -167,7 +167,7 @@ with col_chat_side:
             st.session_state.llm_memory = st.session_state.llm_memory[:1]
             st.rerun()
 
-    if not st.session_state.chat_history:
+        if not st.session_state.chat_history:
         st.markdown("<div style='height: 18vh;'></div>", unsafe_allow_html=True)
         st.markdown("<div style='text-align: center; color: #222222; font-size: 24px; font-weight: 300; letter-spacing:0.04em;'>Savant Apprentice</div>", unsafe_allow_html=True)
     else:
@@ -181,3 +181,79 @@ with col_chat_side:
                         <div class="metric-card"><div class="metric-label">Change</div><div class="metric-value" style="color:{'#34C759' if pct >= 0 else '#FF3B30'}">{pct:+.2f}%</div></div>
                         <div class="metric-card"><div class="metric-label">Volume</div><div class="metric-value" style="font-size:12px;">{v}</div></div>
                         <div class="metric-card"><div class="metric-label">Sess. VWAP</div><div class="metric-value">{vw}</div></div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+        st.markdown("<div style='max-height: 440px; overflow-y: auto; padding-right:10px;'>", unsafe_allow_html=True)
+        for msg in st.session_state.chat_history:
+            lbl = "speaker-you" if msg["speaker"] == "You" else "speaker-savant"
+            content = msg["raw_ai_text"] if msg["speaker"] == "Savant" else msg["text"]
+            st.markdown(f'<div class="chat-row"><div class="speaker-label {lbl}">{msg["speaker"]}</div><div class="data-content">{content}</div></div>', unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # --- CHAT INPUT HUB FIXED CONTROL PIPELINE ---
+    st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+    
+    if "input_text_value" not in st.session_state:
+        st.session_state.input_text_value = ""
+
+    def process_chat_submission():
+        user_raw_input = st.session_state.text_field_buffer
+        if user_raw_input.strip() == "":
+            return
+            
+        st.session_state.chat_history.append({"speaker": "You", "text": user_raw_input})
+        st.session_state.llm_memory.append({"role": "user", "content": user_raw_input})
+        
+        detected_tk = extract_ticker(user_raw_input)
+        query_lower = user_raw_input.lower()
+        is_casual_intent = any(x in query_lower for x in ["joke", "bored", "hello", "hi ", "entertain", "philosoph"])
+        
+        if detected_tk and not is_casual_intent:
+            st.session_state.current_ticker = detected_tk
+
+        p_f, pct_f, v_f, vw_f, name_f = get_live_tape_data(st.session_state.current_ticker)
+        
+        if "GROQ_API_KEY" in st.secrets:
+            try:
+                client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+                if st.session_state.current_ticker and not is_casual_intent:
+                    st.session_state.llm_memory[-1]["content"] += f"\n[LIVE TRUTH: Ticker={st.session_state.current_ticker}, Company={name_f}, Price=${p_f:,.2f}, Change={pct_f:+.2f}%, Vol={v_f}, VWAP={vw_f}]"
+                completion = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=st.session_state.llm_memory, temperature=0.4, max_tokens=1000)
+                ai_analysis = completion.choices.message.content
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str:
+                    time_match = re.search(r'in\s+([0-9hms\.]+)', error_str)
+                    wait_window = time_match.group(1) if time_match else "1h30m"
+                    
+                    ai_analysis = (
+                        "⚠️ **Savant Core Standby: Active Rate Limit Enforced.**<br><br>"
+                        "Your algorithmic activity has saturated your daily limit of 100,000 baseline tokens.<br><br>"
+                        f"• **Current Duration Used**: 24-Hour Cycle Tracked.<br>"
+                        f"• **Time Window Till Resumption**: **{wait_window}** exact remaining.<br><br>"
+                        "The text synthesis brain is currently locked in safety standby. Your active left panel TradingView workspace remains operational for charting executions."
+                    )
+                else:
+                    ai_analysis = f"Core System Interruption: {error_str}"
+        else:
+            ai_analysis = "Security Core Offline. Missing Groq API initialization."
+
+        st.session_state.llm_memory.append({"role": "assistant", "content": ai_analysis})
+        
+        st.session_state.chat_history.append({
+            "speaker": "Savant",
+            "text": ai_analysis.replace("\n", "<br>"),
+            "raw_ai_text": ai_analysis.replace("\n", "<br>")
+        })
+        
+        st.session_state.text_field_buffer = ""
+
+    st.text_input(
+        "Input", 
+        placeholder="Ask Savant anything... No filters active.", 
+        label_visibility="collapsed", 
+        key="text_field_buffer",
+        on_change=process_chat_submission
+    )
