@@ -276,6 +276,8 @@ def apply_correction(text: str) -> list[str]:
     st.session_state.active_tickers = [
         t for t in st.session_state.active_tickers if bare_ticker(t) not in removed
     ]
+    if removed:
+        reset_groq_context_for_new_assets()
     return removed
 
 
@@ -297,9 +299,9 @@ def extract_all_tickers(text: str) -> list[str]:
     for match in CASH_TAG_RE.finditer(text):
         add(match.group(1).upper(), cash_tagged=True)
     for match in PARENS_TICKER_RE.finditer(text):
-        add(match.group(1).upper(), cash_tagged=True)
+        add(match.group(1).upper())
     for match in EXPLICIT_ASSET_RE.finditer(text):
-        add(match.group(1).upper(), cash_tagged=True)
+        add(match.group(1).upper())
 
     if VS_SPLIT_RE.search(text) or COMPARE_SIGNALS.search(text):
         segments = VS_SPLIT_RE.split(text)
@@ -307,7 +309,7 @@ def extract_all_tickers(text: str) -> list[str]:
             for match in CASH_TAG_RE.finditer(segment):
                 add(match.group(1).upper(), cash_tagged=True)
             for match in EXPLICIT_ASSET_RE.finditer(segment):
-                add(match.group(1).upper(), cash_tagged=True)
+                add(match.group(1).upper())
             for match in EXCHANGE_TICKER_RE.finditer(segment):
                 add(f"{match.group(1).upper()}:{match.group(2).upper()}", cash_tagged=True)
             seg = segment.strip()
