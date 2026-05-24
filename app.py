@@ -172,11 +172,10 @@ with col_chat_side:
         st.markdown("<div style='height: 18vh;'></div>", unsafe_allow_html=True)
         st.markdown("<div style='text-align: center; color: #222222; font-size: 24px; font-weight: 300; letter-spacing:0.04em;'>Savant Apprentice</div>", unsafe_allow_html=True)
     else:
+        # FIXED: Removed triple-quote string template layout to eliminate SyntaxErrors permanently
         p, pct, v, vw, name = get_live_tape_data(st.session_state.current_ticker)
         if st.session_state.current_ticker:
-            st.markdown(f"""
-                <div style="background:#111; padding:12px; border-radius:6px; border:1px solid #1F1F1F; margin-bottom:15px;">
-                    <div class="metric-label" style="font-size:10px; color:#555; font-weight:700;">Exchange Tape Metrics — {name} ({st.session_state.current_ticker})</div>
-                    <div class="metric-grid">
-                        <div class="metric-card"><div class="metric-label">Price</div><div class="metric-value">${p:,.2f}</div></div>
-                        <div class="metric-card"><div class="metric-label">Change</div><div class="metric-value" style="color:{'#34C759' if pct >= 0 else '#FF3B30'}">{pct:+.2f}%</div></div>
+            metric_html = '<div style="background:#111; padding:12px; border-radius:6px; border:1px solid #1F1F1F; margin-bottom:15px;">' \
+                          f'<div class="metric-label" style="font-size:10px; color:#555; font-weight:700;">Exchange Tape Metrics — {name} ({st.session_state.current_ticker})</div>' \
+                          '<div class="metric-grid">' \
+                          f'<div class="metric-card"><div class="metric-label">Price</div><div class="metric-value">${p:,.2f}</div></div>' \
