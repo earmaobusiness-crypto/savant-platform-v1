@@ -55,6 +55,13 @@ st.markdown(
         .message-turn {
             margin-bottom: 8px;
         }
+        .inline-turn-block {
+            border: 1px solid #1A1A1A;
+            border-radius: 10px;
+            padding: 12px 14px;
+            margin: 4px 0 18px;
+            background: #0E0E0E;
+        }
         .stButton>button {
             background-color: #121212 !important;
             color: #8E8E93 !important;
@@ -117,6 +124,8 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "active_tickers" not in st.session_state:
     st.session_state.active_tickers = []
+if "banned_tickers" not in st.session_state:
+    st.session_state.banned_tickers = []
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -132,8 +141,35 @@ TICKER_IGNORE = {
     "GIVE", "SOME", "SHOW", "CHART", "MORE", "AGAIN", "VIEW", "PLOT",
     "WHERE", "WILL", "JUST", "LIKE", "THAN", "THEN", "THEY", "HAVE", "BEEN",
     "STOCK", "SHARE", "ABOUT", "INTO", "OVER", "ALSO", "ONLY", "VERY", "MUCH", "ME",
-    "VS", "VERSUS", "OPEN",
+    "VS", "VERSUS", "OPEN", "TALK", "STUFF", "STOP", "WORD", "THINK", "KNOW",
+    "WANT", "NEED", "MAKE", "TAKE", "COME", "GO", "GOES", "WENT", "SAID", "SAYS",
+    "CALL", "CALM", "COOL", "REAL", "TRUE", "FALSE", "HELP", "PLEASE", "SORRY",
+    "THANK", "THANKS", "YEAH", "YES", "NOPE", "NICE", "GOOD", "BAD", "OKAY", "OK",
+    "MAN", "BRO", "DUDE", "LMAO", "LOL", "HATE", "LOVE", "FEEL", "GUESS", "MAYBE",
+    "KIND", "SORT", "TYPE", "THING", "STILL", "EVEN", "EVER", "NEVER", "ALWAYS",
+    "HERE", "THERE", "THESE", "THOSE", "DONE", "DOING", "BEEN", "BEING", "WERE",
+    "ISNT", "DONT", "CANT", "WONT", "IM", "YOURE", "THEYRE", "WE", "US", "HE", "SHE",
+    "IT", "MY", "MINE", "HIS", "HER", "ITS", "OUR", "YOURS", "THEIRS", "AM", "AN",
+    "AT", "BE", "BY", "DO", "GO", "IF", "IN", "IS", "IT", "MY", "NO", "OF", "ON",
+    "OR", "SO", "TO", "UP", "WE", "AS", "IF", "SO", "TO", "UP", "US", "AM", "AN",
 }
+CORRECTION_SIGNALS = re.compile(
+    r"(?:not\s+a\s+(?:stock|ticker|symbol|equity)|isn['']?t\s+a\s+(?:stock|ticker|symbol)|"
+    r"stop\s+(?:looking\s+up|searching|checking|using)|don['']?t\s+(?:look\s+up|search|check)|"
+    r"do\s+not\s+(?:look\s+up|search|check)|wrong\s+(?:ticker|symbol|stock)|"
+    r"that\s+(?:word|isn['']?t|is\s+not)|quit\s+looking|leave\s+that\s+word)",
+    re.I,
+)
+EXPLICIT_ASSET_RE = re.compile(
+    r"\b(?:ticker|symbol|stock|stocks|shares?|equity|equities|analyze|analyse|scan|"
+    r"look\s+at|check|watch|track|quote|quotes)\s+[\$]?([A-Za-z]{1,5})\b",
+    re.I,
+)
+EXCHANGE_TICKER_RE = re.compile(
+    r"\b(NASDAQ|NYSE|AMEX|NYSEARCA|BATS):([A-Za-z]{1,5})\b", re.I
+)
+VS_SPLIT_RE = re.compile(r"\b(?:vs\.?|versus)\b", re.I)
+STANDALONE_TICKER_RE = re.compile(r"^[\$]?([A-Za-z]{2,5})$")
 YF_EXCHANGE_MAP = {
     "NMS": "NASDAQ", "NGM": "NASDAQ", "NCM": "NASDAQ", "NAS": "NASDAQ", "BTS": "NASDAQ",
     "NYQ": "NYSE", "NYS": "NYSE", "ASE": "AMEX", "AMX": "AMEX", "PCX": "NYSEARCA", "ARC": "NYSEARCA",
@@ -159,6 +195,10 @@ MODE_HINTS = {
     "compare": (
         "\n[MODE: SMART_COMPARE — Structure the reply as: **Shared Ground** → **Side by Side** "
         "→ **Where They Diverge**. Be direct and comparative.]"
+    ),
+    "correction": (
+        "\n[MODE: CORRECTION — The user rejected a false ticker match. Respond conversationally. "
+        "Do NOT pull market data, repeat the mistaken symbol analysis, or re-run any asset block.]"
     ),
 }
 
@@ -186,7 +226,9 @@ def is_initial_ticker_query(text: str, tickers: list[str]) -> bool:
     return len(words) == 0
 
 
-def classify_turn_mode(text: str, tickers: list[str], casual: bool) -> str | None:
+def classify_turn_mode(text: str, tickers: list[str], casual: bool, correction: bool) -> str | None:
+    if correction:
+        return "correction"
     if casual:
         return "chitchat"
     if len(tickers) >= 2:
@@ -202,29 +244,87 @@ def classify_turn_mode(text: str, tickers: list[str], casual: bool) -> str | Non
     return None
 
 
+def is_correction_intent(text: str) -> bool:
+    return bool(CORRECTION_SIGNALS.search(text))
+
+
+def is_ticker_allowed(raw: str, cash_tagged: bool = False) -> bool:
+    key = bare_ticker(raw)
+    if key in st.session_state.banned_tickers:
+        return False
+    if cash_tagged:
+        return len(key) >= 1
+    return key not in TICKER_IGNORE
+
+
+def apply_correction(text: str) -> list[str]:
+    """Drop rejected symbols from active tracking and ban them from future scraping."""
+    removed: list[str] = []
+    mentioned = {w.upper() for w in re.findall(r"\b([A-Za-z]{2,5})\b", text)}
+
+    for tk in list(st.session_state.active_tickers):
+        if bare_ticker(tk) in mentioned:
+            removed.append(bare_ticker(tk))
+
+    if not removed and st.session_state.active_tickers:
+        removed = bare_set(st.session_state.active_tickers)
+
+    for sym in removed:
+        if sym not in st.session_state.banned_tickers:
+            st.session_state.banned_tickers.append(sym)
+
+    st.session_state.active_tickers = [
+        t for t in st.session_state.active_tickers if bare_ticker(t) not in removed
+    ]
+    return removed
+
+
 def extract_all_tickers(text: str) -> list[str]:
-    text = text.upper()
-    if is_casual_intent(text):
+    if is_casual_intent(text) or is_correction_intent(text):
         return []
 
     found: list[str] = []
     seen: set[str] = set()
 
-    def add(raw: str) -> None:
+    def add(raw: str, cash_tagged: bool = False) -> None:
         key = bare_ticker(raw)
-        if key not in TICKER_IGNORE and key not in seen:
+        if is_ticker_allowed(raw, cash_tagged) and key not in seen:
             seen.add(key)
             found.append(raw.upper() if ":" in raw else key)
 
-    for match in re.finditer(r"\b(NASDAQ|NYSE|AMEX|NYSEARCA|BATS):([A-Za-z]{1,5})\b", text, re.I):
-        add(f"{match.group(1).upper()}:{match.group(2).upper()}")
+    for match in EXCHANGE_TICKER_RE.finditer(text):
+        add(f"{match.group(1).upper()}:{match.group(2).upper()}", cash_tagged=True)
     for match in CASH_TAG_RE.finditer(text):
-        add(match.group(1).upper())
+        add(match.group(1).upper(), cash_tagged=True)
     for match in PARENS_TICKER_RE.finditer(text):
-        add(match.group(1).upper())
-    for word in re.findall(r"\b[A-Za-z]{2,5}\b", text.upper()):
-        if word not in TICKER_IGNORE:
-            add(word)
+        add(match.group(1).upper(), cash_tagged=True)
+    for match in EXPLICIT_ASSET_RE.finditer(text):
+        add(match.group(1).upper(), cash_tagged=True)
+
+    if VS_SPLIT_RE.search(text) or COMPARE_SIGNALS.search(text):
+        segments = VS_SPLIT_RE.split(text)
+        for segment in segments:
+            for match in CASH_TAG_RE.finditer(segment):
+                add(match.group(1).upper(), cash_tagged=True)
+            for match in EXPLICIT_ASSET_RE.finditer(segment):
+                add(match.group(1).upper(), cash_tagged=True)
+            for match in EXCHANGE_TICKER_RE.finditer(segment):
+                add(f"{match.group(1).upper()}:{match.group(2).upper()}", cash_tagged=True)
+            seg = segment.strip()
+            solo = STANDALONE_TICKER_RE.match(seg)
+            if solo and not solo.group(0).startswith("$"):
+                add(solo.group(1).upper())
+
+    stripped = text.strip()
+    if stripped.startswith("$"):
+        cash = CASH_TAG_RE.search(stripped)
+        if cash:
+            add(cash.group(1).upper(), cash_tagged=True)
+    else:
+        solo = STANDALONE_TICKER_RE.match(stripped)
+        if solo:
+            add(solo.group(1).upper())
+
     return found[:3]
 
 
@@ -398,16 +498,16 @@ def reset_groq_context_for_new_assets() -> None:
     st.session_state.llm_memory = st.session_state.llm_memory[:1]
 
 
-def should_spawn_chart(tickers: list[str], casual: bool) -> tuple[bool, list[str]]:
-    """Only mint a new inline chart row when a brand-new asset set is requested."""
-    if casual or not tickers:
+def should_spawn_chart(tickers: list[str], casual: bool, correction: bool) -> tuple[bool, list[str]]:
+    """Mint a fresh inline chart only when a new explicit asset enters the stream."""
+    if casual or correction or not tickers:
         return False, []
 
     chart_tickers = tickers[:3]
     active = bare_set(st.session_state.active_tickers)
 
     if len(chart_tickers) == 1:
-        if bare_ticker(chart_tickers[0]) in active:
+        if active == bare_set(chart_tickers):
             return False, []
         return True, chart_tickers
 
@@ -416,7 +516,12 @@ def should_spawn_chart(tickers: list[str], casual: bool) -> tuple[bool, list[str
     return True, chart_tickers
 
 
-def resolve_inject_tickers(tickers: list[str], casual: bool, spawn_chart: bool, chart_tickers: list[str]) -> list[str]:
+def resolve_inject_tickers(
+    tickers: list[str], casual: bool, correction: bool, spawn_chart: bool, chart_tickers: list[str]
+) -> list[str]:
+    if correction:
+        return []
+
     if casual:
         return st.session_state.active_tickers[:] if st.session_state.active_tickers else []
 
@@ -437,15 +542,22 @@ def handle_user_message(user_raw_input: str) -> None:
         return
 
     casual = is_casual_intent(user_raw_input)
-    tickers = [] if casual else extract_all_tickers(user_raw_input)
-    turn_mode = classify_turn_mode(user_raw_input, tickers, casual)
-    spawn_chart, chart_tickers = should_spawn_chart(tickers, casual)
-    inject_tickers = resolve_inject_tickers(tickers, casual, spawn_chart, chart_tickers)
+    correction = is_correction_intent(user_raw_input)
+    if correction:
+        apply_correction(user_raw_input)
+
+    tickers = [] if casual or correction else extract_all_tickers(user_raw_input)
+    turn_mode = classify_turn_mode(user_raw_input, tickers, casual, correction)
+    spawn_chart, chart_tickers = should_spawn_chart(tickers, casual, correction)
+    inject_tickers = resolve_inject_tickers(
+        tickers, casual, correction, spawn_chart, chart_tickers
+    )
 
     st.session_state.chat_history.append({"speaker": "You", "text": user_raw_input})
     st.session_state.llm_memory.append({"role": "user", "content": user_raw_input})
 
-    ai_analysis = run_groq_analysis(inject_tickers, casual, turn_mode)
+    skip_data = casual or correction
+    ai_analysis = run_groq_analysis(inject_tickers, skip_data, turn_mode)
     st.session_state.llm_memory.append({"role": "assistant", "content": ai_analysis})
 
     savant_turn: dict = {
@@ -469,6 +581,7 @@ with reset_col:
     if st.button("RESET MEMORY", key="clean_memory_cta", use_container_width=True):
         st.session_state.chat_history = []
         st.session_state.active_tickers = []
+        st.session_state.banned_tickers = []
         st.session_state.llm_memory = [{"role": "system", "content": SYSTEM_PROMPT}]
         st.rerun()
 
@@ -493,6 +606,7 @@ else:
             msg_id = msg.get("msg_id", f"msg_{idx}")
             labels = ", ".join(bare_ticker(t) for t in chart_tickers)
 
+            st.markdown('<div class="inline-turn-block">', unsafe_allow_html=True)
             col_text, col_chart = st.columns([1.05, 0.95], gap="medium")
             with col_text:
                 st.markdown(msg.get("ai_text") or msg.get("text", ""))
@@ -501,7 +615,7 @@ else:
                 st.markdown(
                     f'<div style="font-size:10px;color:#555;text-transform:uppercase;'
                     f'letter-spacing:0.08em;font-weight:700;margin-bottom:6px;">'
-                    f"Locked Chart — {labels}</div>",
+                    f"Inline Chart — {labels}</div>",
                     unsafe_allow_html=True,
                 )
                 tf_cols = st.columns(6)
@@ -516,6 +630,7 @@ else:
                     340,
                     f"chart_{msg_id}_{interval}",
                 )
+            st.markdown("</div>", unsafe_allow_html=True)
         else:
             st.markdown(msg.get("ai_text") or msg.get("text", ""))
 
