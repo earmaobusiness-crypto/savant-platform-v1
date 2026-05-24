@@ -66,6 +66,8 @@ if "current_ticker" not in st.session_state:
     st.session_state.current_ticker = None
 if "timeframe" not in st.session_state:
     st.session_state.timeframe = "D"
+if "text_field_buffer" not in st.session_state:
+    st.session_state.text_field_buffer = ""
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -144,8 +146,8 @@ def run_groq(messages: list[dict]) -> str:
         return f"Core System Interruption: {err}"
 
 
-def process_chat_submission(user_text: str) -> None:
-    user_text = user_text.strip()
+def process_chat_submission() -> None:
+    user_text = st.session_state.text_field_buffer.strip()
     if not user_text:
         return
 
@@ -168,6 +170,12 @@ def process_chat_submission(user_text: str) -> None:
     ai_text = run_groq(groq_msgs)
     st.session_state.llm_memory.append({"role": "assistant", "content": ai_text})
     st.session_state.chat_history.append({"speaker": "Savant", "text": ai_text})
+    st.session_state.text_field_buffer = ""
+
+
+if st.session_state.pop("_pending_chat_submit", False):
+    with st.spinner("Savant processing live data layers..."):
+        process_chat_submission()
 
 
 col_chart_side, col_chat_side = st.columns([1.1, 0.9])
@@ -191,6 +199,7 @@ with col_chat_side:
         if st.button("RESET MEMORY", use_container_width=True):
             st.session_state.chat_history = []
             st.session_state.current_ticker = None
+            st.session_state.text_field_buffer = ""
             st.session_state.llm_memory = [{"role": "system", "content": SYSTEM_PROMPT}]
             st.rerun()
 
@@ -230,13 +239,14 @@ with col_chat_side:
                 unsafe_allow_html=True,
             )
 
-    with st.form("chat_form", clear_on_submit=True):
-        user_text = st.text_input(
+    with st.form("chat_form", clear_on_submit=False):
+        st.text_input(
             "Input",
+            key="text_field_buffer",
             placeholder="Ask Savant anything...",
             label_visibility="collapsed",
         )
         submitted = st.form_submit_button("Send")
-        if submitted and user_text.strip():
-            with st.spinner("Savant processing live data layers..."):
-                process_chat_submission(user_text.strip())
+        if submitted and st.session_state.text_field_buffer.strip():
+            st.session_state._pending_chat_submit = True
+            st.rerun()
