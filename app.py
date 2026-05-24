@@ -66,8 +66,6 @@ if "current_ticker" not in st.session_state:
     st.session_state.current_ticker = None
 if "timeframe" not in st.session_state:
     st.session_state.timeframe = "D"
-if "text_field_buffer" not in st.session_state:
-    st.session_state.text_field_buffer = ""
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -193,7 +191,6 @@ with col_chat_side:
         if st.button("RESET MEMORY", use_container_width=True):
             st.session_state.chat_history = []
             st.session_state.current_ticker = None
-            st.session_state.text_field_buffer = ""
             st.session_state.llm_memory = [{"role": "system", "content": SYSTEM_PROMPT}]
             st.rerun()
 
@@ -233,12 +230,13 @@ with col_chat_side:
                 unsafe_allow_html=True,
             )
 
-    with st.form("chat_form", clear_on_submit=False):
-        st.text_input("Input", key="text_field_buffer", placeholder="Ask Savant anything...",
-                      label_visibility="collapsed")
+    with st.form("chat_form", clear_on_submit=True):
+        user_text = st.text_input(
+            "Input",
+            placeholder="Ask Savant anything...",
+            label_visibility="collapsed",
+        )
         submitted = st.form_submit_button("Send")
-        if submitted and st.session_state.text_field_buffer.strip():
+        if submitted and user_text.strip():
             with st.spinner("Savant processing live data layers..."):
-                process_chat_submission(st.session_state.text_field_buffer.strip())
-            st.session_state.text_field_buffer = ""
-            st.rerun()
+                process_chat_submission(user_text.strip())
