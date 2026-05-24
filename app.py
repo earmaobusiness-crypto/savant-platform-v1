@@ -25,9 +25,9 @@ st.markdown(
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         }
         .block-container {
-            max-width: 960px !important;
-            padding-top: 2rem !important;
-            padding-bottom: 120px !important;
+            max-width: 100% !important;
+            padding-top: 1rem !important;
+            padding-bottom: 2rem !important;
         }
         div[data-testid="stTextInput"] input {
             background-color: #1A1A1A !important;
@@ -52,15 +52,25 @@ st.markdown(
         }
         .speaker-you { color: #666666; }
         .speaker-savant { color: #FFFFFF; }
-        .message-turn {
-            margin-bottom: 8px;
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+            margin: 12px 0;
         }
-        .inline-turn-block {
-            border: 1px solid #1A1A1A;
-            border-radius: 10px;
-            padding: 12px 14px;
-            margin: 4px 0 18px;
-            background: #0E0E0E;
+        .metric-card {
+            background: #111111;
+            border: 1px solid #1F1F1F;
+            border-radius: 4px;
+            padding: 6px 10px;
+            text-align: center;
+        }
+        .metric-label {
+            font-size: 8px; color: #555555; text-transform: uppercase;
+            letter-spacing: 0.05em; font-weight: 700;
+        }
+        .metric-value {
+            font-size: 14px; font-weight: 600; color: #FFFFFF; margin-top: 2px;
         }
         .stButton>button {
             background-color: #121212 !important;
@@ -78,22 +88,6 @@ st.markdown(
         }
         div[data-testid="stForm"] button[data-testid="stFormSubmitButton"] {
             display: none !important;
-        }
-        div[data-testid="stForm"] {
-            position: fixed !important;
-            bottom: 0 !important;
-            left: 0 !important;
-            right: 0 !important;
-            background: #0B0B0B !important;
-            border-top: 1px solid #1A1A1A !important;
-            padding: 16px 24px 24px !important;
-            z-index: 999 !important;
-            max-width: 960px !important;
-            margin: 0 auto !important;
-        }
-        div[data-testid="stForm"] [data-testid="stTextInput"] {
-            max-width: 960px !important;
-            margin: 0 auto !important;
         }
     </style>
     """,
@@ -128,6 +122,10 @@ if "banned_tickers" not in st.session_state:
     st.session_state.banned_tickers = []
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [{"role": "system", "content": SYSTEM_PROMPT}]
+if "timeframe" not in st.session_state:
+    st.session_state.timeframe = "D"
+if "text_field_buffer" not in st.session_state:
+    st.session_state.text_field_buffer = ""
 
 TF_MAP = {"5m": "5", "15m": "15", "1H": "60", "1D": "D", "1W": "W", "1M": "M"}
 COMPARE_COLORS = ["#2962FF", "#FF6D00", "#AB47BC"]
@@ -255,6 +253,10 @@ def is_ticker_allowed(raw: str, cash_tagged: bool = False) -> bool:
     if cash_tagged:
         return len(key) >= 1
     return key not in TICKER_IGNORE
+
+
+def reset_groq_context_for_new_assets() -> None:
+    st.session_state.llm_memory = st.session_state.llm_memory[:1]
 
 
 def apply_correction(text: str) -> list[str]:
@@ -496,30 +498,22 @@ def run_groq_analysis(inject_tickers: list[str], casual: bool, turn_mode: str | 
         return f"Core System Interruption: {error_str}"
 
 
-def reset_groq_context_for_new_assets() -> None:
-    st.session_state.llm_memory = st.session_state.llm_memory[:1]
-
-
-def should_spawn_chart(tickers: list[str], casual: bool, correction: bool) -> tuple[bool, list[str]]:
-    """Mint a fresh inline chart only when a new explicit asset enters the stream."""
+def panel_should_swap(tickers: list[str], casual: bool, correction: bool) -> bool:
+    """Swap left-panel chart only when a brand-new asset set is requested."""
     if casual or correction or not tickers:
-        return False, []
+        return False
 
     chart_tickers = tickers[:3]
     active = bare_set(st.session_state.active_tickers)
 
     if len(chart_tickers) == 1:
-        if active == bare_set(chart_tickers):
-            return False, []
-        return True, chart_tickers
+        return active != bare_set(chart_tickers)
 
-    if sorted(bare_set(chart_tickers)) == sorted(active):
-        return False, []
-    return True, chart_tickers
+    return sorted(bare_set(chart_tickers)) != sorted(active)
 
 
 def resolve_inject_tickers(
-    tickers: list[str], casual: bool, correction: bool, spawn_chart: bool, chart_tickers: list[str]
+    tickers: list[str], casual: bool, correction: bool, panel_swap: bool, chart_tickers: list[str]
 ) -> list[str]:
     if correction:
         return []
@@ -527,7 +521,7 @@ def resolve_inject_tickers(
     if casual:
         return st.session_state.active_tickers[:] if st.session_state.active_tickers else []
 
-    if spawn_chart:
+    if panel_swap:
         reset_groq_context_for_new_assets()
         st.session_state.active_tickers = chart_tickers
         return chart_tickers
@@ -538,7 +532,8 @@ def resolve_inject_tickers(
     return st.session_state.active_tickers[:]
 
 
-def handle_user_message(user_raw_input: str) -> None:
+def process_chat_submission(user_raw_input: str) -> None:
+    """Run full scrape + Groq pipeline and append to history. Caller clears input after."""
     user_raw_input = user_raw_input.strip()
     if not user_raw_input:
         return
@@ -549,10 +544,11 @@ def handle_user_message(user_raw_input: str) -> None:
         apply_correction(user_raw_input)
 
     tickers = [] if casual or correction else extract_all_tickers(user_raw_input)
+    chart_tickers = tickers[:3] if tickers else []
+    panel_swap = panel_should_swap(tickers, casual, correction)
     turn_mode = classify_turn_mode(user_raw_input, tickers, casual, correction)
-    spawn_chart, chart_tickers = should_spawn_chart(tickers, casual, correction)
     inject_tickers = resolve_inject_tickers(
-        tickers, casual, correction, spawn_chart, chart_tickers
+        tickers, casual, correction, panel_swap, chart_tickers
     )
 
     st.session_state.chat_history.append({"speaker": "You", "text": user_raw_input})
@@ -561,90 +557,110 @@ def handle_user_message(user_raw_input: str) -> None:
     skip_data = casual or correction
     ai_analysis = run_groq_analysis(inject_tickers, skip_data, turn_mode)
     st.session_state.llm_memory.append({"role": "assistant", "content": ai_analysis})
-
-    savant_turn: dict = {
-        "speaker": "Savant",
-        "text": ai_analysis,
-        "ai_text": ai_analysis,
-    }
-    if spawn_chart:
-        savant_turn["chart_tickers"] = chart_tickers
-        savant_turn["current_tf"] = "D"
-        savant_turn["msg_id"] = f"msg_{len(st.session_state.chat_history)}"
-
-    st.session_state.chat_history.append(savant_turn)
-
-
-# ── CONTINUOUS GEMINI-STYLE CHAT STREAM ──────────────────────────────────────
-st.markdown("<div class='chat-panel'>", unsafe_allow_html=True)
-
-_, reset_col = st.columns([0.75, 0.25])
-with reset_col:
-    if st.button("RESET MEMORY", key="clean_memory_cta", use_container_width=True):
-        st.session_state.chat_history = []
-        st.session_state.active_tickers = []
-        st.session_state.banned_tickers = []
-        st.session_state.llm_memory = [{"role": "system", "content": SYSTEM_PROMPT}]
-        st.rerun()
-
-if not st.session_state.chat_history:
-    st.markdown("<div style='height:18vh;'></div>", unsafe_allow_html=True)
-    st.markdown(
-        "<div style='text-align:center;color:#222;font-size:26px;font-weight:300;"
-        "letter-spacing:0.04em;'>Savant Apprentice</div>",
-        unsafe_allow_html=True,
+    st.session_state.chat_history.append(
+        {"speaker": "Savant", "text": ai_analysis, "ai_text": ai_analysis}
     )
-else:
-    for idx, msg in enumerate(st.session_state.chat_history):
-        label_class = "speaker-you" if msg["speaker"] == "You" else "speaker-savant"
+
+
+# ── SPLIT-SCREEN: chart left | chat + metrics right ───────────────────────────
+col_chart_side, col_chat_side = st.columns([1.1, 0.9])
+
+with col_chart_side:
+    if st.session_state.active_tickers:
+        labels = ", ".join(bare_ticker(t) for t in st.session_state.active_tickers)
         st.markdown(
-            f'<div class="speaker-label {label_class}">{msg["speaker"]}</div>',
+            f'<div style="font-size:11px;color:#555;text-transform:uppercase;'
+            f'letter-spacing:0.08em;font-weight:700;margin-bottom:8px;">'
+            f"Live Chart — {labels}</div>",
+            unsafe_allow_html=True,
+        )
+        tf_cols = st.columns(6)
+        for i, t_label in enumerate(TF_MAP):
+            with tf_cols[i]:
+                if st.button(t_label, key=f"panel_tf_{t_label}"):
+                    st.session_state.timeframe = TF_MAP[t_label]
+                    st.rerun()
+        frame_id = f"panel_{'_'.join(bare_set(st.session_state.active_tickers))}_{st.session_state.timeframe}"
+        render_message_chart(
+            st.session_state.active_tickers,
+            st.session_state.timeframe,
+            500,
+            frame_id,
+        )
+    else:
+        st.markdown("<div style='height:14vh;'></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='text-align:center;color:#333;font-size:13px;font-weight:300;'>"
+            "Chart panel armed. Enter a ticker in the chat terminal.</div>",
             unsafe_allow_html=True,
         )
 
-        if msg["speaker"] == "Savant" and msg.get("chart_tickers"):
-            chart_tickers = msg["chart_tickers"]
-            interval = msg.get("current_tf", "D")
-            msg_id = msg.get("msg_id", f"msg_{idx}")
-            labels = ", ".join(bare_ticker(t) for t in chart_tickers)
+with col_chat_side:
+    st.markdown("<div class='chat-panel'>", unsafe_allow_html=True)
 
-            st.markdown('<div class="inline-turn-block">', unsafe_allow_html=True)
-            col_text, col_chart = st.columns([1.05, 0.95], gap="medium")
-            with col_text:
-                st.markdown(msg.get("ai_text") or msg.get("text", ""))
+    _, reset_col = st.columns([0.7, 0.3])
+    with reset_col:
+        if st.button("RESET MEMORY", key="clean_memory_cta", use_container_width=True):
+            st.session_state.chat_history = []
+            st.session_state.active_tickers = []
+            st.session_state.banned_tickers = []
+            st.session_state.llm_memory = [{"role": "system", "content": SYSTEM_PROMPT}]
+            st.session_state.text_field_buffer = ""
+            st.rerun()
 
-            with col_chart:
-                st.markdown(
-                    f'<div style="font-size:10px;color:#555;text-transform:uppercase;'
-                    f'letter-spacing:0.08em;font-weight:700;margin-bottom:6px;">'
-                    f"Inline Chart — {labels}</div>",
-                    unsafe_allow_html=True,
-                )
-                tf_cols = st.columns(6)
-                for i, t_label in enumerate(TF_MAP):
-                    with tf_cols[i]:
-                        if st.button(t_label, key=f"tf_{msg_id}_{t_label}"):
-                            st.session_state.chat_history[idx]["current_tf"] = TF_MAP[t_label]
-                            st.rerun()
-                render_message_chart(
-                    chart_tickers,
-                    interval,
-                    340,
-                    f"chart_{msg_id}_{interval}",
-                )
-            st.markdown("</div>", unsafe_allow_html=True)
-        else:
+    if st.session_state.active_tickers and len(st.session_state.active_tickers) == 1:
+        p, pct, v, vw, name = get_live_tape_data(st.session_state.active_tickers[0])
+        st.markdown(
+            f"""
+            <div style="background:#111;padding:12px;border-radius:6px;border:1px solid #1F1F1F;margin-bottom:12px;">
+                <div class="metric-label" style="font-size:10px;color:#555;font-weight:700;">
+                    Exchange Tape Metrics — {name} ({bare_ticker(st.session_state.active_tickers[0])})
+                </div>
+                <div class="metric-grid">
+                    <div class="metric-card"><div class="metric-label">Price</div>
+                        <div class="metric-value">${p:,.2f}</div></div>
+                    <div class="metric-card"><div class="metric-label">Change</div>
+                        <div class="metric-value" style="color:{'#34C759' if pct >= 0 else '#FF3B30'}">{pct:+.2f}%</div></div>
+                    <div class="metric-card"><div class="metric-label">Volume</div>
+                        <div class="metric-value" style="font-size:12px;">{v}</div></div>
+                    <div class="metric-card"><div class="metric-label">Sess. VWAP</div>
+                        <div class="metric-value">{vw}</div></div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    if not st.session_state.chat_history:
+        st.markdown("<div style='height:10vh;'></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='text-align:center;color:#222;font-size:22px;font-weight:300;"
+            "letter-spacing:0.04em;'>Savant Apprentice</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        for msg in st.session_state.chat_history:
+            label_class = "speaker-you" if msg["speaker"] == "You" else "speaker-savant"
+            st.markdown(
+                f'<div class="speaker-label {label_class}">{msg["speaker"]}</div>',
+                unsafe_allow_html=True,
+            )
             st.markdown(msg.get("ai_text") or msg.get("text", ""))
 
-with st.form("chat_form", clear_on_submit=True):
-    user_text = st.text_input(
-        "Input",
-        placeholder="Ask Savant anything... No filters active.",
-        label_visibility="collapsed",
-    )
-    submitted = st.form_submit_button("Send")
-    if submitted and user_text.strip():
-        with st.spinner("Savant processing live data layers..."):
-            handle_user_message(user_text.strip())
+    with st.form("chat_form", clear_on_submit=False):
+        st.text_input(
+            "Input",
+            key="text_field_buffer",
+            placeholder="Ask Savant anything... No filters active.",
+            label_visibility="collapsed",
+        )
+        submitted = st.form_submit_button("Send", use_container_width=True)
+        if submitted:
+            pending = st.session_state.text_field_buffer.strip()
+            if pending:
+                with st.spinner("Savant processing live data layers..."):
+                    process_chat_submission(pending)
+                st.session_state.text_field_buffer = ""
+                st.rerun()
 
-st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
