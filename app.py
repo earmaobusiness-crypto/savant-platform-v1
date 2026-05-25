@@ -1,10 +1,27 @@
 import re
+import statistics
 import urllib.parse
+from difflib import SequenceMatcher
+from xml.etree import ElementTree
 
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 import yfinance as yf
 from groq import Groq
+
+SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
+SECTOR_ETFS = [
+    ("XLK", "Technology"), ("XLF", "Financials"), ("XLE", "Energy"), ("XLV", "Health Care"),
+    ("XLU", "Utilities"), ("XLP", "Consumer Staples"), ("XLY", "Consumer Discretionary"),
+    ("XLI", "Industrials"), ("XLB", "Materials"), ("XLRE", "Real Estate"), ("XLC", "Communication"),
+]
+TOKEN_GUARD = (
+    "[TOKEN PROTOCOL: Process exclusively raw analytics from the payload. "
+    "Eliminate conversational fluff. Maximum density output only.]"
+)
+PRIMARY_MODEL = "llama-3.3-70b-versatile"
+FALLBACK_MODEL = "llama3-8b-8192"
 
 # 1. Premium UI Real Estate Layout Configuration
 st.set_page_config(
@@ -83,6 +100,9 @@ if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "current_ticker" not in st.session_state: st.session_state.current_ticker = None
 if "timeframe" not in st.session_state: st.session_state.timeframe = "D"
 if "text_field_buffer" not in st.session_state: st.session_state.text_field_buffer = ""
+if "active_news_wire" not in st.session_state: st.session_state.active_news_wire = []
+if "sector_rotation_context" not in st.session_state: st.session_state.sector_rotation_context = ""
+if "data_payload_string" not in st.session_state: st.session_state.data_payload_string = ""
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [
         {
@@ -117,50 +137,251 @@ def extract_ticker(text):
     return None
 
 
+def _headline_similar(a: str, b: str) -> float:
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def _dedupe_headlines(headlines: list[str], limit: int = 6) -> list[str]:
+    unique: list[str] = []
+    for headline in headlines:
+        clean = re.sub(r"\s+", " ", headline.strip())
+        if not clean or len(clean) < 12:
+            continue
+        if any(_headline_similar(clean, kept) >= 0.82 for kept in unique):
+            continue
+        unique.append(clean)
+        if len(unique) >= limit:
+            break
+    return unique
+
+
+def _fetch_news_wire(ticker: str) -> list[str]:
+    headlines: list[str] = []
+    try:
+        for item in (yf.Ticker(ticker).news or [])[:12]:
+            title = item.get("title", "")
+            if title:
+                headlines.append(title)
+    except Exception:
+        pass
+    try:
+        q = urllib.parse.quote(f"{ticker} stock", safe="")
+        rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+        resp = requests.get(rss_url, timeout=8, headers={"User-Agent": SEC_HEADERS["User-Agent"]})
+        if resp.ok:
+            root = ElementTree.fromstring(resp.content)
+            for node in root.findall(".//item/title")[:12]:
+                if node.text:
+                    headlines.append(node.text.strip())
+    except Exception:
+        pass
+    return _dedupe_headlines(headlines, limit=6)
+
+
+def _fetch_sector_rotation() -> str:
+    flows: list[tuple[str, str, float]] = []
+    for sym, label in SECTOR_ETFS:
+        try:
+            info = yf.Ticker(sym).info or {}
+            chg = info.get("regularMarketChangePercent")
+            if chg is None and info.get("regularMarketPreviousClose"):
+                price = info.get("regularMarketPrice", info.get("currentPrice", 0.0)) or 0.0
+                prev = info.get("regularMarketPreviousClose") or 1.0
+                chg = ((price - prev) / prev) * 100
+            if chg is not None:
+                flows.append((sym, label, float(chg)))
+        except Exception:
+            continue
+    if not flows:
+        st.session_state.sector_rotation_context = "SECTOR_FLOW:UNAVAILABLE"
+        return st.session_state.sector_rotation_context
+    flows.sort(key=lambda x: x[2], reverse=True)
+    top = flows[0]
+    bottom = flows[-1]
+    ctx = (
+        f"SECTOR_FLOW|LEADER:{top[0]}({top[1]}){top[2]:+.2f}%|"
+        f"LAGGARD:{bottom[0]}({bottom[1]}){bottom[2]:+.2f}%|"
+        f"MATRIX:{';'.join(f'{s}:{p:+.2f}' for s, _, p in flows)}"
+    )
+    st.session_state.sector_rotation_context = ctx
+    return ctx
+
+
+def _fetch_sec_filings(ticker: str) -> str:
+    try:
+        idx = requests.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers=SEC_HEADERS,
+            timeout=10,
+        )
+        if not idx.ok:
+            return "SEC:IDX_FAIL"
+        cik = None
+        for entry in idx.json().values():
+            if str(entry.get("ticker", "")).upper() == ticker:
+                cik = str(entry.get("cik_str", "")).zfill(10)
+                break
+        if not cik:
+            return "SEC:NO_CIK"
+        sub = requests.get(
+            f"https://data.sec.gov/submissions/CIK{cik}.json",
+            headers=SEC_HEADERS,
+            timeout=10,
+        )
+        if not sub.ok:
+            return "SEC:SUB_FAIL"
+        recent = sub.json().get("filings", {}).get("recent", {})
+        forms, dates = recent.get("form", []), recent.get("filingDate", [])
+        tags = [f"{forms[i]}:{dates[i]}" for i in range(min(3, len(forms)))]
+        return "SEC:" + "|".join(tags) if tags else "SEC:NONE"
+    except Exception:
+        return "SEC:ERR"
+
+
+def _compute_volatility_engine(ticker: str, price: float, session_vol: int) -> str:
+    try:
+        hist = yf.Ticker(ticker).history(period="1mo", interval="1d")
+        if hist is None or len(hist) < 10:
+            return "VOL:INSUFFICIENT_HIST|VOLMOM:NORMAL"
+        closes = [float(x) for x in hist["Close"].dropna().tolist()]
+        volumes = [float(x) for x in hist["Volume"].dropna().tolist()]
+        if len(closes) < 10:
+            return "VOL:INSUFFICIENT_HIST|VOLMOM:NORMAL"
+        window = closes[-20:] if len(closes) >= 20 else closes
+        mean = statistics.mean(window)
+        std = statistics.pstdev(window) if len(window) > 1 else 0.0
+        upper = mean + (2 * std)
+        lower = mean - (2 * std)
+        if price > upper:
+            band = "ABOVE_UPPER_2SD"
+            dev_pct = ((price - upper) / upper) * 100 if upper else 0.0
+        elif price < lower:
+            band = "BELOW_LOWER_2SD"
+            dev_pct = ((price - lower) / lower) * 100 if lower else 0.0
+        else:
+            band = "INSIDE_20D_CHANNEL"
+            mid = mean if mean else price
+            dev_pct = ((price - mid) / mid) * 100 if mid else 0.0
+        vol_slice = volumes[-6:-1] if len(volumes) >= 6 else volumes[:-1]
+        avg_vol = statistics.mean(vol_slice) if vol_slice else 0.0
+        cur_vol = float(session_vol or (volumes[-1] if volumes else 0))
+        ratio = (cur_vol / avg_vol) if avg_vol > 0 else 1.0
+        if ratio >= 2.0:
+            vol_mom = "EXPONENTIAL_ACCEL|ANOMALY_FLAG:HIGH"
+        elif ratio >= 1.35:
+            vol_mom = "ELEVATED|ANOMALY_FLAG:MEDIUM"
+        else:
+            vol_mom = "NORMAL|ANOMALY_FLAG:NONE"
+        return (
+            f"VOL|BAND:{band}|DEV:{dev_pct:+.2f}%|20D_MEAN:{mean:.2f}|"
+            f"UP:{upper:.2f}|DN:{lower:.2f}|VOLMOM:{vol_mom}|VEL_RATIO:{ratio:.2f}x"
+        )
+    except Exception:
+        return "VOL:CALC_ERR|VOLMOM:NORMAL"
+
+
+def _build_data_payload_string(
+    ticker: str, name: str, price: float, pct: float, vol: str, vw: str,
+    news: list[str], sector_ctx: str, vol_ctx: str, sec_ctx: str,
+) -> str:
+    wire = "||".join(news[:6]) if news else "NONE"
+    payload = (
+        f"12L|TK:{ticker}|CO:{name}|P:{price:.2f}|CHG:{pct:+.2f}%|V:{vol}|VW:{vw}|"
+        f"WIRE:{wire}|{sector_ctx}|{vol_ctx}|{sec_ctx}"
+    )
+    st.session_state.data_payload_string = payload
+    return payload
+
+
 def get_live_tape_data(ticker):
     if not ticker:
+        st.session_state.active_news_wire = []
+        st.session_state.sector_rotation_context = ""
+        st.session_state.data_payload_string = ""
         return 0.0, 0.0, "N/A", "N/A", "Unknown"
     try:
         ticker = ticker.upper()
-        info = yf.Ticker(ticker).info or {}
+        ytk = yf.Ticker(ticker)
+        info = ytk.info or {}
         name = info.get("longName", info.get("shortName", ticker))
-        price = info.get("currentPrice", info.get("regularMarketPrice", 0.0))
-        prev = info.get("regularMarketPreviousClose", 1.0)
-        pct = ((price - prev) / prev) * 100 if price else 0.0
-        raw_vol = info.get("volume", info.get("regularMarketVolume", 0))
+        price = float(info.get("currentPrice", info.get("regularMarketPrice", 0.0)) or 0.0)
+        prev = float(info.get("regularMarketPreviousClose", 1.0) or 1.0)
+        pct = ((price - prev) / prev) * 100 if price and prev else 0.0
+        raw_vol = int(info.get("volume", info.get("regularMarketVolume", 0)) or 0)
         vol = f"{raw_vol:,}" if raw_vol else "N/A"
-        high = info.get("dayHigh", price)
-        low = info.get("dayLow", price)
+        high = float(info.get("dayHigh", price) or price)
+        low = float(info.get("dayLow", price) or price)
         vwap_val = (high + low + price) / 3 if price else 0.0
-        return price, pct, vol, f"${vwap_val:.2f}" if vwap_val else "N/A", name
+        vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
+
+        st.session_state.active_news_wire = _fetch_news_wire(ticker)
+        sector_ctx = _fetch_sector_rotation()
+        vol_ctx = _compute_volatility_engine(ticker, price, raw_vol)
+        sec_ctx = _fetch_sec_filings(ticker)
+        _build_data_payload_string(
+            ticker, name, price, pct, vol, vw_str,
+            st.session_state.active_news_wire, sector_ctx, vol_ctx, sec_ctx,
+        )
+        return price, pct, vol, vw_str, name
     except Exception:
         return 0.0, 0.0, "N/A", "N/A", ticker
+
+
+def _groq_should_fallback(err: str) -> bool:
+    low = err.lower()
+    return (
+        "429" in err
+        or "rate" in low
+        or "limit" in low
+        or "token" in low
+        or "context" in low
+        or "exhaust" in low
+    )
 
 
 def run_groq(messages):
     if "GROQ_API_KEY" not in st.secrets:
         return "Security Core Offline. Add GROQ_API_KEY to `.streamlit/secrets.toml`."
-    try:
-        client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-        r = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
-            temperature=0.4,
-            max_tokens=1000,
-        )
-        return r.choices[0].message.content or "Savant returned an empty response."
-    except Exception as exc:
-        err = str(exc)
-        if "429" in err:
-            m = re.search(r"in\s+([0-9hms\.]+)", err)
-            wait_window = m.group(1) if m else "1h30m"
-            return (
-                "⚠️ **Savant Core Standby: Active Rate Limit Enforced.**\n\n"
-                f"• **Time Window Till Resumption:** **{wait_window}** exact remaining.\n\n"
-                "The text synthesis brain is currently locked in safety standby. "
-                "Your active left panel TradingView workspace remains operational."
+    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+    for model in (PRIMARY_MODEL, FALLBACK_MODEL):
+        try:
+            r = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.4,
+                max_tokens=1000,
             )
-        return f"Core System Interruption: {err}"
+            return r.choices[0].message.content or "Savant returned an empty response."
+        except Exception as exc:
+            err = str(exc)
+            if model == PRIMARY_MODEL and _groq_should_fallback(err):
+                continue
+            if "429" in err:
+                m = re.search(r"in\s+([0-9hms\.]+)", err)
+                wait_window = m.group(1) if m else "1h30m"
+                return (
+                    "⚠️ **Savant Core Standby: Active Rate Limit Enforced.**\n\n"
+                    f"• **Time Window Till Resumption:** **{wait_window}** exact remaining.\n\n"
+                    "The text synthesis brain is currently locked in safety standby. "
+                    "Your active left panel TradingView workspace remains operational."
+                )
+            return f"Core System Interruption: {err}"
+    return "Savant returned an empty response."
+
+
+def _build_groq_message_stack(user_text: str, payload: str) -> list[dict]:
+    system_msg = st.session_state.llm_memory[0]
+    dialog = [m for m in st.session_state.llm_memory[1:] if m["role"] in ("user", "assistant")]
+    recent = dialog[-3:] if len(dialog) > 3 else dialog
+    groq_msgs = [
+        {"role": "system", "content": f"{system_msg['content']}\n{TOKEN_GUARD}"},
+        *[{"role": m["role"], "content": m["content"]} for m in recent[:-1]],
+    ]
+    latest = user_text
+    if payload:
+        latest = f"{user_text}\n[12L_DATA_PAYLOAD]{payload}[/12L_DATA_PAYLOAD]"
+    groq_msgs.append({"role": "user", "content": latest})
+    return groq_msgs
 
 
 def process_chat_submission():
@@ -176,14 +397,12 @@ def process_chat_submission():
     st.session_state.chat_history.append({"speaker": "You", "text": user_text})
     st.session_state.llm_memory.append({"role": "user", "content": user_text})
 
-    groq_msgs = [{"role": m["role"], "content": m["content"]} for m in st.session_state.llm_memory]
-    if st.session_state.current_ticker and groq_msgs[-1]["role"] == "user":
-        p, pct, vol, vw, name = get_live_tape_data(st.session_state.current_ticker)
-        groq_msgs[-1]["content"] += (
-            f"\n[LIVE TRUTH: Ticker={st.session_state.current_ticker}, Company={name}, "
-            f"Price=${p:,.2f}, Change={pct:+.2f}%, Vol={vol}, VWAP={vw}]"
-        )
+    payload = ""
+    if st.session_state.current_ticker:
+        get_live_tape_data(st.session_state.current_ticker)
+        payload = st.session_state.data_payload_string
 
+    groq_msgs = _build_groq_message_stack(user_text, payload)
     ai_text = run_groq(groq_msgs)
     st.session_state.llm_memory.append({"role": "assistant", "content": ai_text})
     st.session_state.chat_history.append({"speaker": "Savant", "text": ai_text})
@@ -238,6 +457,9 @@ with col_chat_side:
             st.session_state.current_ticker = None
             st.session_state.text_field_buffer = ""
             st.session_state.llm_memory = st.session_state.llm_memory[:1]
+            st.session_state.active_news_wire = []
+            st.session_state.sector_rotation_context = ""
+            st.session_state.data_payload_string = ""
             st.rerun()
 
     if st.session_state.current_ticker:
