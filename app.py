@@ -102,7 +102,7 @@ if "llm_memory" not in st.session_state:
     ]
 
 def extract_ticker(text):
-    # FIXED: Strict raw capitalization filter destroys lowercase "are" or "how" traps
+    # Enforces strict raw capitalization to catch only written symbols like MLGO
     words = re.findall(r'\b[A-Z]{3,5}\b', text)
     ignore = ["ARE", "WHY", "HOW", "WHEN", "CAN", "WHAT", "YOUR", "INFO", "MOVE", "PRICE", "TRADE", "ASSET", "ALPHA", "BETA", "THIS", "LOOK", "THAT", "THEIR", "THEM", "WITH", "FROM", "JOKE", "TELL", "GIVE", "SOME", "SHOW", "CHART", "MORE", "AGAIN", "VIEW", "PLOT"]
     for w in words:
@@ -127,7 +127,7 @@ def get_live_tape_data(ticker):
         vwap_val = (high + low + price) / 3 if price else 0.0
         vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
 
-        # 12L ADVANCED BACK-END CONTEXT SCALERS
+        # 12L BACKEND CAPABILITIES
         headlines = []
         try:
             for item in stock.news[:8]:
@@ -159,7 +159,6 @@ def get_live_tape_data(ticker):
             pass
         st.session_state["volatility_math_metrics"] = f"Volume Status: {vol_anomaly}"
 
-        # FIXED: Enforced clean 5-variable tuple architecture prevents line 330 unpacking failures
         return price, pct, vol, vw_str, name
     except Exception:
         return 0.0, 0.0, "N/A", "N/A", str(ticker)
