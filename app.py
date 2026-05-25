@@ -80,9 +80,6 @@ if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "current_ticker" not in st.session_state: st.session_state.current_ticker = None
 if "timeframe" not in st.session_state: st.session_state.timeframe = "D"
 if "text_field_buffer" not in st.session_state: st.session_state.text_field_buffer = ""
-if "active_news_wire" not in st.session_state: st.session_state["active_news_wire"] = "No deployment news context active."
-if "sector_rotation_context" not in st.session_state: st.session_state["sector_rotation_context"] = "Sector matrix uninitialized."
-if "volatility_math_metrics" not in st.session_state: st.session_state["volatility_math_metrics"] = "Volatility metrics tracking baseline."
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [
         {
@@ -102,9 +99,10 @@ if "llm_memory" not in st.session_state:
     ]
 
 def extract_ticker(text):
-    # Enforces strict raw capitalization to catch only written symbols like MLGO
+    # FIXED: Scans original user text looking ONLY for raw uppercase words to kill lowercase hallucinations
     words = re.findall(r'\b[A-Z]{3,5}\b', text)
-    ignore = ["ARE", "WHY", "HOW", "WHEN", "CAN", "WHAT", "YOUR", "INFO", "MOVE", "PRICE", "TRADE", "ASSET", "ALPHA", "BETA", "THIS", "LOOK", "THAT", "THEIR", "THEM", "WITH", "FROM", "JOKE", "TELL", "GIVE", "SOME", "SHOW", "CHART", "MORE", "AGAIN", "VIEW", "PLOT"]
+    # Added ARE to explicitly safeguard conversational sentences from matching tickers
+    ignore = ["ARE", "WHAT", "YOUR", "INFO", "MOVE", "PRICE", "TRADE", "ASSET", "ALPHA", "BETA", "THIS", "LOOK", "THAT", "THEIR", "THEM", "WITH", "FROM", "JOKE", "TELL", "GIVE", "SOME", "SHOW", "CHART", "MORE", "AGAIN", "VIEW", "PLOT"]
     for w in words:
         if w not in ignore: return w
     return None
@@ -112,10 +110,9 @@ def extract_ticker(text):
 def get_live_tape_data(ticker):
     if not ticker: return 0.0, 0.0, "N/A", "N/A", "Unknown"
     try:
-        ticker = ticker.upper()
+        ticker = ticker.upper() # Keeps the core scraper uppercase query intact
         stock = yf.Ticker(ticker)
         info = stock.info
-        
         name = info.get("longName", info.get("shortName", ticker))
         price = info.get("currentPrice", info.get("regularMarketPrice", 0.0))
         prev = info.get("regularMarketPreviousClose", 1.0)
@@ -125,48 +122,14 @@ def get_live_tape_data(ticker):
         high = info.get("dayHigh", price)
         low = info.get("dayLow", price)
         vwap_val = (high + low + price) / 3 if price else 0.0
-        vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
-
-        # 12L BACKEND CAPABILITIES
-        headlines = []
-        try:
-            for item in stock.news[:8]:
-                if "title" in item and item["title"] not in headlines:
-                    headlines.append(item["title"])
-        except Exception:
-            pass
-        st.session_state["active_news_wire"] = " | ".join(headlines) if headlines else "No recent wire headlines found."
-
-        sectors = {"XLK":"Tech", "XLF":"Finance", "XLE":"Energy", "XLV":"Health", "XLU":"Utilities", "XLP":"Staples", "XLY":"Discretionary", "XLI":"Industrials", "XLB":"Materials", "XLRE":"RealEstate", "XLC":"Telecom"}
-        sector_flows = []
-        try:
-            for etf, s_name in sectors.items():
-                s_ticker = yf.Ticker(etf)
-                s_price = s_ticker.info.get("currentPrice", 0.0)
-                s_prev = s_ticker.info.get("regularMarketPreviousClose", 1.0)
-                s_pct = ((s_price - s_prev) / s_prev) * 100 if s_price else 0.0
-                sector_flows.append(f"{s_name}: {s_pct:+.2f}%")
-        except Exception:
-            pass
-        st.session_state["sector_rotation_context"] = " , ".join(sector_flows) if sector_flows else "Sector matrices offline."
-
-        vol_anomaly = "NORMAL DAILY FLOW"
-        try:
-            avg_vol = info.get("averageVolume", raw_vol)
-            if raw_vol and avg_vol and raw_vol > (avg_vol * 2):
-                vol_anomaly = "🚨 EXPONENTIAL VOLUME VELOCITY ANOMALY DETECTED (ALGORITHMIC ACCUMULATION SQUEEZE)"
-        except Exception:
-            pass
-        st.session_state["volatility_math_metrics"] = f"Volume Status: {vol_anomaly}"
-
-        return price, pct, vol, vw_str, name
+        return price, pct, vol, f"${vwap_val:.2f}" if vwap_val else "N/A", name
     except Exception:
-        return 0.0, 0.0, "N/A", "N/A", str(ticker)
+        return 0.0, 0.0, "N/A", "N/A", ticker
 
-# Split Canvas Layout Execution
+# Split Canvas: Shorter Left Panel Charting Grid | Open Right Panel Conversational Stream
 col_chart_side, col_chat_side = st.columns([1.1, 0.9])
 
-# --- LEFT PANEL: TECHNICAL VIEWPORT ---
+# --- LEFT COLUMN PANEL: THE TECHNIQUE WORKSPACE ---
 with col_chart_side:
     st.markdown("<div style='height: 2vh;'></div>", unsafe_allow_html=True)
     if st.session_state.current_ticker:
@@ -191,3 +154,28 @@ with col_chart_side:
         """, height=630)
     else:
         st.markdown("<div style='height: 25vh;'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='text-align:center; color:#333; font-size:15px; font-weight:300;'>Chart display queued. Enter a stock setup query inside the terminal.</div>", unsafe_allow_html=True)
+
+# --- RIGHT COLUMN PANEL: NATURAL SCROLLING DIALOGUE ENGINE ---
+with col_chat_side:
+    st.markdown("<div style='height: 1vh;'></div>", unsafe_allow_html=True)
+    col_empty, col_btn_anchor = st.columns([0.7, 0.3])
+    with col_btn_anchor:
+        if st.button("RESET MEMORY", key="clean_memory_cta", use_container_width=True):
+            st.session_state.chat_history = []
+            st.session_state.current_ticker = None
+            st.session_state.llm_memory = st.session_state.llm_memory[:1]
+            st.rerun()
+
+    if not st.session_state.chat_history:
+        st.markdown("<div style='height: 18vh;'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='text-align: center; color: #222222; font-size: 24px; font-weight: 300; letter-spacing:0.04em;'>Savant Apprentice</div>", unsafe_allow_html=True)
+    else:
+        p, pct, v, vw, name = get_live_tape_data(st.session_state.current_ticker)
+        if st.session_state.current_ticker:
+            color_choice = "#34C759" if pct >= 0 else "#FF3B30"
+            metric_html = '<div style="background:#111; padding:12px; border-radius:6px; border:1px solid #1F1F1F; margin-bottom:15px;">' \
+                          f'<div class="metric-label" style="font-size:10px; color:#555; font-weight:700;">Exchange Tape Metrics — {name} ({st.session_state.current_ticker})</div>' \
+                          '<div class="metric-grid">' \
+                          f'<div class="metric-card"><div class="metric-label">Price</div><div class="metric-value">${p:,.2f}</div></div>' \
+                          f'<div class="metric-card"><div class="metric-label">Change</div><div class="metric-value" style="color:{color_choice}">{pct:+.2f}%</div></div>' \
