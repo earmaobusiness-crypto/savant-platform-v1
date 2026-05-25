@@ -99,9 +99,9 @@ if "llm_memory" not in st.session_state:
     ]
 
 def extract_ticker(text):
-    words = re.findall(r'\b[A-Za-z]{3,5}\b', text.upper())
-    # Exclusion list preserves human communication phrases from triggering scraper false-positives
-    ignore = ["WHY", "HOW", "WHEN", "CAN", "WHAT", "YOUR", "INFO", "MOVE", "PRICE", "TRADE", "ASSET", "ALPHA", "BETA", "THIS", "LOOK", "THAT", "THEIR", "THEM", "WITH", "FROM", "JOKE", "TELL", "GIVE", "SOME", "SHOW", "CHART", "MORE", "AGAIN", "VIEW", "PLOT"]
+    # Enforces strict capital letters rule. Lowcase words like 'are' or 'how' are ignored.
+    words = re.findall(r'\b[A-Z]{3,5}\b', text)
+    ignore = ["ARE", "WHY", "HOW", "WHEN", "CAN", "WHAT", "YOUR", "INFO", "MOVE", "PRICE", "TRADE", "ASSET", "ALPHA", "BETA", "THIS", "LOOK", "THAT", "THEIR", "THEM", "WITH", "FROM", "JOKE", "TELL", "GIVE", "SOME", "SHOW", "CHART", "MORE", "AGAIN", "VIEW", "PLOT"]
     for w in words:
         if w not in ignore: return w
     return None
@@ -109,7 +109,7 @@ def extract_ticker(text):
 def get_live_tape_data(ticker):
     if not ticker: return 0.0, 0.0, "N/A", "N/A", "Unknown"
     try:
-        ticker = ticker.upper() # Enforces uppercase to erase exchange asset lookup hallucinations
+        ticker = ticker.upper()
         stock = yf.Ticker(ticker)
         info = stock.info
         name = info.get("longName", info.get("shortName", ticker))
@@ -144,8 +144,6 @@ with col_chart_side:
                     st.rerun()
                     
         active_tf = st.session_state.timeframe
-        
-        # Secured TradingView Advanced candlestick chart deployment URL path string
         pure_chart_url = f"https://tradingview.com{active_tk}&interval={active_tf}&theme=dark&style=1&timezone=Etc%2FUTC&locale=en"
         
         components.html(f"""
@@ -155,7 +153,7 @@ with col_chart_side:
         """, height=630)
     else:
         st.markdown("<div style='height: 25vh;'></div>", unsafe_allow_html=True)
-        st.markdown("<div style='text-align:center; color:#333; font-size:15px; font-weight:300;'>Chart display queued. Enter a stock setup query inside the single interface terminal.</div>", unsafe_allow_html=True)
+        st.markdown("<div style='text-align:center; color:#333; font-size:15px; font-weight:300;'>Chart display queued. Enter an UPPERCASE stock setup query inside the terminal.</div>", unsafe_allow_html=True)
 
 # --- RIGHT COLUMN PANEL: NATURAL SCROLLING DIALOGUE ENGINE ---
 with col_chat_side:
@@ -172,10 +170,11 @@ with col_chat_side:
         st.markdown("<div style='height: 18vh;'></div>", unsafe_allow_html=True)
         st.markdown("<div style='text-align: center; color: #222222; font-size: 24px; font-weight: 300; letter-spacing:0.04em;'>Savant Apprentice</div>", unsafe_allow_html=True)
     else:
-        # FIXED: Removed triple-quote string template layout to eliminate SyntaxErrors permanently
         p, pct, v, vw, name = get_live_tape_data(st.session_state.current_ticker)
         if st.session_state.current_ticker:
+            color_choice = "#34C759" if pct >= 0 else "#FF3B30"
             metric_html = '<div style="background:#111; padding:12px; border-radius:6px; border:1px solid #1F1F1F; margin-bottom:15px;">' \
                           f'<div class="metric-label" style="font-size:10px; color:#555; font-weight:700;">Exchange Tape Metrics — {name} ({st.session_state.current_ticker})</div>' \
                           '<div class="metric-grid">' \
                           f'<div class="metric-card"><div class="metric-label">Price</div><div class="metric-value">${p:,.2f}</div></div>' \
+                          f'<div class="metric-card"><div class="metric-label">Change</div><div class="metric-value" style="color:{color_choice}">{pct:+.2f}%</div></div>' \
