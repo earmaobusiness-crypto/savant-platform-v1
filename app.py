@@ -18,10 +18,11 @@ SECTOR_ETFS = [
 ]
 TOKEN_GUARD = (
     "[TOKEN PROTOCOL: Process exclusively raw analytics from the payload. "
-    "Eliminate conversational fluff. Maximum density output only.]"
+    "Eliminate conversational fluff, greetings, and filler text. Maximum density output only.]"
 )
 PRIMARY_MODEL = "llama-3.3-70b-versatile"
 FALLBACK_MODEL = "llama3-8b-8192"
+MACRO_DRIVERS = [("GC=F", "GOLD"), ("CL=F", "OIL"), ("^TNX", "TNX"), ("SPY", "SPY")]
 
 # 1. Premium UI Real Estate Layout Configuration
 st.set_page_config(
@@ -103,6 +104,8 @@ if "text_field_buffer" not in st.session_state: st.session_state.text_field_buff
 if "active_news_wire" not in st.session_state: st.session_state.active_news_wire = []
 if "sector_rotation_context" not in st.session_state: st.session_state.sector_rotation_context = ""
 if "data_payload_string" not in st.session_state: st.session_state.data_payload_string = ""
+if "cross_asset_correlation_context" not in st.session_state: st.session_state.cross_asset_correlation_context = ""
+if "institutional_accumulation_detected" not in st.session_state: st.session_state.institutional_accumulation_detected = False
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [
         {
@@ -122,7 +125,6 @@ if "llm_memory" not in st.session_state:
     ]
 
 def extract_ticker(text):
-    words = re.findall(r"\b[A-Z]{3,5}\b", text)
     ignore = [
         "ARE", "WHY", "HOW", "WHEN", "CAN", "WHAT", "YOUR", "INFO", "MOVE", "PRICE", "TRADE",
         "ASSET", "ALPHA", "BETA", "THIS", "LOOK", "THAT", "THEIR", "THEM", "WITH", "FROM",
@@ -131,9 +133,9 @@ def extract_ticker(text):
     cash = re.search(r"\$([A-Za-z]{1,5})\b", text)
     if cash and cash.group(1).upper() not in ignore:
         return cash.group(1).upper()
-    for w in words:
-        if w not in ignore:
-            return w
+    for word in re.findall(r"\b[A-Z]{3,5}\b", text):
+        if word not in ignore:
+            return word
     return None
 
 
@@ -207,6 +209,76 @@ def _fetch_sector_rotation() -> str:
     return ctx
 
 
+def _pearson_correlation(series_a: list[float], series_b: list[float]) -> float:
+    n = min(len(series_a), len(series_b))
+    if n < 5:
+        return 0.0
+    x, y = series_a[-n:], series_b[-n:]
+    mx, my = statistics.mean(x), statistics.mean(y)
+    num = sum((xi - mx) * (yi - my) for xi, yi in zip(x, y))
+    den_x = sum((xi - mx) ** 2 for xi in x) ** 0.5
+    den_y = sum((yi - my) ** 2 for yi in y) ** 0.5
+    if den_x == 0 or den_y == 0:
+        return 0.0
+    return num / (den_x * den_y)
+
+
+def _price_velocity_array(symbol: str, periods: int = 20) -> list[float]:
+    try:
+        hist = yf.Ticker(symbol).history(period="2mo", interval="1d")
+        if hist is None or len(hist) < periods + 1:
+            return []
+        closes = [float(x) for x in hist["Close"].dropna().tolist()]
+        if len(closes) < periods + 1:
+            return []
+        velocity: list[float] = []
+        for i in range(-periods, 0):
+            prev = closes[i - 1]
+            velocity.append(((closes[i] - prev) / prev) * 100 if prev else 0.0)
+        return velocity
+    except Exception:
+        return []
+
+
+def _compute_cross_asset_correlation(ticker: str) -> str:
+    base_vel = _price_velocity_array(ticker)
+    if len(base_vel) < 5:
+        st.session_state.cross_asset_correlation_context = "XASSET_CORR:INSUFFICIENT_BASE"
+        return st.session_state.cross_asset_correlation_context
+    pairs: list[str] = []
+    for sym, label in MACRO_DRIVERS:
+        macro_vel = _price_velocity_array(sym)
+        rho = _pearson_correlation(base_vel, macro_vel)
+        pairs.append(f"{label}:{rho:+.3f}")
+    ctx = "XASSET_CORR|" + "|".join(pairs)
+    st.session_state.cross_asset_correlation_context = ctx
+    return ctx
+
+
+def _rsi_14(closes: list[float]) -> tuple[float | None, str]:
+    if len(closes) < 15:
+        return None, "RSI14:NA"
+    gains, losses = [], []
+    for i in range(-14, 0):
+        delta = closes[i] - closes[i - 1]
+        gains.append(max(delta, 0.0))
+        losses.append(max(-delta, 0.0))
+    avg_gain = statistics.mean(gains)
+    avg_loss = statistics.mean(losses)
+    if avg_loss == 0:
+        rsi = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+    if rsi >= 70:
+        zone = "OVERBOUGHT_BOUND"
+    elif rsi <= 30:
+        zone = "OVERSOLD_BOUND"
+    else:
+        zone = "NEUTRAL_CHANNEL"
+    return rsi, f"RSI14:{rsi:.1f}|ZONE:{zone}"
+
+
 def _fetch_sec_filings(ticker: str) -> str:
     try:
         idx = requests.get(
@@ -238,15 +310,19 @@ def _fetch_sec_filings(ticker: str) -> str:
         return "SEC:ERR"
 
 
-def _compute_volatility_engine(ticker: str, price: float, session_vol: int) -> str:
+def _compute_volatility_engine(
+    ticker: str, price: float, session_vol: int, session_vwap: float,
+) -> tuple[str, bool]:
+    institutional_accumulation_detected = False
     try:
         hist = yf.Ticker(ticker).history(period="1mo", interval="1d")
         if hist is None or len(hist) < 10:
-            return "VOL:INSUFFICIENT_HIST|VOLMOM:NORMAL"
+            return "VOL:INSUFFICIENT_HIST|VOLMOM:NORMAL|INST_ACCUM:FALSE", False
         closes = [float(x) for x in hist["Close"].dropna().tolist()]
         volumes = [float(x) for x in hist["Volume"].dropna().tolist()]
         if len(closes) < 10:
-            return "VOL:INSUFFICIENT_HIST|VOLMOM:NORMAL"
+            return "VOL:INSUFFICIENT_HIST|VOLMOM:NORMAL|INST_ACCUM:FALSE", False
+        _, rsi_ctx = _rsi_14(closes)
         window = closes[-20:] if len(closes) >= 20 else closes
         mean = statistics.mean(window)
         std = statistics.pstdev(window) if len(window) > 1 else 0.0
@@ -272,22 +348,28 @@ def _compute_volatility_engine(ticker: str, price: float, session_vol: int) -> s
             vol_mom = "ELEVATED|ANOMALY_FLAG:MEDIUM"
         else:
             vol_mom = "NORMAL|ANOMALY_FLAG:NONE"
-        return (
-            f"VOL|BAND:{band}|DEV:{dev_pct:+.2f}%|20D_MEAN:{mean:.2f}|"
-            f"UP:{upper:.2f}|DN:{lower:.2f}|VOLMOM:{vol_mom}|VEL_RATIO:{ratio:.2f}x"
+        vwap_band_pct = abs((price - session_vwap) / session_vwap) * 100 if session_vwap > 0 else 999.0
+        if ratio >= 2.0 and vwap_band_pct <= 0.5:
+            institutional_accumulation_detected = True
+        ctx = (
+            f"VOL|{rsi_ctx}|BAND:{band}|DEV:{dev_pct:+.2f}%|20D_MEAN:{mean:.2f}|"
+            f"UP:{upper:.2f}|DN:{lower:.2f}|VOLMOM:{vol_mom}|VEL_RATIO:{ratio:.2f}x|"
+            f"VWAP_LOCK:{vwap_band_pct:.2f}%|INST_ACCUM:{str(institutional_accumulation_detected).upper()}"
         )
+        return ctx, institutional_accumulation_detected
     except Exception:
-        return "VOL:CALC_ERR|VOLMOM:NORMAL"
+        return "VOL:CALC_ERR|VOLMOM:NORMAL|INST_ACCUM:FALSE", False
 
 
 def _build_data_payload_string(
     ticker: str, name: str, price: float, pct: float, vol: str, vw: str,
-    news: list[str], sector_ctx: str, vol_ctx: str, sec_ctx: str,
+    news: list[str], sector_ctx: str, vol_ctx: str, sec_ctx: str, corr_ctx: str,
 ) -> str:
     wire = "||".join(news[:6]) if news else "NONE"
+    inst = "TRUE" if st.session_state.institutional_accumulation_detected else "FALSE"
     payload = (
         f"12L|TK:{ticker}|CO:{name}|P:{price:.2f}|CHG:{pct:+.2f}%|V:{vol}|VW:{vw}|"
-        f"WIRE:{wire}|{sector_ctx}|{vol_ctx}|{sec_ctx}"
+        f"WIRE:{wire}|{sector_ctx}|{corr_ctx}|{vol_ctx}|{sec_ctx}|INST_ACCUM_FLAG:{inst}"
     )
     st.session_state.data_payload_string = payload
     return payload
@@ -297,6 +379,8 @@ def get_live_tape_data(ticker):
     if not ticker:
         st.session_state.active_news_wire = []
         st.session_state.sector_rotation_context = ""
+        st.session_state.cross_asset_correlation_context = ""
+        st.session_state.institutional_accumulation_detected = False
         st.session_state.data_payload_string = ""
         return 0.0, 0.0, "N/A", "N/A", "Unknown"
     try:
@@ -316,11 +400,13 @@ def get_live_tape_data(ticker):
 
         st.session_state.active_news_wire = _fetch_news_wire(ticker)
         sector_ctx = _fetch_sector_rotation()
-        vol_ctx = _compute_volatility_engine(ticker, price, raw_vol)
+        corr_ctx = _compute_cross_asset_correlation(ticker)
+        vol_ctx, inst_flag = _compute_volatility_engine(ticker, price, raw_vol, vwap_val)
+        st.session_state.institutional_accumulation_detected = inst_flag
         sec_ctx = _fetch_sec_filings(ticker)
         _build_data_payload_string(
             ticker, name, price, pct, vol, vw_str,
-            st.session_state.active_news_wire, sector_ctx, vol_ctx, sec_ctx,
+            st.session_state.active_news_wire, sector_ctx, vol_ctx, sec_ctx, corr_ctx,
         )
         return price, pct, vol, vw_str, name
     except Exception:
@@ -343,10 +429,10 @@ def run_groq(messages):
     if "GROQ_API_KEY" not in st.secrets:
         return "Security Core Offline. Add GROQ_API_KEY to `.streamlit/secrets.toml`."
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-    for model in (PRIMARY_MODEL, FALLBACK_MODEL):
+    try:
         try:
             r = client.chat.completions.create(
-                model=model,
+                model=PRIMARY_MODEL,
                 messages=messages,
                 temperature=0.4,
                 max_tokens=1000,
@@ -354,8 +440,18 @@ def run_groq(messages):
             return r.choices[0].message.content or "Savant returned an empty response."
         except Exception as exc:
             err = str(exc)
-            if model == PRIMARY_MODEL and _groq_should_fallback(err):
-                continue
+            if _groq_should_fallback(err):
+                try:
+                    r = client.chat.completions.create(
+                        model=FALLBACK_MODEL,
+                        messages=messages,
+                        temperature=0.4,
+                        max_tokens=1000,
+                    )
+                    return r.choices[0].message.content or "Savant returned an empty response."
+                except Exception as fallback_exc:
+                    exc = fallback_exc
+                    err = str(exc)
             if "429" in err:
                 m = re.search(r"in\s+([0-9hms\.]+)", err)
                 wait_window = m.group(1) if m else "1h30m"
@@ -366,7 +462,8 @@ def run_groq(messages):
                     "Your active left panel TradingView workspace remains operational."
                 )
             return f"Core System Interruption: {err}"
-    return "Savant returned an empty response."
+    except Exception as exc:
+        return f"Core System Interruption: {exc}"
 
 
 def _build_groq_message_stack(user_text: str, payload: str) -> list[dict]:
@@ -459,6 +556,8 @@ with col_chat_side:
             st.session_state.llm_memory = st.session_state.llm_memory[:1]
             st.session_state.active_news_wire = []
             st.session_state.sector_rotation_context = ""
+            st.session_state.cross_asset_correlation_context = ""
+            st.session_state.institutional_accumulation_detected = False
             st.session_state.data_payload_string = ""
             st.rerun()
 
