@@ -1,7 +1,9 @@
+import re
+import urllib.parse
+
 import streamlit as st
 import streamlit.components.v1 as components
 import yfinance as yf
-import re
 from groq import Groq
 
 # 1. Premium UI Real Estate Layout Configuration
@@ -72,6 +74,7 @@ st.markdown("""
             border-color: #444444 !important;
             background-color: #1A1A1A !important;
         }
+        div[data-testid="stForm"] button[data-testid="stFormSubmitButton"] { display: none !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -99,19 +102,27 @@ if "llm_memory" not in st.session_state:
     ]
 
 def extract_ticker(text):
-    # Enforces strict capital letters rule. Lowcase words like 'are' or 'how' are ignored.
-    words = re.findall(r'\b[A-Z]{3,5}\b', text)
-    ignore = ["ARE", "WHY", "HOW", "WHEN", "CAN", "WHAT", "YOUR", "INFO", "MOVE", "PRICE", "TRADE", "ASSET", "ALPHA", "BETA", "THIS", "LOOK", "THAT", "THEIR", "THEM", "WITH", "FROM", "JOKE", "TELL", "GIVE", "SOME", "SHOW", "CHART", "MORE", "AGAIN", "VIEW", "PLOT"]
+    words = re.findall(r"\b[A-Z]{3,5}\b", text)
+    ignore = [
+        "ARE", "WHY", "HOW", "WHEN", "CAN", "WHAT", "YOUR", "INFO", "MOVE", "PRICE", "TRADE",
+        "ASSET", "ALPHA", "BETA", "THIS", "LOOK", "THAT", "THEIR", "THEM", "WITH", "FROM",
+        "JOKE", "TELL", "GIVE", "SOME", "SHOW", "CHART", "MORE", "AGAIN", "VIEW", "PLOT",
+    ]
+    cash = re.search(r"\$([A-Za-z]{1,5})\b", text)
+    if cash and cash.group(1).upper() not in ignore:
+        return cash.group(1).upper()
     for w in words:
-        if w not in ignore: return w
+        if w not in ignore:
+            return w
     return None
 
+
 def get_live_tape_data(ticker):
-    if not ticker: return 0.0, 0.0, "N/A", "N/A", "Unknown"
+    if not ticker:
+        return 0.0, 0.0, "N/A", "N/A", "Unknown"
     try:
         ticker = ticker.upper()
-        stock = yf.Ticker(ticker)
-        info = stock.info
+        info = yf.Ticker(ticker).info or {}
         name = info.get("longName", info.get("shortName", ticker))
         price = info.get("currentPrice", info.get("regularMarketPrice", 0.0))
         prev = info.get("regularMarketPreviousClose", 1.0)
@@ -124,6 +135,64 @@ def get_live_tape_data(ticker):
         return price, pct, vol, f"${vwap_val:.2f}" if vwap_val else "N/A", name
     except Exception:
         return 0.0, 0.0, "N/A", "N/A", ticker
+
+
+def run_groq(messages):
+    if "GROQ_API_KEY" not in st.secrets:
+        return "Security Core Offline. Add GROQ_API_KEY to `.streamlit/secrets.toml`."
+    try:
+        client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+        r = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
+            temperature=0.4,
+            max_tokens=1000,
+        )
+        return r.choices[0].message.content or "Savant returned an empty response."
+    except Exception as exc:
+        err = str(exc)
+        if "429" in err:
+            m = re.search(r"in\s+([0-9hms\.]+)", err)
+            wait_window = m.group(1) if m else "1h30m"
+            return (
+                "⚠️ **Savant Core Standby: Active Rate Limit Enforced.**\n\n"
+                f"• **Time Window Till Resumption:** **{wait_window}** exact remaining.\n\n"
+                "The text synthesis brain is currently locked in safety standby. "
+                "Your active left panel TradingView workspace remains operational."
+            )
+        return f"Core System Interruption: {err}"
+
+
+def process_chat_submission():
+    user_text = st.session_state.text_field_buffer.strip()
+    if not user_text:
+        return
+
+    new_ticker = extract_ticker(user_text)
+    if new_ticker and new_ticker != st.session_state.current_ticker:
+        st.session_state.current_ticker = new_ticker
+        st.session_state.llm_memory = st.session_state.llm_memory[:1]
+
+    st.session_state.chat_history.append({"speaker": "You", "text": user_text})
+    st.session_state.llm_memory.append({"role": "user", "content": user_text})
+
+    groq_msgs = [{"role": m["role"], "content": m["content"]} for m in st.session_state.llm_memory]
+    if st.session_state.current_ticker and groq_msgs[-1]["role"] == "user":
+        p, pct, vol, vw, name = get_live_tape_data(st.session_state.current_ticker)
+        groq_msgs[-1]["content"] += (
+            f"\n[LIVE TRUTH: Ticker={st.session_state.current_ticker}, Company={name}, "
+            f"Price=${p:,.2f}, Change={pct:+.2f}%, Vol={vol}, VWAP={vw}]"
+        )
+
+    ai_text = run_groq(groq_msgs)
+    st.session_state.llm_memory.append({"role": "assistant", "content": ai_text})
+    st.session_state.chat_history.append({"speaker": "Savant", "text": ai_text})
+    st.session_state.text_field_buffer = ""
+
+
+if st.session_state.pop("_pending_chat_submit", False):
+    with st.spinner("Savant processing live data layers..."):
+        process_chat_submission()
 
 # Split Canvas: Shorter Left Panel Charting Grid | Open Right Panel Conversational Stream
 col_chart_side, col_chat_side = st.columns([1.1, 0.9])
@@ -144,7 +213,11 @@ with col_chart_side:
                     st.rerun()
                     
         active_tf = st.session_state.timeframe
-        pure_chart_url = f"https://tradingview.com{active_tk}&interval={active_tf}&theme=dark&style=1&timezone=Etc%2FUTC&locale=en"
+        symbol = urllib.parse.quote(f"NASDAQ:{active_tk.upper()}", safe="")
+        pure_chart_url = (
+            f"https://s.tradingview.com/widgetembed/?symbol={symbol}&interval={active_tf}"
+            f"&theme=dark&style=1&timezone=Etc%2FUTC&locale=en&allow_symbol_change=0"
+        )
         
         components.html(f"""
             <div style="height:620px; width:100%; border-radius:8px; overflow:hidden; border:1px solid #1F1F1F;">
@@ -163,18 +236,57 @@ with col_chat_side:
         if st.button("RESET MEMORY", key="clean_memory_cta", use_container_width=True):
             st.session_state.chat_history = []
             st.session_state.current_ticker = None
+            st.session_state.text_field_buffer = ""
             st.session_state.llm_memory = st.session_state.llm_memory[:1]
             st.rerun()
 
+    if st.session_state.current_ticker:
+        p, pct, v, vw, name = get_live_tape_data(st.session_state.current_ticker)
+        color_choice = "#34C759" if pct >= 0 else "#FF3B30"
+        st.markdown(
+            f"""
+            <div style="background:#111;padding:12px;border-radius:6px;border:1px solid #1F1F1F;margin-bottom:15px;">
+                <div class="metric-label" style="font-size:10px;color:#555;font-weight:700;">
+                    Exchange Tape Metrics — {name} ({st.session_state.current_ticker})
+                </div>
+                <div class="metric-grid">
+                    <div class="metric-card"><div class="metric-label">Price</div>
+                        <div class="metric-value">${p:,.2f}</div></div>
+                    <div class="metric-card"><div class="metric-label">Change</div>
+                        <div class="metric-value" style="color:{color_choice}">{pct:+.2f}%</div></div>
+                    <div class="metric-card"><div class="metric-label">Volume</div>
+                        <div class="metric-value">{v}</div></div>
+                    <div class="metric-card"><div class="metric-label">Sess. VWAP</div>
+                        <div class="metric-value">{vw}</div></div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     if not st.session_state.chat_history:
         st.markdown("<div style='height: 18vh;'></div>", unsafe_allow_html=True)
-        st.markdown("<div style='text-align: center; color: #222222; font-size: 24px; font-weight: 300; letter-spacing:0.04em;'>Savant Apprentice</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='text-align:center;color:#222;font-size:24px;font-weight:300;"
+            "letter-spacing:0.04em;'>Savant Apprentice</div>",
+            unsafe_allow_html=True,
+        )
     else:
-        p, pct, v, vw, name = get_live_tape_data(st.session_state.current_ticker)
-        if st.session_state.current_ticker:
-            color_choice = "#34C759" if pct >= 0 else "#FF3B30"
-            metric_html = '<div style="background:#111; padding:12px; border-radius:6px; border:1px solid #1F1F1F; margin-bottom:15px;">' \
-                          f'<div class="metric-label" style="font-size:10px; color:#555; font-weight:700;">Exchange Tape Metrics — {name} ({st.session_state.current_ticker})</div>' \
-                          '<div class="metric-grid">' \
-                          f'<div class="metric-card"><div class="metric-label">Price</div><div class="metric-value">${p:,.2f}</div></div>' \
-                          f'<div class="metric-card"><div class="metric-label">Change</div><div class="metric-value" style="color:{color_choice}">{pct:+.2f}%</div></div>' \
+        for msg in st.session_state.chat_history:
+            label_class = "speaker-you" if msg["speaker"] == "You" else "speaker-savant"
+            st.markdown(
+                f'<div class="chat-row"><div class="speaker-label {label_class}">{msg["speaker"]}</div>'
+                f'<div class="data-content">{msg.get("text", "")}</div></div>',
+                unsafe_allow_html=True,
+            )
+
+    with st.form("chat_form", clear_on_submit=False):
+        st.text_input(
+            "Input",
+            key="text_field_buffer",
+            placeholder="Ask Savant anything... No filters active.",
+            label_visibility="collapsed",
+        )
+        if st.form_submit_button("Send") and st.session_state.text_field_buffer.strip():
+            st.session_state._pending_chat_submit = True
+            st.rerun()
