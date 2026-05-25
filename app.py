@@ -1,6 +1,9 @@
 import re
+import statistics
 import urllib.parse
+from xml.etree import ElementTree
 
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 import yfinance as yf
@@ -71,30 +74,133 @@ if "text_field_buffer" not in st.session_state:
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-TICKER_IGNORE = {
-    "WHY", "HOW", "WHEN", "CAN", "WHAT", "YOUR", "INFO", "MOVE", "PRICE", "TRADE", "ASSET",
-    "ALPHA", "BETA", "THIS", "LOOK", "THAT", "THEIR", "THEM", "WITH", "FROM", "JOKE", "TELL",
-    "GIVE", "SOME", "SHOW", "CHART", "MORE", "AGAIN", "VIEW", "PLOT", "THE", "AND", "FOR",
-}
+
 TF_MAP = {"5m": "5", "15m": "15", "1H": "60", "1D": "D", "1W": "W", "1M": "M"}
+SECTOR_ETFS = [
+    ("XLK", "Technology"), ("XLF", "Financials"), ("XLE", "Energy"), ("XLV", "Health Care"),
+    ("XLU", "Utilities"), ("XLP", "Consumer Staples"), ("XLY", "Consumer Discretionary"),
+    ("XLI", "Industrials"), ("XLB", "Materials"), ("XLRE", "Real Estate"), ("XLC", "Communication"),
+]
+LLM_TURN_WINDOW = 12
 
 
 def extract_ticker(text: str) -> str | None:
+    ignore = [
+        "ARE", "WHY", "HOW", "WHEN", "CAN", "WHAT", "YOUR", "INFO", "MOVE", "PRICE", "TRADE",
+        "ASSET", "ALPHA", "BETA", "THIS", "LOOK", "THAT", "THEIR", "THEM", "WITH", "FROM",
+        "JOKE", "TELL", "GIVE", "SOME", "SHOW", "CHART", "MORE", "AGAIN", "VIEW", "PLOT",
+    ]
     cash = re.search(r"\$([A-Za-z]{1,5})\b", text)
-    if cash:
+    if cash and cash.group(1).upper() not in ignore:
         return cash.group(1).upper()
-    solo = re.match(r"^[\$]?([A-Za-z]{2,5})$", text.strip())
-    if solo and solo.group(1).upper() not in TICKER_IGNORE:
-        return solo.group(1).upper()
-    for word in re.findall(r"\b[A-Za-z]{2,5}\b", text.upper()):
-        if word not in TICKER_IGNORE:
+    for word in re.findall(r"\b[A-Z]{3,5}\b", text):
+        if word not in ignore:
             return word
     return None
 
 
+def _dedupe_headlines(headlines: list[str]) -> list[str]:
+    seen: list[str] = []
+    unique: list[str] = []
+    for headline in headlines:
+        key = re.sub(r"\W+", "", headline.lower())[:80]
+        if key and key not in seen:
+            seen.append(key)
+            unique.append(headline)
+        if len(unique) >= 8:
+            break
+    return unique
+
+
+def _fetch_news_headlines(ticker: str) -> str:
+    headlines: list[str] = []
+    symbol = ticker.upper()
+    try:
+        for item in (yf.Ticker(symbol).news or [])[:12]:
+            title = (item.get("title") or "").strip()
+            if title:
+                headlines.append(title)
+    except Exception:
+        pass
+    try:
+        query = urllib.parse.quote(f"{symbol} stock")
+        rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+        resp = requests.get(rss_url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.ok:
+            root = ElementTree.fromstring(resp.content)
+            for node in root.iter("item"):
+                title = (node.findtext("title") or "").strip()
+                if title and "google news" not in title.lower():
+                    headlines.append(title)
+    except Exception:
+        pass
+    unique = _dedupe_headlines(headlines)
+    return " | ".join(unique) if unique else "No active headlines."
+
+
+def _fetch_sector_rotation_context() -> str:
+    flows: list[tuple[str, str, float]] = []
+    for sym, label in SECTOR_ETFS:
+        try:
+            info = yf.Ticker(sym).info or {}
+            price = info.get("regularMarketPrice") or info.get("currentPrice") or 0.0
+            prev = info.get("regularMarketPreviousClose") or 1.0
+            pct = ((price - prev) / prev) * 100 if price else 0.0
+            flows.append((sym, label, pct))
+        except Exception:
+            flows.append((sym, label, 0.0))
+    flows.sort(key=lambda x: x[2], reverse=True)
+    leader, laggard = flows[0], flows[-1]
+    return (
+        f"Leader {leader[0]} ({leader[1]}) {leader[2]:+.2f}% | "
+        f"Laggard {laggard[0]} ({laggard[1]}) {laggard[2]:+.2f}%"
+    )
+
+
+def _fetch_volatility_context(ticker: str) -> str:
+    try:
+        hist = yf.Ticker(ticker.upper()).history(period="3mo", interval="1d")
+        if hist.empty or len(hist) < 20:
+            return "Insufficient history for 20-day deviation."
+        closes = hist["Close"].tail(20).tolist()
+        volumes = hist["Volume"].tail(20).tolist()
+        mean = statistics.mean(closes)
+        std = statistics.stdev(closes) if len(closes) > 1 else 0.0
+        price = closes[-1]
+        upper, lower = mean + (2 * std), mean - (2 * std)
+        if price > upper:
+            band = "ABOVE_UPPER_BAND"
+        elif price < lower:
+            band = "BELOW_LOWER_BAND"
+        else:
+            band = "INSIDE_BANDS"
+        dev_pct = ((price - mean) / mean) * 100 if mean else 0.0
+        today_vol = volumes[-1]
+        avg5 = statistics.mean(volumes[-6:-1]) if len(volumes) >= 6 else today_vol
+        vol_accel = ((today_vol - avg5) / avg5) * 100 if avg5 else 0.0
+        if vol_accel > 50:
+            vol_state = "EXPONENTIAL_ACCEL"
+        elif vol_accel > 15:
+            vol_state = "ELEVATED"
+        else:
+            vol_state = "NORMAL"
+        return (
+            f"Bollinger20={band}, DevFromMean={dev_pct:+.2f}%, "
+            f"VolMomentum={vol_accel:+.1f}% ({vol_state})"
+        )
+    except Exception:
+        return "Volatility metrics unavailable."
+
+
+def trim_llm_memory_window(max_turns: int = LLM_TURN_WINDOW) -> None:
+    system = st.session_state.llm_memory[:1]
+    dialog = st.session_state.llm_memory[1:]
+    st.session_state.llm_memory = system + dialog[-(max_turns * 2) :]
+
+
 def get_live_tape_data(ticker):
     if not ticker:
-        return 0.0, 0.0, "N/A", "N/A", "Unknown"
+        return 0.0, 0.0, "N/A", "N/A", "Unknown", "No active headlines."
     try:
         ticker = ticker.upper()
         info = yf.Ticker(ticker).info or {}
@@ -107,9 +213,10 @@ def get_live_tape_data(ticker):
         high = info.get("dayHigh", price)
         low = info.get("dayLow", price)
         vwap_val = (high + low + price) / 3 if price else 0.0
-        return price, pct, vol, f"${vwap_val:.2f}" if vwap_val else "N/A", name
+        active_news_wire = _fetch_news_headlines(ticker)
+        return price, pct, vol, f"${vwap_val:.2f}" if vwap_val else "N/A", name, active_news_wire
     except Exception:
-        return 0.0, 0.0, "N/A", "N/A", ticker
+        return 0.0, 0.0, "N/A", "N/A", ticker, "No active headlines."
 
 
 def render_chart(ticker: str, interval: str) -> None:
@@ -142,7 +249,13 @@ def run_groq(messages: list[dict]) -> str:
         err = str(exc)
         if "429" in err:
             m = re.search(r"in\s+([0-9hms\.]+)", err)
-            return f"Rate limit — retry in **{m.group(1) if m else '1h30m'}**."
+            wait_window = m.group(1) if m else "1h30m"
+            return (
+                f"⚠️ **Savant Core Standby: Active Rate Limit Enforced.**\n\n"
+                f"• **Time Window Till Resumption:** **{wait_window}** exact remaining.\n\n"
+                "The text synthesis brain is currently locked in safety standby. "
+                "Your active left panel TradingView workspace remains operational."
+            )
         return f"Core System Interruption: {err}"
 
 
@@ -161,14 +274,24 @@ def process_chat_submission() -> None:
 
     groq_msgs = [{"role": m["role"], "content": m["content"]} for m in st.session_state.llm_memory]
     if st.session_state.current_ticker and groq_msgs[-1]["role"] == "user":
-        p, pct, vol, vw, name = get_live_tape_data(st.session_state.current_ticker)
-        groq_msgs[-1]["content"] += (
-            f"\n[LIVE TRUTH: Ticker={st.session_state.current_ticker}, Company={name}, "
-            f"Price=${p:,.2f}, Change={pct:+.2f}%, Vol={vol}, VWAP={vw}]"
+        tk = st.session_state.current_ticker
+        p, pct, vol, vw, name, active_news_wire = get_live_tape_data(tk)
+        sector_rotation_context = _fetch_sector_rotation_context()
+        volatility_context = _fetch_volatility_context(tk)
+        data_payload_string = (
+            f"\n[12L DATA ENGINE | Ticker={tk}, Company={name}, Price=${p:,.2f}, "
+            f"Change={pct:+.2f}%, Vol={vol}, VWAP={vw} | "
+            f"NEWS_WIRE: {active_news_wire} | "
+            f"SECTOR_ROTATION: {sector_rotation_context} | "
+            f"VOLATILITY: {volatility_context}]"
         )
+        groq_msgs[-1]["content"] += data_payload_string
 
+    trim_llm_memory_window()
+    groq_msgs = [{"role": m["role"], "content": m["content"]} for m in st.session_state.llm_memory]
     ai_text = run_groq(groq_msgs)
     st.session_state.llm_memory.append({"role": "assistant", "content": ai_text})
+    trim_llm_memory_window()
     st.session_state.chat_history.append({"speaker": "Savant", "text": ai_text})
     st.session_state.text_field_buffer = ""
 
