@@ -117,15 +117,17 @@ if "llm_memory" not in st.session_state:
                 "RULE A — THE CORE STOCK SETUP (single explicit ticker only):\n"
                 "Trigger ONLY when the user submits one clear equity ticker symbol for a single-name setup "
                 "(e.g., MLGO, AAPL, $TSLA) with intent to analyze that one stock — not indices, not multi-asset compares, not vague macro.\n"
-                "Enforce this exact un-sugarcoated 6-bullet quantitative deep-dive in order:\n"
-                "• SAVANT TREND DETERMINATION: State definitively if the stock is actively ROCKETING UP, CRASHING DOWN, or SIDELINED IN CONSOLIDATION.\n"
-                "• THE MACRO STORIES & DRIVERS: Break down the single underlying catalyst powering this specific active directional trend.\n"
-                "• MAIN BUSINESS OF THE COMPANY: Clear snapshot of technology layers, software frameworks, or products.\n"
-                "• SOCIAL SENTIMENT MATRIX: Live assessment of retail buyer psychology, Stocktwits momentum, and online community volume velocity.\n"
-                "• TOMORROW'S SESSION EXPECTATION: High-utility, data-backed projection for the very next trading session.\n"
-                "• CRITICAL TRADER BULLET NOTES: Volume velocity spikes, float traps, short squeeze indicators, anomalies.\n"
-                "After all six bullets, end with ONE highly detailed comprehensive executive summary paragraph at the absolute bottom. "
-                "Do not add bullets or headers below the six bullets except that final paragraph.\n\n"
+                "Enforce this exact un-sugarcoated 6-bullet quantitative deep-dive in order. FORMATTING IS MANDATORY:\n"
+                "• Insert a full blank line (double line break) between every bullet so each point starts on a fresh isolated line — never a dense wall of text.\n"
+                "• Under each bullet, write significantly shorter, sharper, punchier copy — crisp focused sentences with high-density signals only.\n"
+                "• SAVANT TREND DETERMINATION: State definitively ROCKETING UP, CRASHING DOWN, or SIDELINED IN CONSOLIDATION.\n\n"
+                "• THE MACRO STORIES & DRIVERS: Single catalyst driving the active directional trend.\n\n"
+                "• MAIN BUSINESS OF THE COMPANY: Tight snapshot of technology layers, software frameworks, or products.\n\n"
+                "• SOCIAL SENTIMENT MATRIX: Retail psychology, Stocktwits momentum, community volume velocity.\n\n"
+                "• TOMORROW'S SESSION EXPECTATION: Data-backed next-session projection.\n\n"
+                "• CRITICAL TRADER BULLET NOTES: Volume spikes, float traps, squeeze signals, anomalies.\n\n"
+                "After all six bullets, insert one full blank line, then ONE highly detailed comprehensive executive summary paragraph "
+                "at the absolute bottom. No bullets or headers after the six bullets except that final paragraph.\n\n"
                 "RULE B — THE BROAD CONTEXT SHIFT (everything else):\n"
                 "Instantly DROP the 6-bullet framework for: broad market questions, general updates, index or macro queries "
                 "(e.g., S&P 500, RSI, sector rotation), comparative analysis (two or more symbols), follow-up causality "
@@ -530,6 +532,10 @@ col_chart_side, col_chat_side = st.columns([1.1, 0.9])
 
 # --- LEFT COLUMN PANEL: THE TECHNIQUE WORKSPACE ---
 with col_chart_side:
+    st.markdown(
+        '<div style="position: fixed; width: 45%; max-width: 750px; z-index: 99;">',
+        unsafe_allow_html=True,
+    )
     st.markdown("<div style='height: 2vh;'></div>", unsafe_allow_html=True)
     if st.session_state.current_ticker:
         active_tk = st.session_state.current_ticker
@@ -558,6 +564,7 @@ with col_chart_side:
     else:
         st.markdown("<div style='height: 25vh;'></div>", unsafe_allow_html=True)
         st.markdown("<div style='text-align:center; color:#333; font-size:15px; font-weight:300;'>Chart display queued. Enter an UPPERCASE stock setup query inside the terminal.</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # --- RIGHT COLUMN PANEL: NATURAL SCROLLING DIALOGUE ENGINE ---
 with col_chat_side:
