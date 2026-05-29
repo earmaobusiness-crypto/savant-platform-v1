@@ -9,9 +9,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import yfinance as yf
 from groq import Groq
-
-# Link directly to your new MacBook math chip file
-import core_quantum
+import core_quantum 
 
 SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
 SECTOR_ETFS = [
@@ -96,11 +94,6 @@ st.markdown("""
             background-color: #1A1A1A !important;
         }
         div[data-testid="stForm"] button[data-testid="stFormSubmitButton"] { display: none !important; }
-        
-        /* Premium custom tabs styling to handle two visual rooms cleanly */
-        .stTabs [data-baseweb="tab-list"] { gap: 24px; background: transparent; }
-        .stTabs [data-baseweb="tab"] { color: #808495; font-weight: bold; background: transparent; }
-        .stTabs [aria-selected="true"] { color: #ffffff !important; border-bottom-color: #ffffff !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -114,7 +107,6 @@ if "sector_rotation_context" not in st.session_state: st.session_state.sector_ro
 if "data_payload_string" not in st.session_state: st.session_state.data_payload_string = ""
 if "cross_asset_correlation_context" not in st.session_state: st.session_state.cross_asset_correlation_context = ""
 if "institutional_accumulation_detected" not in st.session_state: st.session_state.institutional_accumulation_detected = False
-if "polygon_lockout" not in st.session_state: st.session_state.polygon_lockout = False
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [
         {
@@ -176,3 +168,19 @@ def _dedupe_headlines(headlines: list[str], limit: int = 6) -> list[str]:
         if any(_headline_similar(clean, kept) >= 0.82 for kept in unique):
             continue
         unique.append(clean)
+        if len(unique) >= limit:
+            break
+    return unique
+
+def _fetch_news_wire(ticker: str) -> list[str]:
+    headlines: list[str] = []
+    try:
+        for item in (yf.Ticker(ticker).news or [])[:12]:
+            title = item.get("title", "")
+            if title:
+                headlines.append(title)
+    except Exception:
+        pass
+    try:
+        q = urllib.parse.quote(f"{ticker} stock", safe="")
+        rss_url = f"https://google.com{q}&hl=en-US&gl=US&ceid=US:en"
