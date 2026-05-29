@@ -1,3 +1,4 @@
+import os
 import re
 import statistics
 import urllib.parse
@@ -384,6 +385,28 @@ def _build_data_payload_string(
     return payload
 
 
+def _fetch_tape_metrics(ticker):
+    """Fast yfinance read for UI metric cards — skips 12L engine on every rerun."""
+    if not ticker:
+        return 0.0, 0.0, "N/A", "N/A", "Unknown"
+    try:
+        ticker = ticker.upper()
+        info = yf.Ticker(ticker).info or {}
+        name = info.get("longName", info.get("shortName", ticker))
+        price = float(info.get("currentPrice", info.get("regularMarketPrice", 0.0)) or 0.0)
+        prev = float(info.get("regularMarketPreviousClose", 1.0) or 1.0)
+        pct = ((price - prev) / prev) * 100 if price and prev else 0.0
+        raw_vol = int(info.get("volume", info.get("regularMarketVolume", 0)) or 0)
+        vol = f"{raw_vol:,}" if raw_vol else "N/A"
+        high = float(info.get("dayHigh", price) or price)
+        low = float(info.get("dayLow", price) or price)
+        vwap_val = (high + low + price) / 3 if price else 0.0
+        vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
+        return price, pct, vol, vw_str, name
+    except Exception:
+        return 0.0, 0.0, "N/A", "N/A", ticker.upper()
+
+
 def get_live_tape_data(ticker):
     if not ticker:
         st.session_state.active_news_wire = []
@@ -434,10 +457,18 @@ def _groq_should_fallback(err: str) -> bool:
     )
 
 
+def _groq_api_key():
+    try:
+        return st.secrets["GROQ_API_KEY"]
+    except (KeyError, FileNotFoundError, AttributeError):
+        return os.environ.get("GROQ_API_KEY", "")
+
+
 def run_groq(messages):
-    if "GROQ_API_KEY" not in st.secrets:
+    api_key = _groq_api_key()
+    if not api_key:
         return "Security Core Offline. Add GROQ_API_KEY to `.streamlit/secrets.toml`."
-    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+    client = Groq(api_key=api_key)
     try:
         try:
             r = client.chat.completions.create(
@@ -579,7 +610,7 @@ with col_chat_side:
             st.rerun()
 
     if st.session_state.current_ticker:
-        p, pct, v, vw, name = get_live_tape_data(st.session_state.current_ticker)
+        p, pct, v, vw, name = _fetch_tape_metrics(st.session_state.current_ticker)
         color_choice = "#34C759" if pct >= 0 else "#FF3B30"
         st.markdown(
             f"""
