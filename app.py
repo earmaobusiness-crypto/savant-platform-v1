@@ -39,12 +39,10 @@ TOKEN_GUARD = (
 PRIMARY_MODEL = "llama-3.3-70b-versatile"
 FALLBACK_MODEL = "llama3-8b-8192"
 MACRO_DRIVERS = [("GC=F", "GOLD"), ("CL=F", "OIL"), ("^TNX", "TNX"), ("SPY", "SPY")]
-ROOM2_SESSION_TIMES = [
-    f"{hour:02d}:{minute:02d}"
-    for hour in range(9, 17)
-    for minute in (0, 15, 30, 45)
-    if (hour, minute) >= (9, 30) and (hour, minute) <= (16, 0)
-]
+ROOM2_CLEAN_SLATE_MESSAGE = (
+    "DATABASE SNAPSHOT: 100% CLEAN SLATE. No patterns logged. "
+    "System is an empty quantitative canvas waiting for training input."
+)
 
 st.set_page_config(
     page_title="Savant Apprentice",
@@ -261,49 +259,6 @@ st.markdown("""
             border-color: #2A2A2A !important;
             color: #FFFFFF !important;
         }
-        .whale-banner {
-            background: #07111A !important;
-            border: 1px solid #143A52 !important;
-            border-radius: 4px;
-            padding: 10px;
-            margin-top: 8px;
-            font-family: monospace;
-            color: #52A2D9;
-        }
-        .whale-banner-active {
-            background: #051018 !important;
-            border: 1px solid #2A7CB8 !important;
-            color: #7BC4FF !important;
-            text-shadow: 0 0 10px rgba(82, 162, 217, 0.45);
-            box-shadow: inset 0 0 18px rgba(42, 124, 184, 0.12);
-        }
-        .insider-banner {
-            background: #1A1607 !important;
-            border: 1px solid #524114 !important;
-            border-radius: 4px;
-            padding: 10px;
-            margin-top: 8px;
-            font-family: monospace;
-            color: #D9B352;
-        }
-        .insider-banner-active {
-            background: #231C06 !important;
-            border: 1px solid #C9A033 !important;
-            color: #FFD978 !important;
-            text-shadow: 0 0 10px rgba(217, 179, 82, 0.45);
-            box-shadow: inset 0 0 18px rgba(201, 160, 51, 0.12);
-        }
-        .proxy-banner-title {
-            font-size: 10px;
-            font-weight: 700;
-            letter-spacing: 0.1em;
-            text-transform: uppercase;
-            margin-bottom: 6px;
-        }
-        .proxy-banner-body {
-            font-size: 11px;
-            line-height: 1.55;
-        }
         .room2-wire-title {
             font-size: 11px;
             font-weight: 700;
@@ -365,6 +320,15 @@ elif not isinstance(st.session_state.room2_chat_history, list):
     st.session_state.room2_chat_history = list(st.session_state.room2_chat_history)
 if "room2_text_buffer" not in st.session_state: st.session_state.room2_text_buffer = ""
 if "room2_vault_flash" not in st.session_state: st.session_state.room2_vault_flash = ""
+if "entry_time" not in st.session_state: st.session_state.entry_time = "09:31 AM"
+if "exit_time" not in st.session_state: st.session_state.exit_time = "04:00 PM"
+if "supabase_ready" not in st.session_state:
+    try:
+        st.session_state.supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+        st.session_state.supabase_key = st.secrets["SUPABASE_KEY"]
+        st.session_state.supabase_ready = True
+    except Exception:
+        st.session_state.supabase_ready = False
 if "sidebar_collapsed" not in st.session_state: st.session_state.sidebar_collapsed = False
 if "terminal_hub" not in st.session_state: st.session_state.terminal_hub = ROOM1_LABEL
 if "llm_memory" not in st.session_state:
@@ -852,6 +816,33 @@ def process_room2_chat_submission():
     st.session_state.room2_text_buffer = ""
 
 
+def purge_room2_conversation_and_cloud() -> None:
+    """Wipe Room 2 lab chat and force PostgREST forensic_patterns clean slate."""
+    if not st.session_state.get("supabase_ready"):
+        try:
+            st.session_state.supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+            st.session_state.supabase_key = st.secrets["SUPABASE_KEY"]
+            st.session_state.supabase_ready = True
+        except Exception:
+            st.session_state.supabase_ready = False
+
+    if st.session_state.get("supabase_ready"):
+        endpoint = f"{st.session_state.supabase_url}/rest/v1/forensic_patterns?id=not.is.null"
+        requests.delete(
+            endpoint,
+            headers={
+                "apikey": st.session_state.supabase_key,
+                "Authorization": f"Bearer {st.session_state.supabase_key}",
+            },
+            timeout=12,
+        )
+
+    st.session_state.room2_chat_history = [
+        {"speaker": "Forensic Expert", "text": ROOM2_CLEAN_SLATE_MESSAGE}
+    ]
+    st.session_state.room2_text_buffer = ""
+
+
 @st.cache_resource
 def init_supabase():
     if create_client is None:
@@ -897,18 +888,14 @@ def _room2_coordinate_string(date_val, time_val: str) -> str:
 
 
 def _purge_room2_deck_inputs() -> None:
-    """Clear Room 2 left-deck widgets and restore default dropdown coordinates."""
+    """Clear Room 2 left-deck widgets and restore default AM/PM time anchors."""
     today = date.today()
     st.session_state.room2_good_setup_label = ""
     st.session_state.room2_bad_operator_notes = ""
     st.session_state.room2_good_date = today
     st.session_state.room2_bad_date = today
-    st.session_state.room2_good_time = (
-        "09:45" if "09:45" in ROOM2_SESSION_TIMES else ROOM2_SESSION_TIMES[0]
-    )
-    st.session_state.room2_bad_time = (
-        "15:30" if "15:30" in ROOM2_SESSION_TIMES else ROOM2_SESSION_TIMES[-1]
-    )
+    st.session_state.entry_time = "09:31 AM"
+    st.session_state.exit_time = "04:00 PM"
 
 
 def _room2_ascii_line(label: str, value: str, width: int = 36) -> str:
@@ -927,8 +914,8 @@ def _build_room2_telemetry_sheet() -> str:
     operator_notes = st.session_state.get("room2_bad_operator_notes", "").strip() or "—"
     good_date = st.session_state.get("room2_good_date")
     bad_date = st.session_state.get("room2_bad_date")
-    good_time = st.session_state.get("room2_good_time", "—")
-    bad_time = st.session_state.get("room2_bad_time", "—")
+    entry_time = st.session_state.get("entry_time", "09:31 AM")
+    exit_time = st.session_state.get("exit_time", "04:00 PM")
     ticker = st.session_state.room2_forensic_ticker.strip().upper() or "—"
     quantum_core = st.session_state.room2_quantum_report.strip()
 
@@ -937,8 +924,10 @@ def _build_room2_telemetry_sheet() -> str:
         "│ SAVANT FORENSIC TELEMETRY READOUT    │",
         "├──────────────────────────────────────┤",
         _room2_ascii_line("TICKER", ticker),
-        _room2_ascii_line("ENTRY COORD", _room2_coordinate_string(good_date, good_time) or "—"),
-        _room2_ascii_line("EXIT COORD", _room2_coordinate_string(bad_date, bad_time) or "—"),
+        _room2_ascii_line("ENTRY DATE", str(good_date) if good_date else "—"),
+        _room2_ascii_line("ENTRY TIME", entry_time),
+        _room2_ascii_line("EXIT DATE", str(bad_date) if bad_date else "—"),
+        _room2_ascii_line("EXIT TIME", exit_time),
         "├──────────────────────────────────────┤",
         _room2_ascii_line("SETUP CLASS", setup_label),
         _room2_ascii_line("MANUAL CTX", operator_notes),
@@ -965,73 +954,24 @@ def _build_room2_telemetry_sheet() -> str:
     return "\n".join(header + body + footer)
 
 
-def _render_room2_proxy_telemetry_banners() -> None:
-    inst = st.session_state.get("forensic_institutional_tracker", {})
-    form4 = st.session_state.get("forensic_form4_tracker", {})
-
-    whale_active = bool(inst.get("institutional_block_accumulation"))
-    whale_class = "whale-banner whale-banner-active" if whale_active else "whale-banner"
-    if whale_active:
-        whale_body = inst.get("inst_block_summary", "Institutional Block Accumulation Detected")
-    else:
-        peak = inst.get("peak_surge_ratio", 0.0)
-        baseline = inst.get("volume_baseline_20d", 0.0)
-        if baseline:
-            whale_body = (
-                f"NO BLOCK SURGE — Peak: {peak:.1f}x vs 20D baseline | "
-                f"20D Avg Vol: {baseline:,.0f} | Threshold: 4.0x"
-            )
-        else:
-            whale_body = "STANDBY — Run forensic scan to load 20-day volume baseline wire."
-
-    insider_active = bool(form4.get("insider_buy_detected"))
-    insider_class = "insider-banner insider-banner-active" if insider_active else "insider-banner"
-    if insider_active:
-        insider_body = form4.get("form4_summary", "FORM4 INSIDER BUY ACTIVE")
-        events = form4.get("insider_events", [])
-        if events:
-            detail = " | ".join(
-                f"{evt.get('transaction_date', '—')}: {int(evt.get('shares', 0)):,} shares"
-                for evt in events[:3]
-            )
-            insider_body = f"{insider_body} | RECON: {detail}"
-    else:
-        insider_body = form4.get("form4_summary", "STANDBY — No Form 4 insider buying flagged in last 30 days.")
-
-    st.markdown(
-        f'<div class="{whale_class}">'
-        f'<div class="proxy-banner-title">🐳 INSTITUTIONAL BLOCK FLOWS</div>'
-        f'<div class="proxy-banner-body">{escape(whale_body)}</div>'
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="{insider_class}">'
-        f'<div class="proxy-banner-title">👔 MANAGEMENT INSIDER RECONNAISSANCE</div>'
-        f'<div class="proxy-banner-body">{escape(insider_body)}</div>'
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-
 def _stream_room2_payload_to_vault() -> tuple[bool, str]:
     ticker = st.session_state.room2_forensic_ticker.strip().upper()
     if not ticker:
         return False, "Set a forensic ticker before streaming to the Internet Vault."
     good_date = st.session_state.get("room2_good_date")
     bad_date = st.session_state.get("room2_bad_date")
-    good_time = st.session_state.get("room2_good_time", ROOM2_SESSION_TIMES[0])
-    bad_time = st.session_state.get("room2_bad_time", ROOM2_SESSION_TIMES[0])
+    entry_time = st.session_state.get("entry_time", "09:31 AM")
+    exit_time = st.session_state.get("exit_time", "04:00 PM")
     setup_label = st.session_state.get("room2_good_setup_label", "")
     operator_notes = st.session_state.get("room2_bad_operator_notes", "")
     quantum_report = st.session_state.room2_quantum_report or "NO_QUANTUM_OUTPUT"
     payload = core_quantum.build_vault_payload(
         ticker=ticker,
         pattern_category=setup_label,
-        entry_coordinate=_room2_coordinate_string(good_date, good_time),
-        exit_coordinate=_room2_coordinate_string(bad_date, bad_time),
-        entry_time=good_time,
-        exit_time=bad_time,
+        entry_coordinate=_room2_coordinate_string(good_date, entry_time),
+        exit_coordinate=_room2_coordinate_string(bad_date, exit_time),
+        entry_time=entry_time,
+        exit_time=exit_time,
         operator_notes=operator_notes,
         quantum_report=quantum_report,
         bar_count=st.session_state.room2_bar_count,
@@ -1066,13 +1006,10 @@ def render_room2_forensic_lab():
                 "Entry Date Coordinate",
                 key="room2_good_date",
             )
-            st.selectbox(
-                "Entry Session Time",
-                ROOM2_SESSION_TIMES,
-                index=ROOM2_SESSION_TIMES.index("09:45")
-                if "09:45" in ROOM2_SESSION_TIMES
-                else 0,
-                key="room2_good_time",
+            st.text_input(
+                "Entry Time",
+                key="entry_time",
+                placeholder="09:31 AM",
             )
             st.text_input(
                 "Setup Label (Optional)",
@@ -1090,13 +1027,10 @@ def render_room2_forensic_lab():
                 "Exit / Failure Date Coordinate",
                 key="room2_bad_date",
             )
-            st.selectbox(
-                "Exit / Failure Session Time",
-                ROOM2_SESSION_TIMES,
-                index=ROOM2_SESSION_TIMES.index("15:30")
-                if "15:30" in ROOM2_SESSION_TIMES
-                else len(ROOM2_SESSION_TIMES) - 1,
-                key="room2_bad_time",
+            st.text_input(
+                "Exit Time",
+                key="exit_time",
+                placeholder="04:00 PM",
             )
             st.text_input(
                 "Operator Notes (Optional)",
@@ -1131,17 +1065,17 @@ def render_room2_forensic_lab():
                 else:
                     good_date = st.session_state.get("room2_good_date")
                     bad_date = st.session_state.get("room2_bad_date")
-                    good_time = st.session_state.get("room2_good_time", ROOM2_SESSION_TIMES[0])
-                    bad_time = st.session_state.get("room2_bad_time", ROOM2_SESSION_TIMES[0])
+                    entry_time = st.session_state.get("entry_time", "09:31 AM")
+                    exit_time = st.session_state.get("exit_time", "04:00 PM")
                     setup_label = st.session_state.get("room2_good_setup_label", "")
                     operator_notes = st.session_state.get("room2_bad_operator_notes", "")
                     date_coords = (
-                        _room2_coordinate_string(good_date, good_time) or None,
-                        _room2_coordinate_string(bad_date, bad_time) or None,
+                        _room2_coordinate_string(good_date, entry_time) or None,
+                        _room2_coordinate_string(bad_date, exit_time) or None,
                     )
                     feedback = operator_notes.strip()
-                    if good_time or bad_time:
-                        feedback = f"{feedback} | ENTRY_TIME:{good_time} | EXIT_TIME:{bad_time}".strip(" |")
+                    if entry_time or exit_time:
+                        feedback = f"{feedback} | ENTRY_TIME:{entry_time} | EXIT_TIME:{exit_time}".strip(" |")
 
                     with st.spinner("MacBook local processor: pulling 15m history wire..."):
                         data_stream = core_quantum.get_historical_15m_data(lab_ticker)
@@ -1184,8 +1118,6 @@ def render_room2_forensic_lab():
                 unsafe_allow_html=True,
             )
 
-            _render_room2_proxy_telemetry_banners()
-
             if st.button("🛰️ STREAM PAYLOAD TO INTERNET VAULT", key="room2_vault_stream", use_container_width=True):
                 ok, message = _stream_room2_payload_to_vault()
                 if ok:
@@ -1198,6 +1130,9 @@ def render_room2_forensic_lab():
             '<div class="room2-wire-title">💬 FORENSIC LAB CONVERSATION WIRE</div>',
             unsafe_allow_html=True,
         )
+        if st.button("🗑️ PURGE LAB CONVERSATION & CLOUD SNAPSHOT", key="room2_purge_conversation", use_container_width=True):
+            purge_room2_conversation_and_cloud()
+            st.rerun()
         if not st.session_state.room2_chat_history:
             st.caption("No lab conversation yet — query the Forensic Pattern Research Expert below.")
         else:
