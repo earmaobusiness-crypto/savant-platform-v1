@@ -10,6 +10,9 @@ import streamlit.components.v1 as components
 import yfinance as yf
 from groq import Groq
 
+# Import your MacBook math engine chip
+import core_quantum
+
 SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
 SECTOR_ETFS = [
     ("XLK", "Technology"), ("XLF", "Financials"), ("XLE", "Energy"), ("XLV", "Health Care"),
@@ -96,7 +99,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Initialize Session Tracking State Matrix Memory
+# Initialize Session Tracking State Memory Matrix
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "current_ticker" not in st.session_state: st.session_state.current_ticker = None
 if "timeframe" not in st.session_state: st.session_state.timeframe = "D"
@@ -106,6 +109,7 @@ if "sector_rotation_context" not in st.session_state: st.session_state.sector_ro
 if "data_payload_string" not in st.session_state: st.session_state.data_payload_string = ""
 if "cross_asset_correlation_context" not in st.session_state: st.session_state.cross_asset_correlation_context = ""
 if "institutional_accumulation_detected" not in st.session_state: st.session_state.institutional_accumulation_detected = False
+if "polygon_lockout" not in st.session_state: st.session_state.polygon_lockout = False
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [
         {
@@ -182,4 +186,3 @@ def _fetch_news_wire(ticker: str) -> list[str]:
         pass
     try:
         q = urllib.parse.quote(f"{ticker} stock", safe="")
-        rss_url = f"https://google.com{q}&hl=en-US&gl=US&ceid=US:en"
