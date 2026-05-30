@@ -4,6 +4,7 @@ import statistics
 import urllib.parse
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from html import escape
 from xml.etree import ElementTree
 
 import core_quantum
@@ -160,6 +161,94 @@ st.markdown("""
             color: #FFFFFF;
             margin-bottom: 4px;
         }
+        [data-testid="stVerticalBlockBorderWrapper"]:has(.good-card) {
+            background: #0D1A0D !important;
+            border: 1px solid #1E3A1E !important;
+            border-radius: 8px !important;
+            padding: 14px 16px 8px 16px !important;
+            margin-bottom: 16px !important;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"]:has(.bad-card) {
+            background: #1A0D0D !important;
+            border: 1px solid #3A1E1E !important;
+            border-radius: 8px !important;
+            padding: 14px 16px 8px 16px !important;
+            margin-bottom: 16px !important;
+        }
+        .deck-title {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #E5E5E5;
+            margin-bottom: 12px;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"]:has(.room2-core-panel) {
+            background: #111111 !important;
+            border: 1px solid #1F1F1F !important;
+            border-radius: 8px !important;
+            padding: 14px 16px 10px 16px !important;
+            margin-bottom: 16px !important;
+        }
+        .room2-core-title {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #AAAAAA;
+            margin-bottom: 10px;
+        }
+        .room2-core-payload {
+            background: #0A0A0A;
+            border: 1px solid #222222;
+            border-radius: 6px;
+            padding: 12px 14px;
+            font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.55;
+            color: #D4D4D4;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .room2-wire-title {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #888888;
+            margin: 8px 0 12px 0;
+        }
+        .room2-chat-row {
+            padding: 12px 0;
+            border-bottom: 1px solid #141414;
+        }
+        .room2-speaker-operator {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: #555555;
+            margin-bottom: 6px;
+        }
+        .room2-speaker-expert {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: #5AC8FA;
+            margin-bottom: 6px;
+        }
+        .room2-chat-body {
+            font-size: 14px;
+            line-height: 1.6;
+            color: #CCCCCC;
+        }
+        .room2-chat-body-expert {
+            font-size: 13px;
+            line-height: 1.6;
+            color: #E5E5E5;
+            font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -176,6 +265,8 @@ if "polygon_lockout" not in st.session_state: st.session_state.polygon_lockout =
 if "room2_forensic_ticker" not in st.session_state: st.session_state.room2_forensic_ticker = ""
 if "room2_quantum_report" not in st.session_state: st.session_state.room2_quantum_report = ""
 if "room2_bar_count" not in st.session_state: st.session_state.room2_bar_count = 0
+if "room2_chat_history" not in st.session_state: st.session_state.room2_chat_history = []
+if "room2_text_buffer" not in st.session_state: st.session_state.room2_text_buffer = ""
 if "sidebar_collapsed" not in st.session_state: st.session_state.sidebar_collapsed = False
 if "terminal_hub" not in st.session_state: st.session_state.terminal_hub = ROOM1_LABEL
 if "llm_memory" not in st.session_state:
@@ -618,6 +709,51 @@ def process_chat_submission():
     st.session_state.text_field_buffer = ""
 
 
+FORENSIC_EXPERT_SYSTEM = (
+    "You are the Forensic Pattern Research Expert — the dedicated Room 2 brain layer for "
+    "Savant Apprentice. Operate exclusively on validated good-file setups, toxic bad-file "
+    "anomalies, 15m quantum frequency output, and operator coordinate matrices. "
+    "Deliver institutional-grade forensic research: pattern classification rigor, failure-mode "
+    "diagnostics, structural match interpretation, and actionable lab notes. "
+    "Zero greetings, zero filler, zero generic market commentary unrelated to the forensic payload."
+)
+
+
+def _build_room2_groq_messages(user_text: str) -> list[dict]:
+    context_bits = []
+    if st.session_state.room2_quantum_report:
+        context_bits.append(
+            f"[QUANTUM_CORE]{st.session_state.room2_quantum_report}[/QUANTUM_CORE]"
+        )
+    if st.session_state.room2_forensic_ticker:
+        context_bits.append(
+            f"[FORENSIC_TICKER]{st.session_state.room2_forensic_ticker}[/FORENSIC_TICKER]"
+        )
+    groq_msgs = [
+        {"role": "system", "content": f"{FORENSIC_EXPERT_SYSTEM}\n{TOKEN_GUARD}"},
+    ]
+    prior = st.session_state.room2_chat_history[:-1]
+    for msg in prior[-6:]:
+        role = "user" if msg["speaker"] == "You" else "assistant"
+        groq_msgs.append({"role": role, "content": msg["text"]})
+    latest = user_text
+    if context_bits:
+        latest = f"{user_text}\n" + "\n".join(context_bits)
+    groq_msgs.append({"role": "user", "content": latest})
+    return groq_msgs
+
+
+def process_room2_chat_submission():
+    user_text = st.session_state.room2_text_buffer.strip()
+    if not user_text:
+        return
+    st.session_state.room2_chat_history.append({"speaker": "You", "text": user_text})
+    groq_msgs = _build_room2_groq_messages(user_text)
+    ai_text = run_groq(groq_msgs)
+    st.session_state.room2_chat_history.append({"speaker": "Forensic Expert", "text": ai_text})
+    st.session_state.room2_text_buffer = ""
+
+
 @st.cache_resource
 def init_supabase():
     if create_client is None:
@@ -670,69 +806,174 @@ def render_room2_forensic_lab():
     if st.session_state.polygon_lockout:
         st.error("Polygon API lockout active — 5 calls/min limit reached. Standby before rescanning.")
 
-    hud_left, hud_right = st.columns([0.55, 0.45])
-    with hud_left:
-        default_ticker = st.session_state.room2_forensic_ticker or st.session_state.current_ticker or ""
-        lab_ticker = st.text_input(
-            "Forensic Symbol",
-            value=default_ticker,
-            placeholder="Enter ticker for 15m deep-history scan (e.g. AAPL)",
-            key="room2_ticker_input",
-        ).strip().upper()
-        if lab_ticker:
-            st.session_state.room2_forensic_ticker = lab_ticker
+    col_left, col_right = st.columns([1.0, 1.0])
 
-        if st.button("INITIATE 15M FORENSIC SCAN", key="room2_run_scan", use_container_width=True):
-            if not lab_ticker:
-                st.warning("Enter a ticker symbol to run the forensic pipeline.")
-            else:
-                with st.spinner("MacBook local processor: pulling 15m history wire..."):
-                    data_stream = core_quantum.get_historical_15m_data(lab_ticker)
-                    quantum_report = core_quantum.calculate_quantum_frequencies(data_stream)
-                if data_stream == "LOCKOUT":
-                    st.session_state.polygon_lockout = True
-                    st.error("Polygon rate limit hit. Forensic pipeline sidelined.")
-                elif data_stream is None:
-                    st.warning("No historical data returned for this symbol.")
+    with col_left:
+        with st.container(border=True):
+            st.markdown(
+                '<span class="good-card"></span>'
+                '<div class="deck-title">🟩 VALIDATED PATTERN TRACKING (GOOD FILES)</div>',
+                unsafe_allow_html=True,
+            )
+            good_entry_date = st.date_input(
+                "Entry Date Coordinate",
+                key="room2_good_date",
+            )
+            st.text_input(
+                "Entry Timestamp",
+                placeholder="e.g. 09:45 ET session open",
+                key="room2_good_timestamp",
+            )
+            st.number_input(
+                "Entry Price",
+                min_value=0.0,
+                format="%.4f",
+                key="room2_good_entry_price",
+            )
+            st.text_input(
+                "Setup Label (Optional)",
+                placeholder="Breakout, Continuation, Accumulation...",
+                key="room2_good_setup_label",
+            )
+
+        with st.container(border=True):
+            st.markdown(
+                '<span class="bad-card"></span>'
+                '<div class="deck-title">🟥 TOXIC ANOMALY TRACKING (BAD FILES)</div>',
+                unsafe_allow_html=True,
+            )
+            bad_exit_date = st.date_input(
+                "Exit / Failure Date Coordinate",
+                key="room2_bad_date",
+            )
+            st.text_input(
+                "Exit Timestamp",
+                placeholder="e.g. 15:30 ET failure print",
+                key="room2_bad_timestamp",
+            )
+            st.number_input(
+                "Exit Failure Price",
+                min_value=0.0,
+                format="%.4f",
+                key="room2_bad_exit_price",
+            )
+            st.text_input(
+                "Operator Notes (Optional)",
+                placeholder="Anomaly flags, trap signals, manual corrections...",
+                key="room2_bad_operator_notes",
+            )
+
+    with col_right:
+        with st.container(border=True):
+            st.markdown(
+                '<span class="room2-core-panel"></span>'
+                '<div class="room2-core-title">🧠 MACBOOK PROCESSOR FORENSIC CORE</div>',
+                unsafe_allow_html=True,
+            )
+            default_ticker = st.session_state.room2_forensic_ticker or st.session_state.current_ticker or ""
+            lab_ticker = st.text_input(
+                "Forensic Symbol",
+                value=default_ticker,
+                placeholder="Enter ticker for 15m deep-history scan (e.g. AAPL)",
+                key="room2_ticker_input",
+            ).strip().upper()
+            if lab_ticker:
+                st.session_state.room2_forensic_ticker = lab_ticker
+
+            if st.button("INITIATE 15M FORENSIC SCAN", key="room2_run_scan", use_container_width=True):
+                if not lab_ticker:
+                    st.warning("Enter a ticker symbol to run the forensic pipeline.")
                 else:
-                    st.session_state.polygon_lockout = False
-                    st.session_state.room2_bar_count = len(data_stream) if hasattr(data_stream, "__len__") else 0
-                    st.session_state.room2_quantum_report = quantum_report
-                    st.success(
-                        f"Forensic scan complete — {lab_ticker} | bars loaded: {st.session_state.room2_bar_count}"
+                    good_date = st.session_state.get("room2_good_date")
+                    bad_date = st.session_state.get("room2_bad_date")
+                    entry_price = st.session_state.get("room2_good_entry_price")
+                    exit_price = st.session_state.get("room2_bad_exit_price")
+                    setup_label = st.session_state.get("room2_good_setup_label", "")
+                    operator_notes = st.session_state.get("room2_bad_operator_notes", "")
+                    good_ts = st.session_state.get("room2_good_timestamp", "")
+                    bad_ts = st.session_state.get("room2_bad_timestamp", "")
+                    date_coords = (
+                        f"{good_date} {good_ts}".strip() if good_date else None,
+                        f"{bad_date} {bad_ts}".strip() if bad_date else None,
+                    )
+                    price_coords = (
+                        entry_price if entry_price else None,
+                        exit_price if exit_price else None,
+                    )
+                    feedback = operator_notes.strip()
+                    if good_ts or bad_ts:
+                        feedback = f"{feedback} | GOOD_TS:{good_ts} | BAD_TS:{bad_ts}".strip(" |")
+
+                    with st.spinner("MacBook local processor: pulling 15m history wire..."):
+                        data_stream = core_quantum.get_historical_15m_data(lab_ticker)
+                        quantum_report = core_quantum.calculate_quantum_frequencies(
+                            data_stream,
+                            pattern_category=setup_label,
+                            date_coordinates=date_coords,
+                            prices=price_coords,
+                            human_feedback=feedback,
+                            ticker=lab_ticker,
+                        )
+                    if data_stream == "LOCKOUT":
+                        st.session_state.polygon_lockout = True
+                        st.error("Polygon rate limit hit. Forensic pipeline sidelined.")
+                    elif data_stream is None:
+                        st.warning("No historical data returned for this symbol.")
+                    else:
+                        st.session_state.polygon_lockout = False
+                        st.session_state.room2_bar_count = (
+                            len(data_stream) if hasattr(data_stream, "__len__") else 0
+                        )
+                        st.session_state.room2_quantum_report = quantum_report
+                        st.success(
+                            f"Forensic scan complete — {lab_ticker} | bars loaded: "
+                            f"{st.session_state.room2_bar_count}"
+                        )
+
+            payload_text = st.session_state.room2_quantum_report or (
+                "Awaiting 15m forensic scan — local quantum processor standing by."
+            )
+            st.markdown(
+                f'<div class="room2-core-payload">{escape(payload_text)}</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown(
+            '<div class="room2-wire-title">💬 FORENSIC LAB CONVERSATION WIRE</div>',
+            unsafe_allow_html=True,
+        )
+        if not st.session_state.room2_chat_history:
+            st.caption("No lab conversation yet — query the Forensic Pattern Research Expert below.")
+        else:
+            for msg in st.session_state.room2_chat_history:
+                safe_text = escape(msg.get("text", ""))
+                if msg["speaker"] == "You":
+                    st.markdown(
+                        f'<div class="room2-chat-row">'
+                        f'<div class="room2-speaker-operator">{msg["speaker"]}</div>'
+                        f'<div class="room2-chat-body">{safe_text}</div>'
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        f'<div class="room2-chat-row">'
+                        f'<div class="room2-speaker-expert">{msg["speaker"]}</div>'
+                        f'<div class="room2-chat-body-expert">{safe_text}</div>'
+                        f"</div>",
+                        unsafe_allow_html=True,
                     )
 
-    with hud_right:
-        st.markdown("**Quantum Processor Output**")
-        if st.session_state.room2_quantum_report:
-            st.code(st.session_state.room2_quantum_report, language=None)
-        else:
-            st.caption("Run a forensic scan to populate local quantum frequency output.")
-
-    st.markdown("---")
-    operator_context = st.text_area(
-        "Operator Manual Context Corrections",
-        placeholder="Enter institutional pattern notes, anomaly flags, or manual context corrections...",
-        height=140,
-        key="room2_operator_context",
-    )
-
-    if st.button("ROUTE PATTERN CONTEXT TO SUPABASE", key="room2_supabase_submit", use_container_width=True):
-        ticker_for_route = st.session_state.room2_forensic_ticker.strip().upper()
-        if not ticker_for_route:
-            st.warning("Set a forensic ticker before routing context.")
-        elif not operator_context.strip():
-            st.warning("Enter operator manual context corrections before submission.")
-        else:
-            ok, message = _route_pattern_context_to_supabase(
-                ticker_for_route,
-                operator_context,
-                st.session_state.room2_quantum_report or "NO_QUANTUM_OUTPUT",
+        with st.form("room2_chat_form", clear_on_submit=False):
+            st.text_input(
+                "Lab Input",
+                key="room2_text_buffer",
+                placeholder="Query the Forensic Pattern Research Expert...",
+                label_visibility="collapsed",
             )
-            if ok:
-                st.success(message)
-            else:
-                st.error(message)
+            if st.form_submit_button("Send") and st.session_state.room2_text_buffer.strip():
+                st.session_state._pending_room2_chat_submit = True
+                st.rerun()
 
 
 def render_terminal_nav() -> str:
@@ -788,6 +1029,10 @@ def render_terminal_nav() -> str:
 if st.session_state.pop("_pending_chat_submit", False):
     with st.spinner("Savant processing live data layers..."):
         process_chat_submission()
+
+if st.session_state.pop("_pending_room2_chat_submit", False):
+    with st.spinner("Forensic Pattern Research Expert processing..."):
+        process_room2_chat_submission()
 
 terminal_hub = render_terminal_nav()
 
