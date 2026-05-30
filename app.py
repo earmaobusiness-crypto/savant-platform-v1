@@ -2,7 +2,7 @@ import os
 import re
 import statistics
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from difflib import SequenceMatcher
 from html import escape
 from xml.etree import ElementTree
@@ -359,7 +359,10 @@ if "polygon_lockout" not in st.session_state: st.session_state.polygon_lockout =
 if "room2_forensic_ticker" not in st.session_state: st.session_state.room2_forensic_ticker = ""
 if "room2_quantum_report" not in st.session_state: st.session_state.room2_quantum_report = ""
 if "room2_bar_count" not in st.session_state: st.session_state.room2_bar_count = 0
-if "room2_chat_history" not in st.session_state: st.session_state.room2_chat_history = []
+if "room2_chat_history" not in st.session_state:
+    st.session_state.room2_chat_history = []
+elif not isinstance(st.session_state.room2_chat_history, list):
+    st.session_state.room2_chat_history = list(st.session_state.room2_chat_history)
 if "room2_text_buffer" not in st.session_state: st.session_state.room2_text_buffer = ""
 if "room2_vault_flash" not in st.session_state: st.session_state.room2_vault_flash = ""
 if "sidebar_collapsed" not in st.session_state: st.session_state.sidebar_collapsed = False
@@ -893,6 +896,75 @@ def _room2_coordinate_string(date_val, time_val: str) -> str:
     return f"{date_val} {time_val}".strip()
 
 
+def _purge_room2_deck_inputs() -> None:
+    """Clear Room 2 left-deck widgets and restore default dropdown coordinates."""
+    today = date.today()
+    st.session_state.room2_good_setup_label = ""
+    st.session_state.room2_bad_operator_notes = ""
+    st.session_state.room2_good_date = today
+    st.session_state.room2_bad_date = today
+    st.session_state.room2_good_time = (
+        "09:45" if "09:45" in ROOM2_SESSION_TIMES else ROOM2_SESSION_TIMES[0]
+    )
+    st.session_state.room2_bad_time = (
+        "15:30" if "15:30" in ROOM2_SESSION_TIMES else ROOM2_SESSION_TIMES[-1]
+    )
+
+
+def _room2_ascii_line(label: str, value: str, width: int = 36) -> str:
+    if label:
+        text = f"{label}: {value}" if value else f"{label}: —"
+    else:
+        text = value or "—"
+    if len(text) > width:
+        text = text[: width - 3] + "..."
+    return f"│ {text:<{width}} │"
+
+
+def _build_room2_telemetry_sheet() -> str:
+    """Dynamic ASCII telemetry readout — binds operator deck inputs in real time."""
+    setup_label = st.session_state.get("room2_good_setup_label", "").strip() or "—"
+    operator_notes = st.session_state.get("room2_bad_operator_notes", "").strip() or "—"
+    good_date = st.session_state.get("room2_good_date")
+    bad_date = st.session_state.get("room2_bad_date")
+    good_time = st.session_state.get("room2_good_time", "—")
+    bad_time = st.session_state.get("room2_bad_time", "—")
+    ticker = st.session_state.room2_forensic_ticker.strip().upper() or "—"
+    quantum_core = st.session_state.room2_quantum_report.strip()
+
+    header = [
+        "┌──────────────────────────────────────┐",
+        "│ SAVANT FORENSIC TELEMETRY READOUT    │",
+        "├──────────────────────────────────────┤",
+        _room2_ascii_line("TICKER", ticker),
+        _room2_ascii_line("ENTRY COORD", _room2_coordinate_string(good_date, good_time) or "—"),
+        _room2_ascii_line("EXIT COORD", _room2_coordinate_string(bad_date, bad_time) or "—"),
+        "├──────────────────────────────────────┤",
+        _room2_ascii_line("SETUP CLASS", setup_label),
+        _room2_ascii_line("MANUAL CTX", operator_notes),
+        "├──────────────────────────────────────┤",
+    ]
+
+    if quantum_core:
+        body = ["│ QUANT PROCESSOR OUTPUT:              │"]
+        for segment in quantum_core.split(" | "):
+            segment = segment.strip()
+            while segment:
+                body.append(_room2_ascii_line("", f"▸ {segment[:32]}", width=34))
+                segment = segment[32:]
+        footer = ["└──────────────────────────────────────┘"]
+    else:
+        body = [
+            "│ > AWAITING 15M SCAN                  │",
+            "│ > MACBOOK QUANT PROCESSOR STANDBY    │",
+            "│ > POLYGON SHIELD: 5 CALLS / MINUTE   │",
+            "└──────────────────────────────────────┘",
+        ]
+        footer = []
+
+    return "\n".join(header + body + footer)
+
+
 def _render_room2_proxy_telemetry_banners() -> None:
     inst = st.session_state.get("forensic_institutional_tracker", {})
     form4 = st.session_state.get("forensic_form4_tracker", {})
@@ -1032,6 +1104,10 @@ def render_room2_forensic_lab():
                 key="room2_bad_operator_notes",
             )
 
+        if st.button("🧹 PURGE FORENSIC DECK INPUTS", key="room2_purge_deck", use_container_width=True):
+            _purge_room2_deck_inputs()
+            st.rerun()
+
     with col_right:
         with st.container(border=True):
             st.markdown(
@@ -1098,11 +1174,7 @@ def render_room2_forensic_lab():
                     unsafe_allow_html=True,
                 )
 
-            payload_text = st.session_state.room2_quantum_report or (
-                "> SAVANT FORENSIC TERMINAL ONLINE\n"
-                "> AWAITING 15M SCAN — MACBOOK QUANT PROCESSOR STANDING BY\n"
-                "> POLYGON SHIELD: MONITORING 5 CALLS / MINUTE"
-            )
+            payload_text = _build_room2_telemetry_sheet()
             st.markdown(
                 '<div class="room2-terminal-header">▸ LIVE FORENSIC TELEMETRY STREAM</div>',
                 unsafe_allow_html=True,
