@@ -10,10 +10,7 @@ import streamlit.components.v1 as components
 import yfinance as yf
 from groq import Groq
 
-# Seamless integration with your local MacBook processing chip
-import core_quantum
-
-SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@://gmail.com"}
+SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
 SECTOR_ETFS = [
     ("XLK", "Technology"), ("XLF", "Financials"), ("XLE", "Energy"), ("XLV", "Health Care"),
     ("XLU", "Utilities"), ("XLP", "Consumer Staples"), ("XLY", "Consumer Discretionary"),
@@ -96,11 +93,6 @@ st.markdown("""
             background-color: #1A1A1A !important;
         }
         div[data-testid="stForm"] button[data-testid="stFormSubmitButton"] { display: none !important; }
-        
-        /* Premium Tab Styling */
-        .stTabs [data-baseweb="tab-list"] { gap: 24px; background-color: #0B0B0B !important; }
-        .stTabs [data-baseweb="tab"] { color: #666666 !important; font-weight: bold !important; font-size: 14px !important; }
-        .stTabs [aria-selected="true"] { color: #FFFFFF !important; border-bottom-color: #FFFFFF !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -179,3 +171,15 @@ def _dedupe_headlines(headlines: list[str], limit: int = 6) -> list[str]:
             break
     return unique
 
+def _fetch_news_wire(ticker: str) -> list[str]:
+    headlines: list[str] = []
+    try:
+        for item in (yf.Ticker(ticker).news or [])[:12]:
+            title = item.get("title", "")
+            if title:
+                headlines.append(title)
+    except Exception:
+        pass
+    try:
+        q = urllib.parse.quote(f"{ticker} stock", safe="")
+        rss_url = f"https://google.com{q}&hl=en-US&gl=US&ceid=US:en"
