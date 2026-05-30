@@ -1143,20 +1143,25 @@ def _deploy_room2_deck(deck: str) -> None:
 
 
 def _purge_room2_deck_inputs() -> None:
-    """Clear Room 2 deck widgets and restore default AM/PM anchors."""
-    today = date.today()
-    st.session_state.r2_good_ticker = "MLGO"
-    st.session_state.r2_bad_ticker = "AAPL"
-    st.session_state.r2_good_setup_label = ""
-    st.session_state.r2_good_comments = ""
-    st.session_state.r2_bad_notes = ""
-    st.session_state.r2_good_date = today
-    st.session_state.r2_bad_date = today
-    st.session_state.r2_good_entry_time = "09:31 AM"
-    st.session_state.r2_bad_exit_time = "04:00 PM"
+    """Drop widget-bound keys so defaults re-bind on next render — no manual assignment."""
+    for key in (
+        "r2_good_ticker",
+        "r2_bad_ticker",
+        "r2_good_date",
+        "r2_bad_date",
+        "r2_good_entry_time",
+        "r2_bad_exit_time",
+        "r2_good_setup_label",
+        "r2_good_comments",
+        "r2_bad_notes",
+    ):
+        st.session_state.pop(key, None)
 
 
 def render_room2_forensic_lab():
+    if st.session_state.pop("_pending_room2_deck_purge", False):
+        _purge_room2_deck_inputs()
+
     st.markdown(
         """
         <div class="room2-hud">
@@ -1182,20 +1187,25 @@ def render_room2_forensic_lab():
                     '<div class="deck-title">🟩 VALIDATED PATTERN TRACKING (GOOD FILES)</div>',
                     unsafe_allow_html=True,
                 )
-                st.text_input("Good File Ticker", key="r2_good_ticker")
-                st.date_input("Entry Date Coordinate", key="r2_good_date")
-                st.text_input("Entry Time", key="r2_good_entry_time", placeholder="09:31 AM")
-                st.text_input(
-                    "Setup Classification Label",
-                    key="r2_good_setup_label",
-                    placeholder="Breakout, Continuation, Accumulation...",
-                )
-                st.text_input(
-                    "Operator Comments",
-                    key="r2_good_comments",
-                    placeholder="Validated setup notes, context corrections...",
-                )
-                if st.button("🔥 COMMIT VALID PATTERN TO INTERNET", key="r2_deploy_good_button", use_container_width=True):
+                with st.form("r2_good_form_chassis", clear_on_submit=True):
+                    st.text_input("Good File Ticker", key="r2_good_ticker")
+                    st.date_input("Entry Date Coordinate", key="r2_good_date")
+                    st.text_input("Entry Time", key="r2_good_entry_time", placeholder="09:31 AM")
+                    st.text_input(
+                        "Setup Classification Label",
+                        key="r2_good_setup_label",
+                        placeholder="Breakout, Continuation, Accumulation...",
+                    )
+                    st.text_input(
+                        "Operator Comments",
+                        key="r2_good_comments",
+                        placeholder="Validated setup notes, context corrections...",
+                    )
+                    good_deploy = st.form_submit_button(
+                        "🔥 COMMIT VALID PATTERN TO INTERNET",
+                        use_container_width=True,
+                    )
+                if good_deploy:
                     _deploy_room2_deck("good")
                     st.rerun()
 
@@ -1206,20 +1216,25 @@ def render_room2_forensic_lab():
                     '<div class="deck-title">🟥 TOXIC ANOMALY TRACKING (BAD FILES)</div>',
                     unsafe_allow_html=True,
                 )
-                st.text_input("Bad File Ticker", key="r2_bad_ticker")
-                st.date_input("Exit / Failure Date Coordinate", key="r2_bad_date")
-                st.text_input("Exit Time", key="r2_bad_exit_time", placeholder="04:00 PM")
-                st.text_input(
-                    "Danger Notes",
-                    key="r2_bad_notes",
-                    placeholder="Anomaly flags, trap signals, toxic failure context...",
-                )
-                if st.button("🚨 COMMIT TOXIC ANOMALY TO INTERNET", key="r2_deploy_bad_button", use_container_width=True):
+                with st.form("r2_bad_form_chassis", clear_on_submit=True):
+                    st.text_input("Bad File Ticker", key="r2_bad_ticker")
+                    st.date_input("Exit / Failure Date Coordinate", key="r2_bad_date")
+                    st.text_input("Exit Time", key="r2_bad_exit_time", placeholder="04:00 PM")
+                    st.text_input(
+                        "Danger Notes",
+                        key="r2_bad_notes",
+                        placeholder="Anomaly flags, trap signals, toxic failure context...",
+                    )
+                    bad_deploy = st.form_submit_button(
+                        "🚨 COMMIT TOXIC ANOMALY TO INTERNET",
+                        use_container_width=True,
+                    )
+                if bad_deploy:
                     _deploy_room2_deck("bad")
                     st.rerun()
 
         if st.button("🧹 PURGE FORENSIC DECK INPUTS", key="room2_purge_deck", use_container_width=True):
-            _purge_room2_deck_inputs()
+            st.session_state._pending_room2_deck_purge = True
             st.rerun()
 
     with col_right:
