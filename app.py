@@ -21,9 +21,9 @@ except ImportError:
 
 ROOM1_LABEL = "🏛️ Room 1: Real-Time Front Desk"
 ROOM2_LABEL = "🔮 Room 2: Forensic Pattern Lab"
-ROOM1_ICON = "🏛️"
-ROOM2_ICON = "🔮"
-ICON_ROOM_MAP = {ROOM1_ICON: ROOM1_LABEL, ROOM2_ICON: ROOM2_LABEL}
+ROOM1_SHORT = "🏛️ R1"
+ROOM2_SHORT = "🔮 R2"
+ROOM_SHORT_MAP = {ROOM1_SHORT: ROOM1_LABEL, ROOM2_SHORT: ROOM2_LABEL}
 
 SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
 SECTOR_ETFS = [
@@ -49,10 +49,16 @@ st.set_page_config(
 st.markdown("""
     <style>
         #MainMenu, footer, header {visibility: hidden;}
-        [data-testid="stSidebar"] { min-width: 80px !important; max-width: 80px !important; background-color: #0B0B0B !important; border-right: 1px solid #141414 !important; }
+        [data-testid="stSidebar"] {
+            background-color: #0B0B0B !important;
+            border-right: 1px solid #141414 !important;
+            transition: min-width 0.2s ease, max-width 0.2s ease;
+        }
         [data-testid="stSidebarNav"] { display: none !important; }
-        [data-testid="stSidebar"] [data-testid="stRadio"] label { font-size: 22px !important; padding: 10px 0 !important; justify-content: center !important; }
-        [data-testid="stSidebar"] [data-testid="stRadio"] label p { font-size: 22px !important; line-height: 1 !important; }
+        [data-testid="stSidebar"] [data-testid="stRadio"] label p {
+            font-size: 13px !important;
+            line-height: 1.35 !important;
+        }
         html, body, [data-testid="stAppViewContainer"] {
             background-color: #0B0B0B !important;
             color: #E5E5E5 !important;
@@ -141,6 +147,7 @@ if "polygon_lockout" not in st.session_state: st.session_state.polygon_lockout =
 if "room2_forensic_ticker" not in st.session_state: st.session_state.room2_forensic_ticker = ""
 if "room2_quantum_report" not in st.session_state: st.session_state.room2_quantum_report = ""
 if "room2_bar_count" not in st.session_state: st.session_state.room2_bar_count = 0
+if "sidebar_collapsed" not in st.session_state: st.session_state.sidebar_collapsed = False
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [
         {
@@ -702,15 +709,45 @@ if st.session_state.pop("_pending_chat_submit", False):
     with st.spinner("Savant processing live data layers..."):
         process_chat_submission()
 
+_sidebar_width = "92px" if st.session_state.sidebar_collapsed else "300px"
+st.markdown(
+    f"""
+    <style>
+        [data-testid="stSidebar"] {{
+            min-width: {_sidebar_width} !important;
+            max-width: {_sidebar_width} !important;
+        }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 with st.sidebar:
-    st.markdown("<div style='height: 1.5vh;'></div>", unsafe_allow_html=True)
-    room_selection = st.radio(
-        "NAV",
-        [ROOM1_ICON, ROOM2_ICON],
-        label_visibility="collapsed",
-        key="terminal_icon_dock",
-    )
-    terminal_hub = ICON_ROOM_MAP[room_selection]
+    toggle_label = "▶" if st.session_state.sidebar_collapsed else "◀"
+    if st.button(toggle_label, key="sidebar_collapse_toggle", help="Collapse / expand navigation"):
+        st.session_state.sidebar_collapsed = not st.session_state.sidebar_collapsed
+        st.rerun()
+
+    if not st.session_state.sidebar_collapsed:
+        st.markdown(
+            "<div style='font-size:10px;font-weight:700;letter-spacing:0.12em;"
+            "text-transform:uppercase;color:#555;margin:8px 0 12px 0;'>Terminal Hub</div>",
+            unsafe_allow_html=True,
+        )
+        room_selection = st.radio(
+            "TERMINAL HUB COMMANDS:",
+            [ROOM1_LABEL, ROOM2_LABEL],
+            key="terminal_hub_expanded",
+        )
+        terminal_hub = room_selection
+    else:
+        room_selection = st.radio(
+            "HUB:",
+            [ROOM1_SHORT, ROOM2_SHORT],
+            label_visibility="collapsed",
+            key="terminal_hub_collapsed",
+        )
+        terminal_hub = ROOM_SHORT_MAP[room_selection]
 
 if terminal_hub == ROOM1_LABEL:
     col_chart_side, col_chat_side = st.columns([1.1, 0.9])
