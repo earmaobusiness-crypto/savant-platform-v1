@@ -39,6 +39,12 @@ TOKEN_GUARD = (
 PRIMARY_MODEL = "llama-3.3-70b-versatile"
 FALLBACK_MODEL = "llama3-8b-8192"
 MACRO_DRIVERS = [("GC=F", "GOLD"), ("CL=F", "OIL"), ("^TNX", "TNX"), ("SPY", "SPY")]
+ROOM2_SESSION_TIMES = [
+    f"{hour:02d}:{minute:02d}"
+    for hour in range(9, 17)
+    for minute in (0, 15, 30, 45)
+    if (hour, minute) >= (9, 30) and (hour, minute) <= (16, 0)
+]
 
 st.set_page_config(
     page_title="Savant Apprentice",
@@ -198,17 +204,62 @@ st.markdown("""
             color: #AAAAAA;
             margin-bottom: 10px;
         }
-        .room2-core-payload {
-            background: #0A0A0A;
-            border: 1px solid #222222;
-            border-radius: 6px;
-            padding: 12px 14px;
+        .room2-terminal-box {
+            background: #050505;
+            border: 1px solid #1A3A1A;
+            border-radius: 4px;
+            padding: 16px 18px;
+            font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.65;
+            color: #34C759;
+            text-shadow: 0 0 10px rgba(52, 199, 89, 0.28);
+            white-space: pre-wrap;
+            word-break: break-word;
+            min-height: 140px;
+            box-shadow: inset 0 0 24px rgba(52, 199, 89, 0.04);
+        }
+        .room2-terminal-header {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: #34C759;
+            margin-bottom: 10px;
+            opacity: 0.85;
+        }
+        .room2-vault-success {
+            background: #050505;
+            border: 1px solid #34C759;
+            border-radius: 4px;
+            padding: 14px 16px;
+            margin: 12px 0 16px 0;
             font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
             font-size: 12px;
             line-height: 1.55;
-            color: #D4D4D4;
-            white-space: pre-wrap;
-            word-break: break-word;
+            color: #34C759;
+            text-shadow: 0 0 12px rgba(52, 199, 89, 0.35);
+        }
+        .room2-vault-btn button,
+        button[data-testid="baseButton-room2_vault_stream"] {
+            background: linear-gradient(180deg, #0F1F0F 0%, #081408 100%) !important;
+            color: #34C759 !important;
+            border: 1px solid #34C759 !important;
+            font-size: 12px !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.06em !important;
+            padding: 10px 14px !important;
+        }
+        .room2-vault-btn button:hover,
+        button[data-testid="baseButton-room2_vault_stream"]:hover {
+            background: #122412 !important;
+            color: #FFFFFF !important;
+            border-color: #5AE87A !important;
+        }
+        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+            background-color: #121212 !important;
+            border-color: #2A2A2A !important;
+            color: #FFFFFF !important;
         }
         .room2-wire-title {
             font-size: 11px;
@@ -267,6 +318,7 @@ if "room2_quantum_report" not in st.session_state: st.session_state.room2_quantu
 if "room2_bar_count" not in st.session_state: st.session_state.room2_bar_count = 0
 if "room2_chat_history" not in st.session_state: st.session_state.room2_chat_history = []
 if "room2_text_buffer" not in st.session_state: st.session_state.room2_text_buffer = ""
+if "room2_vault_flash" not in st.session_state: st.session_state.room2_vault_flash = ""
 if "sidebar_collapsed" not in st.session_state: st.session_state.sidebar_collapsed = False
 if "terminal_hub" not in st.session_state: st.session_state.terminal_hub = ROOM1_LABEL
 if "llm_memory" not in st.session_state:
@@ -792,6 +844,37 @@ def _route_pattern_context_to_supabase(ticker: str, operator_context: str, quant
         return False, f"Supabase routing failed: {exc}"
 
 
+def _room2_coordinate_string(date_val, time_val: str) -> str:
+    if not date_val:
+        return ""
+    return f"{date_val} {time_val}".strip()
+
+
+def _stream_room2_payload_to_vault() -> tuple[bool, str]:
+    ticker = st.session_state.room2_forensic_ticker.strip().upper()
+    if not ticker:
+        return False, "Set a forensic ticker before streaming to the Internet Vault."
+    good_date = st.session_state.get("room2_good_date")
+    bad_date = st.session_state.get("room2_bad_date")
+    good_time = st.session_state.get("room2_good_time", ROOM2_SESSION_TIMES[0])
+    bad_time = st.session_state.get("room2_bad_time", ROOM2_SESSION_TIMES[0])
+    setup_label = st.session_state.get("room2_good_setup_label", "")
+    operator_notes = st.session_state.get("room2_bad_operator_notes", "")
+    quantum_report = st.session_state.room2_quantum_report or "NO_QUANTUM_OUTPUT"
+    payload = core_quantum.build_vault_payload(
+        ticker=ticker,
+        pattern_category=setup_label,
+        entry_coordinate=_room2_coordinate_string(good_date, good_time),
+        exit_coordinate=_room2_coordinate_string(bad_date, bad_time),
+        entry_time=good_time,
+        exit_time=bad_time,
+        operator_notes=operator_notes,
+        quantum_report=quantum_report,
+        bar_count=st.session_state.room2_bar_count,
+    )
+    return core_quantum.stream_payload_to_vault(payload)
+
+
 def render_room2_forensic_lab():
     st.markdown(
         """
@@ -804,7 +887,7 @@ def render_room2_forensic_lab():
     )
 
     if st.session_state.polygon_lockout:
-        st.error("Polygon API lockout active — 5 calls/min limit reached. Standby before rescanning.")
+        st.error(core_quantum.THROTTLE_MESSAGE)
 
     col_left, col_right = st.columns([1.0, 1.0])
 
@@ -815,20 +898,17 @@ def render_room2_forensic_lab():
                 '<div class="deck-title">🟩 VALIDATED PATTERN TRACKING (GOOD FILES)</div>',
                 unsafe_allow_html=True,
             )
-            good_entry_date = st.date_input(
+            st.date_input(
                 "Entry Date Coordinate",
                 key="room2_good_date",
             )
-            st.text_input(
-                "Entry Timestamp",
-                placeholder="e.g. 09:45 ET session open",
-                key="room2_good_timestamp",
-            )
-            st.number_input(
-                "Entry Price",
-                min_value=0.0,
-                format="%.4f",
-                key="room2_good_entry_price",
+            st.selectbox(
+                "Entry Session Time",
+                ROOM2_SESSION_TIMES,
+                index=ROOM2_SESSION_TIMES.index("09:45")
+                if "09:45" in ROOM2_SESSION_TIMES
+                else 0,
+                key="room2_good_time",
             )
             st.text_input(
                 "Setup Label (Optional)",
@@ -842,20 +922,17 @@ def render_room2_forensic_lab():
                 '<div class="deck-title">🟥 TOXIC ANOMALY TRACKING (BAD FILES)</div>',
                 unsafe_allow_html=True,
             )
-            bad_exit_date = st.date_input(
+            st.date_input(
                 "Exit / Failure Date Coordinate",
                 key="room2_bad_date",
             )
-            st.text_input(
-                "Exit Timestamp",
-                placeholder="e.g. 15:30 ET failure print",
-                key="room2_bad_timestamp",
-            )
-            st.number_input(
-                "Exit Failure Price",
-                min_value=0.0,
-                format="%.4f",
-                key="room2_bad_exit_price",
+            st.selectbox(
+                "Exit / Failure Session Time",
+                ROOM2_SESSION_TIMES,
+                index=ROOM2_SESSION_TIMES.index("15:30")
+                if "15:30" in ROOM2_SESSION_TIMES
+                else len(ROOM2_SESSION_TIMES) - 1,
+                key="room2_bad_time",
             )
             st.text_input(
                 "Operator Notes (Optional)",
@@ -886,23 +963,17 @@ def render_room2_forensic_lab():
                 else:
                     good_date = st.session_state.get("room2_good_date")
                     bad_date = st.session_state.get("room2_bad_date")
-                    entry_price = st.session_state.get("room2_good_entry_price")
-                    exit_price = st.session_state.get("room2_bad_exit_price")
+                    good_time = st.session_state.get("room2_good_time", ROOM2_SESSION_TIMES[0])
+                    bad_time = st.session_state.get("room2_bad_time", ROOM2_SESSION_TIMES[0])
                     setup_label = st.session_state.get("room2_good_setup_label", "")
                     operator_notes = st.session_state.get("room2_bad_operator_notes", "")
-                    good_ts = st.session_state.get("room2_good_timestamp", "")
-                    bad_ts = st.session_state.get("room2_bad_timestamp", "")
                     date_coords = (
-                        f"{good_date} {good_ts}".strip() if good_date else None,
-                        f"{bad_date} {bad_ts}".strip() if bad_date else None,
-                    )
-                    price_coords = (
-                        entry_price if entry_price else None,
-                        exit_price if exit_price else None,
+                        _room2_coordinate_string(good_date, good_time) or None,
+                        _room2_coordinate_string(bad_date, bad_time) or None,
                     )
                     feedback = operator_notes.strip()
-                    if good_ts or bad_ts:
-                        feedback = f"{feedback} | GOOD_TS:{good_ts} | BAD_TS:{bad_ts}".strip(" |")
+                    if good_time or bad_time:
+                        feedback = f"{feedback} | ENTRY_TIME:{good_time} | EXIT_TIME:{bad_time}".strip(" |")
 
                     with st.spinner("MacBook local processor: pulling 15m history wire..."):
                         data_stream = core_quantum.get_historical_15m_data(lab_ticker)
@@ -910,13 +981,16 @@ def render_room2_forensic_lab():
                             data_stream,
                             pattern_category=setup_label,
                             date_coordinates=date_coords,
-                            prices=price_coords,
+                            prices=None,
                             human_feedback=feedback,
                             ticker=lab_ticker,
                         )
-                    if data_stream == "LOCKOUT":
+                    if data_stream == "THROTTLE":
                         st.session_state.polygon_lockout = True
-                        st.error("Polygon rate limit hit. Forensic pipeline sidelined.")
+                        st.session_state.room2_quantum_report = core_quantum.THROTTLE_MESSAGE
+                    elif data_stream == "LOCKOUT":
+                        st.session_state.polygon_lockout = True
+                        st.session_state.room2_quantum_report = core_quantum.THROTTLE_MESSAGE
                     elif data_stream is None:
                         st.warning("No historical data returned for this symbol.")
                     else:
@@ -925,18 +999,34 @@ def render_room2_forensic_lab():
                             len(data_stream) if hasattr(data_stream, "__len__") else 0
                         )
                         st.session_state.room2_quantum_report = quantum_report
-                        st.success(
-                            f"Forensic scan complete — {lab_ticker} | bars loaded: "
-                            f"{st.session_state.room2_bar_count}"
-                        )
+
+            if st.session_state.room2_vault_flash:
+                st.markdown(
+                    f'<div class="room2-vault-success">{escape(st.session_state.room2_vault_flash)}</div>',
+                    unsafe_allow_html=True,
+                )
 
             payload_text = st.session_state.room2_quantum_report or (
-                "Awaiting 15m forensic scan — local quantum processor standing by."
+                "> SAVANT FORENSIC TERMINAL ONLINE\n"
+                "> AWAITING 15M SCAN — MACBOOK QUANT PROCESSOR STANDING BY\n"
+                "> POLYGON SHIELD: MONITORING 5 CALLS / MINUTE"
             )
             st.markdown(
-                f'<div class="room2-core-payload">{escape(payload_text)}</div>',
+                '<div class="room2-terminal-header">▸ LIVE FORENSIC TELEMETRY STREAM</div>',
                 unsafe_allow_html=True,
             )
+            st.markdown(
+                f'<div class="room2-terminal-box">{escape(payload_text)}</div>',
+                unsafe_allow_html=True,
+            )
+
+            if st.button("🛰️ STREAM PAYLOAD TO INTERNET VAULT", key="room2_vault_stream", use_container_width=True):
+                ok, message = _stream_room2_payload_to_vault()
+                if ok:
+                    st.session_state.room2_vault_flash = message
+                else:
+                    st.session_state.room2_vault_flash = f"VAULT ERROR — {message}"
+                st.rerun()
 
         st.markdown(
             '<div class="room2-wire-title">💬 FORENSIC LAB CONVERSATION WIRE</div>',

@@ -1,4 +1,7 @@
 import datetime
+import statistics
+import time
+
 import requests
 import streamlit as st
 import yfinance as yf
@@ -8,41 +11,40 @@ try:
 except ImportError:
     pd = None
 
+POLYGON_CALLS_PER_MINUTE = 5
+THROTTLE_MESSAGE = (
+    "⚠️ NETWORK THROTTLING SHIELD ACTIVE: 0 API CALLS REMAINING. COOLING DOWN PROCESSOR."
+)
+COMPRESSED_VARIANCE_THRESHOLD = 1.25
 
-def get_historical_15m_data(ticker):
-    """
-    The Dual-Bridge Pipeline Rule: Fetches precise 15-minute historical charts.
-    - Under 60 Days: Uses infinite-speed yfinance wire for free.
-    - 60 Days to 2 Years: Switches to Polygon/Massive API key with a 5-call/min lockout banner.
-    """
-    ticker_clean = str(ticker).strip().upper()
-    now = datetime.datetime.now()
-    cutoff_date = now - datetime.timedelta(days=59)
 
-    # TRACK 1: UNDER 60 DAYS (yfinance infinite-speed wire)
-    try:
-        df_yf = yf.download(ticker_clean, period="60d", interval="15m")
-        if not df_yf.empty:
-            return df_yf
-    except Exception:
-        pass  # Fallback seamlessly to Track 2 if Track 1 hits a gap
+def _init_polygon_rate_monitor() -> None:
+    now = time.time()
+    if "polygon_calls_remaining" not in st.session_state:
+        st.session_state.polygon_calls_remaining = POLYGON_CALLS_PER_MINUTE
+    if "polygon_rate_window_start" not in st.session_state:
+        st.session_state.polygon_rate_window_start = now
+    elapsed = now - float(st.session_state.polygon_rate_window_start)
+    if elapsed >= 60:
+        st.session_state.polygon_calls_remaining = POLYGON_CALLS_PER_MINUTE
+        st.session_state.polygon_rate_window_start = now
+        st.session_state.polygon_lockout = False
 
-    # TRACK 2: 60 DAYS TO 2 YEARS (Polygon/Massive Core API Key)
-    try:
-        api_key = st.secrets["POLYGON_API_KEY"]
-        start_date = (now - datetime.timedelta(days=730)).strftime("%Y-%m-%d")
-        end_date = now.strftime("%Y-%m-%d")
 
-        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_clean}/range/15/minute/{start_date}/{end_date}?adjusted=true&sort=asc&apiKey={api_key}"
-        response = requests.get(url, timeout=15).json()
+def _polygon_calls_remaining() -> int:
+    _init_polygon_rate_monitor()
+    return int(st.session_state.polygon_calls_remaining)
 
-        if "results" in response:
-            return response["results"]
-        if response.get("status") == "ERROR" and "max requests" in response.get("error", "").lower():
-            st.session_state["polygon_lockout"] = True
-            return "LOCKOUT"
-    except Exception:
-        return None
+
+def _consume_polygon_call() -> bool:
+    _init_polygon_rate_monitor()
+    if st.session_state.polygon_calls_remaining <= 0:
+        st.session_state.polygon_lockout = True
+        return False
+    st.session_state.polygon_calls_remaining -= 1
+    if st.session_state.polygon_calls_remaining <= 0:
+        st.session_state.polygon_lockout = True
+    return True
 
 
 def _supabase_table_name() -> str:
@@ -56,7 +58,12 @@ def _normalize_prices(prices):
     if not prices:
         return None, None
     if isinstance(prices, (list, tuple)) and len(prices) >= 2:
-        return float(prices[0]), float(prices[1])
+        try:
+            entry = float(prices[0]) if prices[0] is not None else None
+            exit_p = float(prices[1]) if prices[1] is not None else None
+            return entry, exit_p
+        except (TypeError, ValueError):
+            return None, None
     return None, None
 
 
@@ -69,7 +76,7 @@ def _normalize_date_coordinates(date_coordinates):
 
 
 def _series_from_data_stream(data_stream):
-    if data_stream is None or data_stream == "LOCKOUT":
+    if data_stream is None or data_stream in ("LOCKOUT", "THROTTLE"):
         return None
     if pd is not None and isinstance(data_stream, pd.DataFrame) and not data_stream.empty:
         close_col = "Close" if "Close" in data_stream.columns else data_stream.columns[-1]
@@ -78,16 +85,178 @@ def _series_from_data_stream(data_stream):
             series.index = series.index.get_level_values(-1)
         return series
     if isinstance(data_stream, list) and data_stream:
-        closes = [float(bar.get("c", bar.get("close", 0))) for bar in data_stream if bar.get("c") or bar.get("close")]
+        closes = [
+            float(bar.get("c", bar.get("close", 0)))
+            for bar in data_stream
+            if bar.get("c") or bar.get("close")
+        ]
         if closes:
             return pd.Series(closes) if pd is not None else closes
     return None
 
 
-def _local_pattern_math(data_stream, pattern_category, date_coordinates, prices):
+def _volume_series_from_data_stream(data_stream):
+    if data_stream is None or data_stream in ("LOCKOUT", "THROTTLE"):
+        return None
+    if pd is not None and isinstance(data_stream, pd.DataFrame) and not data_stream.empty:
+        vol_col = "Volume" if "Volume" in data_stream.columns else None
+        if vol_col:
+            return data_stream[vol_col].astype(float).dropna()
+    if isinstance(data_stream, list) and data_stream:
+        vols = [float(bar.get("v", bar.get("volume", 0))) for bar in data_stream if bar.get("v") or bar.get("volume")]
+        if vols:
+            return pd.Series(vols) if pd is not None else vols
+    return None
+
+
+def _wave_amplitude_pct(series) -> float:
+    if series is None:
+        return 0.0
+    if pd is not None and isinstance(series, pd.Series) and len(series) >= 2:
+        return float((series.max() - series.min()) / max(float(series.iloc[-1]), 1e-9) * 100)
+    if isinstance(series, list) and len(series) >= 2:
+        return float((max(series) - min(series)) / max(series[-1], 1e-9) * 100)
+    return 0.0
+
+
+def _is_compressed_variance(data_stream) -> bool:
+    series = _series_from_data_stream(data_stream)
+    if series is None:
+        return False
+    amplitude = _wave_amplitude_pct(series)
+    if amplitude < COMPRESSED_VARIANCE_THRESHOLD:
+        return True
+    if pd is not None and isinstance(series, pd.Series):
+        returns = series.pct_change().dropna()
+        if len(returns) >= 5 and float(returns.std()) < 0.0025:
+            return True
+    return False
+
+
+def get_historical_5m_data(ticker):
+    """Local yfinance micro-interval wire — no Polygon quota consumed."""
+    ticker_clean = str(ticker).strip().upper()
+    try:
+        df_yf = yf.download(ticker_clean, period="60d", interval="5m", progress=False)
+        if df_yf is not None and not df_yf.empty:
+            return df_yf
+    except Exception:
+        pass
+    return None
+
+
+def get_historical_15m_data(ticker):
     """
-    Permanent pattern categorization math — 100% local on Mac silicon, zero cloud cost.
+    Dual-Bridge Pipeline Rule: unrestricted timeline retrieval with adaptive resolution.
+    - Under 60 Days: yfinance 15m wire (free, local Mac silicon).
+    - 60 Days to 2 Years: Polygon API with live 5-call/min throttle shield.
     """
+    ticker_clean = str(ticker).strip().upper()
+    now = datetime.datetime.now()
+
+    try:
+        df_yf = yf.download(ticker_clean, period="60d", interval="15m", progress=False)
+        if df_yf is not None and not df_yf.empty:
+            return df_yf
+    except Exception:
+        pass
+
+    if not _consume_polygon_call():
+        return "THROTTLE"
+
+    try:
+        api_key = st.secrets["POLYGON_API_KEY"]
+        start_date = (now - datetime.timedelta(days=730)).strftime("%Y-%m-%d")
+        end_date = now.strftime("%Y-%m-%d")
+        url = (
+            f"https://api.polygon.io/v2/aggs/ticker/{ticker_clean}/range/15/minute/"
+            f"{start_date}/{end_date}?adjusted=true&sort=asc&apiKey={api_key}"
+        )
+        response = requests.get(url, timeout=15).json()
+        if "results" in response:
+            return response["results"]
+        if response.get("status") == "ERROR" and "max requests" in response.get("error", "").lower():
+            st.session_state.polygon_calls_remaining = 0
+            st.session_state.polygon_lockout = True
+            return "THROTTLE"
+    except Exception:
+        return None
+    return None
+
+
+def _analyze_5m_micro_traps(data_5m, ticker: str) -> dict:
+    """Drill-down engine for float traps and volume anomalies on compressed 15m variance."""
+    closes = _series_from_data_stream(data_5m)
+    volumes = _volume_series_from_data_stream(data_5m)
+    if closes is None:
+        return {
+            "drill_active": False,
+            "summary": "5M_DRILL:UNAVAILABLE",
+        }
+
+    trap_count = 0
+    volume_spikes = 0
+    wick_anomalies = 0
+    max_spike_ratio = 1.0
+
+    if pd is not None and isinstance(closes, pd.Series) and len(closes) >= 10:
+        returns = closes.pct_change().dropna()
+        if len(returns) >= 5:
+            for i in range(1, len(returns)):
+                if returns.iloc[i] > 0 and returns.iloc[i - 1] < 0 and abs(returns.iloc[i]) > 0.012:
+                    trap_count += 1
+                if returns.iloc[i] < 0 and returns.iloc[i - 1] > 0 and abs(returns.iloc[i]) > 0.012:
+                    trap_count += 1
+
+        if volumes is not None and isinstance(volumes, pd.Series) and len(volumes) >= 8:
+            avg_vol = float(volumes.iloc[-20:-1].mean()) if len(volumes) >= 20 else float(volumes.iloc[:-1].mean())
+            if avg_vol > 0:
+                spike_ratios = (volumes / avg_vol).tolist()
+                volume_spikes = sum(1 for ratio in spike_ratios if ratio >= 2.0)
+                max_spike_ratio = float(max(spike_ratios))
+
+        if isinstance(data_5m, pd.DataFrame):
+            cols = (
+                data_5m.columns.get_level_values(0)
+                if isinstance(data_5m.columns, pd.MultiIndex)
+                else data_5m.columns
+            )
+            if {"High", "Low", "Close"}.issubset(set(cols)):
+                high = data_5m["High"]
+                low = data_5m["Low"]
+                close = data_5m["Close"]
+                if isinstance(high, pd.DataFrame):
+                    high = high.iloc[:, 0]
+                    low = low.iloc[:, 0]
+                    close = close.iloc[:, 0]
+                open_s = data_5m["Open"] if "Open" in cols else close.shift(1)
+                if isinstance(open_s, pd.DataFrame):
+                    open_s = open_s.iloc[:, 0]
+                recent_high = high.tail(30)
+                recent_low = low.tail(30)
+                recent_close = close.tail(30)
+                recent_open = open_s.tail(30)
+                body = (recent_close - recent_open).abs().replace(0, 1e-9)
+                wick = (recent_high - recent_low).abs()
+                if len(body.dropna()) >= 5:
+                    wick_anomalies = int(((wick / body) > 3.5).sum())
+
+    summary = (
+        f"5M_DRILL:{ticker}|FLOAT_TRAPS:{trap_count}|VOL_SPIKES:{volume_spikes}|"
+        f"MAX_VOL_RATIO:{max_spike_ratio:.2f}x|WICK_ANOMALIES:{wick_anomalies}"
+    )
+    return {
+        "drill_active": True,
+        "float_traps": trap_count,
+        "volume_spikes": volume_spikes,
+        "max_volume_ratio": round(max_spike_ratio, 3),
+        "wick_anomalies": wick_anomalies,
+        "summary": summary,
+    }
+
+
+def _local_pattern_math(data_stream, pattern_category, date_coordinates, prices, micro_block=None):
+    """Permanent pattern categorization math — 100% local on Mac silicon."""
     entry_date, exit_date = _normalize_date_coordinates(date_coordinates)
     entry_price, exit_price = _normalize_prices(prices)
     series = _series_from_data_stream(data_stream)
@@ -101,8 +270,7 @@ def _local_pattern_math(data_stream, pattern_category, date_coordinates, prices)
         if pd is not None and isinstance(series, pd.Series):
             bar_count = len(series)
             returns = series.pct_change().dropna()
-            if len(series) >= 2:
-                amplitude = float((series.max() - series.min()) / max(series.iloc[-1], 1e-9) * 100)
+            amplitude = _wave_amplitude_pct(series)
             if len(returns) >= 3:
                 benchmark = returns.expanding().mean().dropna()
                 aligned = returns.loc[benchmark.index]
@@ -116,7 +284,7 @@ def _local_pattern_math(data_stream, pattern_category, date_coordinates, prices)
         elif isinstance(series, list):
             bar_count = len(series)
             if bar_count >= 2:
-                amplitude = float((max(series) - min(series)) / max(series[-1], 1e-9) * 100)
+                amplitude = _wave_amplitude_pct(series)
                 delta = series[-1] - series[0]
                 trend_bias = "BULLISH" if delta > 0 else "BEARISH" if delta < 0 else "NEUTRAL"
 
@@ -134,12 +302,14 @@ def _local_pattern_math(data_stream, pattern_category, date_coordinates, prices)
         max(
             52,
             int(
-                62
-                + (abs(pearson_r) * 18)
-                + min(amplitude, 12)
-                + (6 if trend_bias != "NEUTRAL" else 0)
-            )
-            * category_factor,
+                (
+                    62
+                    + (abs(pearson_r) * 18)
+                    + min(amplitude, 12)
+                    + (6 if trend_bias != "NEUTRAL" else 0)
+                )
+                * category_factor
+            ),
         ),
     )
 
@@ -151,10 +321,13 @@ def _local_pattern_math(data_stream, pattern_category, date_coordinates, prices)
     quantum_report = (
         f"MacBook Quant Chip | Category: {category} | Bars: {bar_count} | "
         f"Wave Amplitude: {amplitude:.2f}% | Pearson r: {pearson_r:.3f} | "
-        f"Trend Bias: {trend_bias} | Structural Match: {structural_score}%"
+        f"Trend Bias: {trend_bias} | Structural Match: {structural_score}% | "
+        f"Polygon Calls Remaining: {_polygon_calls_remaining()}/{POLYGON_CALLS_PER_MINUTE}"
     )
     if realized_move is not None:
         quantum_report += f" | Coordinate Move: {realized_move:.2f}%"
+    if micro_block and micro_block.get("drill_active"):
+        quantum_report += f" | {micro_block['summary']}"
 
     return {
         "pattern_category": category,
@@ -169,10 +342,14 @@ def _local_pattern_math(data_stream, pattern_category, date_coordinates, prices)
         "pearson_r": round(pearson_r, 4),
         "trend_bias": trend_bias,
         "realized_move_pct": round(realized_move, 4) if realized_move is not None else None,
+        "micro_drill_summary": micro_block.get("summary") if micro_block else None,
+        "float_traps": micro_block.get("float_traps") if micro_block else None,
+        "volume_spikes": micro_block.get("volume_spikes") if micro_block else None,
     }
 
 
-def _anchor_payload_to_supabase(payload: dict) -> tuple[bool, str]:
+def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
+    """Direct secure Supabase REST anchor to live Postgres cloud table."""
     try:
         supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
         supabase_key = st.secrets["SUPABASE_KEY"]
@@ -193,10 +370,13 @@ def _anchor_payload_to_supabase(payload: dict) -> tuple[bool, str]:
             timeout=12,
         )
         if resp.ok:
-            return True, f"Cloud anchor synchronized — `{table}` committed for {payload.get('ticker', 'UNKNOWN')}."
-        return False, f"Cloud upload failed: {resp.status_code} {resp.text}"
+            return True, (
+                f"INTERNET VAULT SYNC CONFIRMED — `{table}` anchored for "
+                f"{payload.get('ticker', 'UNKNOWN')} @ {payload.get('timestamp', 'UTC')}."
+            )
+        return False, f"Vault upload failed: {resp.status_code} {resp.text}"
     except Exception as exc:
-        return False, f"Cloud upload failed: {exc}"
+        return False, f"Vault upload failed: {exc}"
 
 
 def calculate_quantum_frequencies(
@@ -208,53 +388,60 @@ def calculate_quantum_frequencies(
     ticker="",
 ):
     """
-    Runs permanent pattern categorization math locally on Mac silicon, builds the
-    forensic payload, and anchors it to Supabase when credentials are present.
-
-    Args:
-        data_stream: 15m OHLC dataframe or Polygon results list.
-        pattern_category: Operator pattern class (Breakout, Reversal, etc.).
-        date_coordinates: (entry_date, exit_date) coordinate pair.
-        prices: (entry_price, exit_price) anchor prices.
-        human_feedback: Operator manual context corrections.
-        ticker: Symbol anchor for the cloud row.
+    Runs permanent pattern categorization math locally on Mac silicon with adaptive
+    5-minute drill-down when 15-minute variance compresses.
     """
+    if data_stream == "THROTTLE":
+        return THROTTLE_MESSAGE
     if data_stream is None or data_stream == "LOCKOUT":
         return "System Sidelined: Awaiting Data Pipeline Clear"
-
-    math_block = _local_pattern_math(data_stream, pattern_category, date_coordinates, prices)
 
     resolved_ticker = (
         str(ticker).strip().upper()
         or str(st.session_state.get("room2_forensic_ticker", "")).strip().upper()
         or str(st.session_state.get("current_ticker", "")).strip().upper()
     )
-    feedback = (human_feedback or st.session_state.get("room2_operator_context", "")).strip()
 
-    payload = {
-        "ticker": resolved_ticker or "UNKNOWN",
-        "pattern_category": math_block["pattern_category"],
-        "entry_coordinate": math_block["entry_coordinate"],
-        "exit_coordinate": math_block["exit_coordinate"],
-        "entry_price": math_block["entry_price"],
-        "exit_price": math_block["exit_price"],
-        "match_probability": math_block["match_probability"],
-        "operator_context": feedback,
-        "quantum_report": math_block["quantum_report"],
-        "bar_count": math_block["bar_count"],
-        "wave_amplitude_pct": math_block["wave_amplitude_pct"],
-        "pearson_r": math_block["pearson_r"],
-        "trend_bias": math_block["trend_bias"],
-        "realized_move_pct": math_block["realized_move_pct"],
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "source_room": "forensic_pattern_lab",
-    }
+    micro_block = None
+    if _is_compressed_variance(data_stream) and resolved_ticker:
+        data_5m = get_historical_5m_data(resolved_ticker)
+        if data_5m is not None:
+            micro_block = _analyze_5m_micro_traps(data_5m, resolved_ticker)
 
-    should_anchor = bool(resolved_ticker and resolved_ticker != "UNKNOWN" and feedback)
-    if should_anchor:
-        ok, cloud_message = _anchor_payload_to_supabase(payload)
-        if ok:
-            return f"{math_block['quantum_report']} | {cloud_message}"
-        return f"{math_block['quantum_report']} | {cloud_message}"
-
+    math_block = _local_pattern_math(
+        data_stream,
+        pattern_category,
+        date_coordinates,
+        prices,
+        micro_block=micro_block,
+    )
     return math_block["quantum_report"]
+
+
+def build_vault_payload(
+    *,
+    ticker: str,
+    pattern_category: str,
+    entry_coordinate: str,
+    exit_coordinate: str,
+    entry_time: str,
+    exit_time: str,
+    operator_notes: str,
+    quantum_report: str,
+    bar_count: int,
+) -> dict:
+    """Package Room 2 deck parameters for Internet Vault streaming."""
+    return {
+        "ticker": ticker.upper(),
+        "pattern_category": (pattern_category or "UNCLASSIFIED").strip().upper(),
+        "entry_coordinate": entry_coordinate,
+        "exit_coordinate": exit_coordinate,
+        "entry_time": entry_time,
+        "exit_time": exit_time,
+        "operator_context": operator_notes.strip(),
+        "quantum_report": quantum_report,
+        "bar_count": bar_count,
+        "polygon_calls_remaining": _polygon_calls_remaining(),
+        "source_room": "forensic_pattern_lab",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
