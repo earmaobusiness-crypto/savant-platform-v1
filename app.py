@@ -1,3 +1,4 @@
+import core_quantum
 import os
 import re
 import statistics
@@ -99,6 +100,7 @@ if "sector_rotation_context" not in st.session_state: st.session_state.sector_ro
 if "data_payload_string" not in st.session_state: st.session_state.data_payload_string = ""
 if "cross_asset_correlation_context" not in st.session_state: st.session_state.cross_asset_correlation_context = ""
 if "institutional_accumulation_detected" not in st.session_state: st.session_state.institutional_accumulation_detected = False
+if "polygon_lockout" not in st.session_state: st.session_state.polygon_lockout = False
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [
         {
@@ -542,112 +544,152 @@ if st.session_state.pop("_pending_chat_submit", False):
     with st.spinner("Savant processing live data layers..."):
         process_chat_submission()
 
-col_chart_side, col_chat_side = st.columns([1.1, 0.9])
+tab_room1, tab_room2 = st.tabs(
+    ["🏛️ Room 1: Real-Time Front Desk", "🔮 Room 2: Forensic Pattern Lab"]
+)
 
-with col_chart_side:
-    st.markdown(
-        '<div style="position: fixed; width: 45%; max-width: 750px; z-index: 99;">',
-        unsafe_allow_html=True,
-    )
-    st.markdown("<div style='height: 2vh;'></div>", unsafe_allow_html=True)
-    if st.session_state.current_ticker:
-        active_tk = st.session_state.current_ticker
+with tab_room1:
+    col_chart_side, col_chat_side = st.columns([1.1, 0.9])
 
-        tf_cols = st.columns(6)
-        tfs = ["5m", "15m", "1H", "1D", "1W", "1M"]
-        tf_map = {"5m": "5", "15m": "15", "1H": "60", "1D": "D", "1W": "W", "1M": "M"}
-        for i, t_label in enumerate(tfs):
-            with tf_cols[i]:
-                if st.button(t_label, key=f"panel_tf_{t_label}"):
-                    st.session_state.timeframe = tf_map[t_label]
-                    st.rerun()
-
-        active_tf = st.session_state.timeframe
-        symbol = urllib.parse.quote(f"NASDAQ:{active_tk.upper()}", safe="")
-        pure_chart_url = (
-            f"https://s.tradingview.com/widgetembed/?symbol={symbol}&interval={active_tf}"
-            f"&theme=dark&style=1&timezone=Etc%2FUTC&locale=en&allow_symbol_change=0"
-        )
-
-        components.html(f"""
-            <div style="height:620px; width:100%; border-radius:8px; overflow:hidden; border:1px solid #1F1F1F;">
-                <iframe src="{pure_chart_url}" width="100%" height="620" frameborder="0"
-                    allowtransparency="true" allowfullscreen="true" webkitallowfullscreen="true"
-                    scrolling="no"></iframe>
-            </div>
-        """, height=630)
-    else:
-        st.markdown("<div style='height: 25vh;'></div>", unsafe_allow_html=True)
+    with col_chart_side:
         st.markdown(
-            "<div style='text-align:center; color:#333; font-size:15px; font-weight:300;'>"
-            "Chart display queued. Enter an UPPERCASE stock setup query inside the terminal.</div>",
+            '<div style="position: fixed; width: 45%; max-width: 750px; z-index: 99;">',
             unsafe_allow_html=True,
         )
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("<div style='height: 2vh;'></div>", unsafe_allow_html=True)
+        if st.session_state.current_ticker:
+            active_tk = st.session_state.current_ticker
 
-with col_chat_side:
-    st.markdown("<div style='height: 1vh;'></div>", unsafe_allow_html=True)
-    col_empty, col_btn_anchor = st.columns([0.7, 0.3])
-    with col_btn_anchor:
-        if st.button("RESET MEMORY", key="clean_memory_cta", use_container_width=True):
-            st.session_state.chat_history = []
-            st.session_state.current_ticker = None
-            st.session_state.text_field_buffer = ""
-            st.session_state.llm_memory = st.session_state.llm_memory[:1]
-            st.session_state.active_news_wire = []
-            st.session_state.sector_rotation_context = ""
-            st.session_state.cross_asset_correlation_context = ""
-            st.session_state.institutional_accumulation_detected = False
-            st.session_state.data_payload_string = ""
-            st.rerun()
+            tf_cols = st.columns(6)
+            tfs = ["5m", "15m", "1H", "1D", "1W", "1M"]
+            tf_map = {"5m": "5", "15m": "15", "1H": "60", "1D": "D", "1W": "W", "1M": "M"}
+            for i, t_label in enumerate(tfs):
+                with tf_cols[i]:
+                    if st.button(t_label, key=f"panel_tf_{t_label}"):
+                        st.session_state.timeframe = tf_map[t_label]
+                        st.rerun()
 
-    if st.session_state.current_ticker:
-        p, pct, v, vw, name = _fetch_tape_metrics(st.session_state.current_ticker)
-        color_choice = "#34C759" if pct >= 0 else "#FF3B30"
-        st.markdown(
-            f"""
-            <div style="background:#111;padding:12px;border-radius:6px;border:1px solid #1F1F1F;margin-bottom:15px;">
-                <div class="metric-label" style="font-size:10px;color:#555;font-weight:700;">
-                    Exchange Tape Metrics — {name} ({st.session_state.current_ticker})
+            active_tf = st.session_state.timeframe
+            symbol = urllib.parse.quote(f"NASDAQ:{active_tk.upper()}", safe="")
+            pure_chart_url = (
+                f"https://s.tradingview.com/widgetembed/?symbol={symbol}&interval={active_tf}"
+                f"&theme=dark&style=1&timezone=Etc%2FUTC&locale=en&allow_symbol_change=0"
+            )
+
+            components.html(f"""
+                <div style="height:620px; width:100%; border-radius:8px; overflow:hidden; border:1px solid #1F1F1F;">
+                    <iframe src="{pure_chart_url}" width="100%" height="620" frameborder="0"
+                        allowtransparency="true" allowfullscreen="true" webkitallowfullscreen="true"
+                        scrolling="no"></iframe>
                 </div>
-                <div class="metric-grid">
-                    <div class="metric-card"><div class="metric-label">Price</div>
-                        <div class="metric-value">${p:,.2f}</div></div>
-                    <div class="metric-card"><div class="metric-label">Change</div>
-                        <div class="metric-value" style="color:{color_choice}">{pct:+.2f}%</div></div>
-                    <div class="metric-card"><div class="metric-label">Volume</div>
-                        <div class="metric-value">{v}</div></div>
-                    <div class="metric-card"><div class="metric-label">Sess. VWAP</div>
-                        <div class="metric-value">{vw}</div></div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    if not st.session_state.chat_history:
-        st.markdown("<div style='height: 18vh;'></div>", unsafe_allow_html=True)
-        st.markdown(
-            "<div style='text-align:center;color:#222;font-size:24px;font-weight:300;"
-            "letter-spacing:0.04em;'>Savant Apprentice</div>",
-            unsafe_allow_html=True,
-        )
-    else:
-        for msg in st.session_state.chat_history:
-            label_class = "speaker-you" if msg["speaker"] == "You" else "speaker-savant"
+            """, height=630)
+        else:
+            st.markdown("<div style='height: 25vh;'></div>", unsafe_allow_html=True)
             st.markdown(
-                f'<div class="chat-row"><div class="speaker-label {label_class}">{msg["speaker"]}</div>'
-                f'<div class="data-content">{msg.get("text", "")}</div></div>',
+                "<div style='text-align:center; color:#333; font-size:15px; font-weight:300;'>"
+                "Chart display queued. Enter an UPPERCASE stock setup query inside the terminal.</div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_chat_side:
+        st.markdown("<div style='height: 1vh;'></div>", unsafe_allow_html=True)
+        col_empty, col_btn_anchor = st.columns([0.7, 0.3])
+        with col_btn_anchor:
+            if st.button("RESET MEMORY", key="clean_memory_cta", use_container_width=True):
+                st.session_state.chat_history = []
+                st.session_state.current_ticker = None
+                st.session_state.text_field_buffer = ""
+                st.session_state.llm_memory = st.session_state.llm_memory[:1]
+                st.session_state.active_news_wire = []
+                st.session_state.sector_rotation_context = ""
+                st.session_state.cross_asset_correlation_context = ""
+                st.session_state.institutional_accumulation_detected = False
+                st.session_state.data_payload_string = ""
+                st.rerun()
+
+        if st.session_state.current_ticker:
+            p, pct, v, vw, name = _fetch_tape_metrics(st.session_state.current_ticker)
+            color_choice = "#34C759" if pct >= 0 else "#FF3B30"
+            st.markdown(
+                f"""
+                <div style="background:#111;padding:12px;border-radius:6px;border:1px solid #1F1F1F;margin-bottom:15px;">
+                    <div class="metric-label" style="font-size:10px;color:#555;font-weight:700;">
+                        Exchange Tape Metrics — {name} ({st.session_state.current_ticker})
+                    </div>
+                    <div class="metric-grid">
+                        <div class="metric-card"><div class="metric-label">Price</div>
+                            <div class="metric-value">${p:,.2f}</div></div>
+                        <div class="metric-card"><div class="metric-label">Change</div>
+                            <div class="metric-value" style="color:{color_choice}">{pct:+.2f}%</div></div>
+                        <div class="metric-card"><div class="metric-label">Volume</div>
+                            <div class="metric-value">{v}</div></div>
+                        <div class="metric-card"><div class="metric-label">Sess. VWAP</div>
+                            <div class="metric-value">{vw}</div></div>
+                    </div>
+                </div>
+                """,
                 unsafe_allow_html=True,
             )
 
-    with st.form("chat_form", clear_on_submit=False):
-        st.text_input(
-            "Input",
-            key="text_field_buffer",
-            placeholder="Ask Savant anything... No filters active.",
-            label_visibility="collapsed",
-        )
-        if st.form_submit_button("Send") and st.session_state.text_field_buffer.strip():
-            st.session_state._pending_chat_submit = True
-            st.rerun()
+        if not st.session_state.chat_history:
+            st.markdown("<div style='height: 18vh;'></div>", unsafe_allow_html=True)
+            st.markdown(
+                "<div style='text-align:center;color:#222;font-size:24px;font-weight:300;"
+                "letter-spacing:0.04em;'>Savant Apprentice</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            for msg in st.session_state.chat_history:
+                label_class = "speaker-you" if msg["speaker"] == "You" else "speaker-savant"
+                st.markdown(
+                    f'<div class="chat-row"><div class="speaker-label {label_class}">{msg["speaker"]}</div>'
+                    f'<div class="data-content">{msg.get("text", "")}</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+        with st.form("chat_form", clear_on_submit=False):
+            st.text_input(
+                "Input",
+                key="text_field_buffer",
+                placeholder="Ask Savant anything... No filters active.",
+                label_visibility="collapsed",
+            )
+            if st.form_submit_button("Send") and st.session_state.text_field_buffer.strip():
+                st.session_state._pending_chat_submit = True
+                st.rerun()
+
+with tab_room2:
+    st.markdown(
+        "<div style='color:#888;font-size:12px;font-weight:700;letter-spacing:0.08em;"
+        "text-transform:uppercase;margin-bottom:12px;'>Forensic Pattern Lab — 15m Deep History</div>",
+        unsafe_allow_html=True,
+    )
+    if st.session_state.polygon_lockout:
+        st.error("Polygon API lockout active — 5 calls/min limit reached. Standby before rescanning.")
+
+    lab_ticker = st.text_input(
+        "Forensic ticker",
+        value=st.session_state.current_ticker or "",
+        placeholder="Enter ticker for 15m pattern scan (e.g. AAPL)",
+        key="room2_forensic_ticker",
+    ).strip().upper()
+
+    if st.button("RUN FORENSIC SCAN", key="room2_run_scan", use_container_width=True):
+        if not lab_ticker:
+            st.warning("Enter a ticker symbol to run the forensic pipeline.")
+        else:
+            with st.spinner("Pulling 15m history and running quantum frequency matrix..."):
+                data_stream = core_quantum.get_historical_15m_data(lab_ticker)
+                quantum_report = core_quantum.calculate_quantum_frequencies(data_stream)
+            if data_stream == "LOCKOUT":
+                st.session_state.polygon_lockout = True
+                st.error("Polygon rate limit hit. Forensic pipeline sidelined.")
+            elif data_stream is None:
+                st.warning("No historical data returned for this symbol.")
+            else:
+                st.session_state.polygon_lockout = False
+                bars = len(data_stream) if hasattr(data_stream, "__len__") else "N/A"
+                st.success(f"Forensic scan complete — {lab_ticker} | bars loaded: {bars}")
+                st.markdown(f"**Quantum Output:** {quantum_report}")
+
