@@ -21,6 +21,9 @@ except ImportError:
 
 ROOM1_LABEL = "🏛️ Room 1: Real-Time Front Desk"
 ROOM2_LABEL = "🔮 Room 2: Forensic Pattern Lab"
+ROOM1_SHORT = "🏛️ R1"
+ROOM2_SHORT = "🔮 R2"
+ROOM_SHORT_MAP = {ROOM1_SHORT: ROOM1_LABEL, ROOM2_SHORT: ROOM2_LABEL}
 
 SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
 SECTOR_ETFS = [
@@ -141,6 +144,7 @@ if "polygon_lockout" not in st.session_state: st.session_state.polygon_lockout =
 if "room2_forensic_ticker" not in st.session_state: st.session_state.room2_forensic_ticker = ""
 if "room2_quantum_report" not in st.session_state: st.session_state.room2_quantum_report = ""
 if "room2_bar_count" not in st.session_state: st.session_state.room2_bar_count = 0
+if "sidebar_collapsed" not in st.session_state: st.session_state.sidebar_collapsed = False
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [
         {
@@ -703,17 +707,24 @@ if st.session_state.pop("_pending_chat_submit", False):
         process_chat_submission()
 
 with st.sidebar:
-    st.markdown(
-        "<div style='font-size:10px;font-weight:700;letter-spacing:0.14em;"
-        "text-transform:uppercase;color:#666;margin-bottom:10px;'>Terminal Hub Selector</div>",
-        unsafe_allow_html=True,
-    )
-    terminal_hub = st.radio(
-        "TERMINAL HUB SELECTOR",
-        options=[ROOM1_LABEL, ROOM2_LABEL],
-        label_visibility="collapsed",
-        key="terminal_hub_selector",
-    )
+    if st.button("Toggle View ⇄", key="sidebar_layout_switch_cta", use_container_width=True):
+        st.session_state.sidebar_collapsed = not st.session_state.sidebar_collapsed
+        st.rerun()
+
+    if not st.session_state.sidebar_collapsed:
+        room_selection = st.radio(
+            "TERMINAL HUB COMMANDS:",
+            [ROOM1_LABEL, ROOM2_LABEL],
+            key="terminal_hub_selector_expanded",
+        )
+        terminal_hub = room_selection
+    else:
+        room_selection = st.radio(
+            "HUB:",
+            [ROOM1_SHORT, ROOM2_SHORT],
+            key="terminal_hub_selector_collapsed",
+        )
+        terminal_hub = ROOM_SHORT_MAP[room_selection]
 
 if terminal_hub == ROOM1_LABEL:
     col_chart_side, col_chat_side = st.columns([1.1, 0.9])
