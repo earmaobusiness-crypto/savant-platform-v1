@@ -51,13 +51,42 @@ st.markdown("""
         #MainMenu, footer, header {visibility: hidden;}
         [data-testid="stSidebar"] {
             background-color: #0B0B0B !important;
-            border-right: 1px solid #141414 !important;
-            transition: min-width 0.2s ease, max-width 0.2s ease;
+            border-right: 1px solid #2A2A2A !important;
+            visibility: visible !important;
+            display: block !important;
         }
         [data-testid="stSidebarNav"] { display: none !important; }
+        [data-testid="stSidebarCollapseButton"] { display: block !important; color: #FFFFFF !important; }
+        [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
+            color: #AAAAAA !important;
+            font-size: 11px !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.08em !important;
+            text-transform: uppercase !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stRadio"] label {
+            background: #141414 !important;
+            border: 1px solid #2A2A2A !important;
+            border-radius: 8px !important;
+            padding: 12px 10px !important;
+            margin: 0 0 8px 0 !important;
+            width: 100% !important;
+        }
         [data-testid="stSidebar"] [data-testid="stRadio"] label p {
+            color: #FFFFFF !important;
             font-size: 13px !important;
             line-height: 1.35 !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stRadio"] label[data-checked="true"] {
+            border-color: #555555 !important;
+            background: #1A1A1A !important;
+        }
+        button[data-testid="baseButton-sidebar_collapse_toggle"] {
+            background: #1A1A1A !important;
+            color: #FFFFFF !important;
+            border: 1px solid #333333 !important;
+            font-weight: 700 !important;
+            margin-bottom: 12px !important;
         }
         html, body, [data-testid="stAppViewContainer"] {
             background-color: #0B0B0B !important;
@@ -148,6 +177,7 @@ if "room2_forensic_ticker" not in st.session_state: st.session_state.room2_foren
 if "room2_quantum_report" not in st.session_state: st.session_state.room2_quantum_report = ""
 if "room2_bar_count" not in st.session_state: st.session_state.room2_bar_count = 0
 if "sidebar_collapsed" not in st.session_state: st.session_state.sidebar_collapsed = False
+if "terminal_hub" not in st.session_state: st.session_state.terminal_hub = ROOM1_LABEL
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [
         {
@@ -705,49 +735,61 @@ def render_room2_forensic_lab():
                 st.error(message)
 
 
+def render_terminal_nav() -> str:
+    sidebar_width = "108px" if st.session_state.sidebar_collapsed else "340px"
+    st.markdown(
+        f"""
+        <style>
+            section[data-testid="stSidebar"] > div {{
+                width: {sidebar_width} !important;
+            }}
+            [data-testid="stSidebar"] {{
+                min-width: {sidebar_width} !important;
+                max-width: {sidebar_width} !important;
+            }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.sidebar:
+        if st.session_state.sidebar_collapsed:
+            if st.button("▶ Expand", key="sidebar_collapse_toggle", use_container_width=True):
+                st.session_state.sidebar_collapsed = False
+                st.rerun()
+            short_pick = st.radio(
+                "HUB:",
+                [ROOM1_SHORT, ROOM2_SHORT],
+                index=0 if st.session_state.terminal_hub == ROOM1_LABEL else 1,
+                label_visibility="collapsed",
+                key="terminal_hub_collapsed",
+            )
+            st.session_state.terminal_hub = ROOM_SHORT_MAP[short_pick]
+        else:
+            if st.button("◀ Collapse", key="sidebar_collapse_toggle", use_container_width=True):
+                st.session_state.sidebar_collapsed = True
+                st.rerun()
+            st.markdown(
+                "<div style='font-size:11px;font-weight:700;letter-spacing:0.1em;"
+                "text-transform:uppercase;color:#888;margin:4px 0 10px 2px;'>Navigation</div>",
+                unsafe_allow_html=True,
+            )
+            room_pick = st.radio(
+                "TERMINAL HUB COMMANDS:",
+                [ROOM1_LABEL, ROOM2_LABEL],
+                index=0 if st.session_state.terminal_hub == ROOM1_LABEL else 1,
+                key="terminal_hub_expanded",
+            )
+            st.session_state.terminal_hub = room_pick
+
+    return st.session_state.terminal_hub
+
+
 if st.session_state.pop("_pending_chat_submit", False):
     with st.spinner("Savant processing live data layers..."):
         process_chat_submission()
 
-_sidebar_width = "92px" if st.session_state.sidebar_collapsed else "300px"
-st.markdown(
-    f"""
-    <style>
-        [data-testid="stSidebar"] {{
-            min-width: {_sidebar_width} !important;
-            max-width: {_sidebar_width} !important;
-        }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-with st.sidebar:
-    toggle_label = "▶" if st.session_state.sidebar_collapsed else "◀"
-    if st.button(toggle_label, key="sidebar_collapse_toggle", help="Collapse / expand navigation"):
-        st.session_state.sidebar_collapsed = not st.session_state.sidebar_collapsed
-        st.rerun()
-
-    if not st.session_state.sidebar_collapsed:
-        st.markdown(
-            "<div style='font-size:10px;font-weight:700;letter-spacing:0.12em;"
-            "text-transform:uppercase;color:#555;margin:8px 0 12px 0;'>Terminal Hub</div>",
-            unsafe_allow_html=True,
-        )
-        room_selection = st.radio(
-            "TERMINAL HUB COMMANDS:",
-            [ROOM1_LABEL, ROOM2_LABEL],
-            key="terminal_hub_expanded",
-        )
-        terminal_hub = room_selection
-    else:
-        room_selection = st.radio(
-            "HUB:",
-            [ROOM1_SHORT, ROOM2_SHORT],
-            label_visibility="collapsed",
-            key="terminal_hub_collapsed",
-        )
-        terminal_hub = ROOM_SHORT_MAP[room_selection]
+terminal_hub = render_terminal_nav()
 
 if terminal_hub == ROOM1_LABEL:
     col_chart_side, col_chat_side = st.columns([1.1, 0.9])
