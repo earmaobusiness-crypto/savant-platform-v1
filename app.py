@@ -53,6 +53,11 @@ TOKEN_GUARD = (
 PRIMARY_MODEL = "llama-3.3-70b-versatile"
 FALLBACK_MODEL = "llama3-8b-8192"
 MACRO_DRIVERS = [("GC=F", "GOLD"), ("CL=F", "OIL"), ("^TNX", "TNX"), ("SPY", "SPY")]
+ROOM2_INVALID_INPUT_MESSAGE = (
+    "⚠️ INVALID INPUT: Verify your Ticker is filled out and your Timestamps match "
+    "the 'HH:MM AM/PM' format exactly."
+)
+R2_TIMESTAMP_PATTERN = re.compile(r"^\d{1,2}:\d{2}\s+(AM|PM)$", re.IGNORECASE)
 ROOM2_CLEAN_SLATE_MESSAGE = (
     "DATABASE SNAPSHOT: 100% CLEAN SLATE. No patterns logged. "
     "System is an empty quantitative canvas waiting for training input."
@@ -1063,6 +1068,72 @@ def _render_room2_proxy_telemetry_banners() -> None:
     )
 
 
+def _validate_room2_ticker(ticker: str) -> bool:
+    cleaned = str(ticker).strip()
+    if not cleaned:
+        return False
+    if re.search(r"\d", cleaned):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z.$-]{1,6}", cleaned))
+
+
+def _validate_room2_timestamp(timestamp: str) -> bool:
+    cleaned = str(timestamp).strip().upper()
+    if ":" not in cleaned:
+        return False
+    if not (cleaned.endswith(" AM") or cleaned.endswith(" PM")):
+        return False
+    return bool(R2_TIMESTAMP_PATTERN.match(cleaned))
+
+
+def _validate_room2_deck(deck: str) -> bool:
+    if deck == "good":
+        ticker = st.session_state.get("r2_good_ticker", "")
+        timestamp = st.session_state.get("r2_good_entry_time", "")
+    else:
+        ticker = st.session_state.get("r2_bad_ticker", "")
+        timestamp = st.session_state.get("r2_bad_exit_time", "")
+    return _validate_room2_ticker(ticker) and _validate_room2_timestamp(timestamp)
+
+
+def _clear_room2_form_buffers(deck: str) -> None:
+    """Reset only the target form chassis keys after a validated deploy."""
+    if deck == "good":
+        keys = (
+            "r2_good_ticker",
+            "r2_good_date",
+            "r2_good_entry_time",
+            "r2_good_setup_label",
+            "r2_good_comments",
+        )
+    else:
+        keys = (
+            "r2_bad_ticker",
+            "r2_bad_date",
+            "r2_bad_exit_time",
+            "r2_bad_notes",
+        )
+    for key in keys:
+        st.session_state.pop(key, None)
+
+
+def _handle_room2_deck_submit(deck: str) -> None:
+    if not _validate_room2_deck(deck):
+        if deck == "good":
+            st.session_state.r2_good_validation_error = True
+        else:
+            st.session_state.r2_bad_validation_error = True
+        st.rerun()
+        return
+    if deck == "good":
+        st.session_state.r2_good_validation_error = False
+    else:
+        st.session_state.r2_bad_validation_error = False
+    _deploy_room2_deck(deck)
+    _clear_room2_form_buffers(deck)
+    st.rerun()
+
+
 def _deploy_room2_deck(deck: str) -> None:
     """Harvest quantum math, vault payload, and lock terminal output for a deck station."""
     if deck == "good":
@@ -1087,10 +1158,6 @@ def _deploy_room2_deck(deck: str) -> None:
         entry_time = st.session_state.get("r2_good_entry_time", "09:31 AM")
         exit_time = time_val
         deck_tag = "TOXIC_ANOMALY"
-
-    if not ticker:
-        st.session_state.quantum_terminal_output = f"⚠️ [{deck_tag}] DEPLOY ABORTED — ticker required."
-        return
 
     feedback = notes.strip()
     if time_val:
@@ -1144,6 +1211,8 @@ def _deploy_room2_deck(deck: str) -> None:
 
 def _purge_room2_deck_inputs() -> None:
     """Drop widget-bound keys so defaults re-bind on next render — no manual assignment."""
+    st.session_state.r2_good_validation_error = False
+    st.session_state.r2_bad_validation_error = False
     for key in (
         "r2_good_ticker",
         "r2_bad_ticker",
@@ -1187,7 +1256,9 @@ def render_room2_forensic_lab():
                     '<div class="deck-title">🟩 VALIDATED PATTERN TRACKING (GOOD FILES)</div>',
                     unsafe_allow_html=True,
                 )
-                with st.form("r2_good_form_chassis", clear_on_submit=True):
+                if st.session_state.get("r2_good_validation_error"):
+                    st.error(ROOM2_INVALID_INPUT_MESSAGE)
+                with st.form("r2_good_form_chassis", clear_on_submit=False):
                     st.text_input("Good File Ticker", key="r2_good_ticker")
                     st.date_input("Entry Date Coordinate", key="r2_good_date")
                     st.text_input("Entry Time", key="r2_good_entry_time", placeholder="09:31 AM")
@@ -1206,8 +1277,7 @@ def render_room2_forensic_lab():
                         use_container_width=True,
                     )
                 if good_deploy:
-                    _deploy_room2_deck("good")
-                    st.rerun()
+                    _handle_room2_deck_submit("good")
 
         with sub_col_bad:
             with st.container(border=True):
@@ -1216,7 +1286,9 @@ def render_room2_forensic_lab():
                     '<div class="deck-title">🟥 TOXIC ANOMALY TRACKING (BAD FILES)</div>',
                     unsafe_allow_html=True,
                 )
-                with st.form("r2_bad_form_chassis", clear_on_submit=True):
+                if st.session_state.get("r2_bad_validation_error"):
+                    st.error(ROOM2_INVALID_INPUT_MESSAGE)
+                with st.form("r2_bad_form_chassis", clear_on_submit=False):
                     st.text_input("Bad File Ticker", key="r2_bad_ticker")
                     st.date_input("Exit / Failure Date Coordinate", key="r2_bad_date")
                     st.text_input("Exit Time", key="r2_bad_exit_time", placeholder="04:00 PM")
@@ -1230,8 +1302,7 @@ def render_room2_forensic_lab():
                         use_container_width=True,
                     )
                 if bad_deploy:
-                    _deploy_room2_deck("bad")
-                    st.rerun()
+                    _handle_room2_deck_submit("bad")
 
         if st.button("🧹 PURGE FORENSIC DECK INPUTS", key="room2_purge_deck", use_container_width=True):
             st.session_state._pending_room2_deck_purge = True
