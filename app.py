@@ -261,6 +261,49 @@ st.markdown("""
             border-color: #2A2A2A !important;
             color: #FFFFFF !important;
         }
+        .whale-banner {
+            background: #07111A !important;
+            border: 1px solid #143A52 !important;
+            border-radius: 4px;
+            padding: 10px;
+            margin-top: 8px;
+            font-family: monospace;
+            color: #52A2D9;
+        }
+        .whale-banner-active {
+            background: #051018 !important;
+            border: 1px solid #2A7CB8 !important;
+            color: #7BC4FF !important;
+            text-shadow: 0 0 10px rgba(82, 162, 217, 0.45);
+            box-shadow: inset 0 0 18px rgba(42, 124, 184, 0.12);
+        }
+        .insider-banner {
+            background: #1A1607 !important;
+            border: 1px solid #524114 !important;
+            border-radius: 4px;
+            padding: 10px;
+            margin-top: 8px;
+            font-family: monospace;
+            color: #D9B352;
+        }
+        .insider-banner-active {
+            background: #231C06 !important;
+            border: 1px solid #C9A033 !important;
+            color: #FFD978 !important;
+            text-shadow: 0 0 10px rgba(217, 179, 82, 0.45);
+            box-shadow: inset 0 0 18px rgba(201, 160, 51, 0.12);
+        }
+        .proxy-banner-title {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+        .proxy-banner-body {
+            font-size: 11px;
+            line-height: 1.55;
+        }
         .room2-wire-title {
             font-size: 11px;
             font-weight: 700;
@@ -850,6 +893,55 @@ def _room2_coordinate_string(date_val, time_val: str) -> str:
     return f"{date_val} {time_val}".strip()
 
 
+def _render_room2_proxy_telemetry_banners() -> None:
+    inst = st.session_state.get("forensic_institutional_tracker", {})
+    form4 = st.session_state.get("forensic_form4_tracker", {})
+
+    whale_active = bool(inst.get("institutional_block_accumulation"))
+    whale_class = "whale-banner whale-banner-active" if whale_active else "whale-banner"
+    if whale_active:
+        whale_body = inst.get("inst_block_summary", "Institutional Block Accumulation Detected")
+    else:
+        peak = inst.get("peak_surge_ratio", 0.0)
+        baseline = inst.get("volume_baseline_20d", 0.0)
+        if baseline:
+            whale_body = (
+                f"NO BLOCK SURGE — Peak: {peak:.1f}x vs 20D baseline | "
+                f"20D Avg Vol: {baseline:,.0f} | Threshold: 4.0x"
+            )
+        else:
+            whale_body = "STANDBY — Run forensic scan to load 20-day volume baseline wire."
+
+    insider_active = bool(form4.get("insider_buy_detected"))
+    insider_class = "insider-banner insider-banner-active" if insider_active else "insider-banner"
+    if insider_active:
+        insider_body = form4.get("form4_summary", "FORM4 INSIDER BUY ACTIVE")
+        events = form4.get("insider_events", [])
+        if events:
+            detail = " | ".join(
+                f"{evt.get('transaction_date', '—')}: {int(evt.get('shares', 0)):,} shares"
+                for evt in events[:3]
+            )
+            insider_body = f"{insider_body} | RECON: {detail}"
+    else:
+        insider_body = form4.get("form4_summary", "STANDBY — No Form 4 insider buying flagged in last 30 days.")
+
+    st.markdown(
+        f'<div class="{whale_class}">'
+        f'<div class="proxy-banner-title">🐳 INSTITUTIONAL BLOCK FLOWS</div>'
+        f'<div class="proxy-banner-body">{escape(whale_body)}</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="{insider_class}">'
+        f'<div class="proxy-banner-title">👔 MANAGEMENT INSIDER RECONNAISSANCE</div>'
+        f'<div class="proxy-banner-body">{escape(insider_body)}</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def _stream_room2_payload_to_vault() -> tuple[bool, str]:
     ticker = st.session_state.room2_forensic_ticker.strip().upper()
     if not ticker:
@@ -1019,6 +1111,8 @@ def render_room2_forensic_lab():
                 f'<div class="room2-terminal-box">{escape(payload_text)}</div>',
                 unsafe_allow_html=True,
             )
+
+            _render_room2_proxy_telemetry_banners()
 
             if st.button("🛰️ STREAM PAYLOAD TO INTERNET VAULT", key="room2_vault_stream", use_container_width=True):
                 ok, message = _stream_room2_payload_to_vault()
