@@ -403,6 +403,7 @@ if "r2_good_end_date" not in st.session_state: st.session_state.r2_good_end_date
 if "r2_bad_start_date" not in st.session_state: st.session_state.r2_bad_start_date = date.today()
 if "r2_bad_end_date" not in st.session_state: st.session_state.r2_bad_end_date = date.today()
 if "room2_vault_flash" not in st.session_state: st.session_state.room2_vault_flash = ""
+if "room2_last_rescue_vault_id" not in st.session_state: st.session_state.room2_last_rescue_vault_id = None
 if "supabase_ready" not in st.session_state:
     try:
         st.session_state.supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
@@ -858,14 +859,37 @@ FORENSIC_EXPERT_SYSTEM = (
     "anomalies, 15m quantum frequency output, and operator coordinate matrices. "
     "Deliver institutional-grade forensic research: pattern classification rigor, failure-mode "
     "diagnostics, structural match interpretation, and actionable lab notes. "
-    "Zero greetings, zero filler, zero generic market commentary unrelated to the forensic payload."
+    "Zero greetings, zero filler, zero generic market commentary unrelated to the forensic payload.\n\n"
+    "PLAIN ENGLISH FILTER — MANDATORY:\n"
+    "Eliminate all conversational fluff, overly dense academic gibberish, and long filler sentences. "
+    "If the operator asks for a summary, inventory, or count (e.g., 'what patterns have you found', "
+    "'how many stocks', 'list my saved setups'), you must immediately output a crisp, bulleted, "
+    "numerical breakdown with zero fluff. Keep the language simple, clean, and professional. "
+    "Only go into extreme mathematical or technical depth if the operator explicitly asks you for "
+    "further details."
 )
 
 PATTERN_STRATEGIST_SYSTEM = (
     "You are the Savant Pattern-Mining Strategist. Read the injected live cloud pattern archive "
     "and quantum terminal telemetry. Simplify heavy math trends into plain institutional English. "
     "Explain exactly how the operator's custom forensic machine is evolving — pattern classes, "
-    "volume anomalies, insider recon signals, and structural match scores. Be definitive and concise."
+    "volume anomalies, insider recon signals, and structural match scores. Be definitive and concise.\n\n"
+    "PLAIN ENGLISH FILTER — MANDATORY:\n"
+    "Eliminate all conversational fluff, overly dense academic gibberish, and long filler sentences. "
+    "If the operator asks for a summary, inventory, or count (e.g., 'what patterns have you found', "
+    "'how many stocks', 'list my saved setups'), you must immediately output a crisp, bulleted, "
+    "numerical breakdown with zero fluff. Keep the language simple, clean, and professional. "
+    "Only go into extreme mathematical or technical depth if the operator explicitly asks you for "
+    "further details."
+)
+
+TRASH_VAULT_NOTICE = (
+    "⚠️ SYSTEM NOTICE: Pattern moved to Trash Vault. You have exactly 10 days to restore this "
+    "record before permanent cloud purging occurs."
+)
+RESTORE_VAULT_SUCCESS = (
+    "🔄 RESTORATION SACCADE: Soft-deleted pattern successfully rescued from the Trash Vault "
+    "and restored to active memory."
 )
 
 
@@ -880,17 +904,30 @@ def _ensure_supabase_session() -> None:
         st.session_state.supabase_ready = False
 
 
+def _supabase_rest_headers() -> dict:
+    return {
+        "apikey": st.session_state.supabase_key,
+        "Authorization": f"Bearer {st.session_state.supabase_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _forensic_patterns_table() -> str:
+    try:
+        return st.secrets["SUPABASE_PATTERN_TABLE"]
+    except (KeyError, FileNotFoundError, AttributeError):
+        return "forensic_patterns"
+
+
 def _fetch_live_cloud_patterns() -> str:
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return "CLOUD:OFFLINE"
     try:
         resp = requests.get(
-            f"{st.session_state.supabase_url}/rest/v1/forensic_patterns?select=*&order=timestamp.desc&limit=12",
-            headers={
-                "apikey": st.session_state.supabase_key,
-                "Authorization": f"Bearer {st.session_state.supabase_key}",
-            },
+            f"{st.session_state.supabase_url}/rest/v1/{_forensic_patterns_table()}"
+            f"?select=*&or=(state.is.null,state.eq.active)&order=timestamp.desc&limit=12",
+            headers=_supabase_rest_headers(),
             timeout=12,
         )
         if resp.ok:
@@ -902,7 +939,98 @@ def _fetch_live_cloud_patterns() -> str:
 
 def _is_room2_delete_command(text: str) -> bool:
     low = text.lower()
-    return "delete everything" in low or "get rid of" in low or "get rid" in low
+    return (
+        "delete everything" in low
+        or "get rid of" in low
+        or "get rid" in low
+        or "delete that" in low
+        or "delete pattern" in low
+        or "move to trash" in low
+    )
+
+
+def _is_room2_restore_command(text: str) -> bool:
+    low = text.lower()
+    return (
+        "bring that back" in low
+        or "undo that delete" in low
+        or "that was an accident" in low
+    )
+
+
+def _soft_delete_latest_pattern_to_vault() -> str:
+    """10-day rescue vault — mark latest active row soft_deleted with deleted_at timestamp."""
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return "⚠️ Trash Vault offline — add SUPABASE_URL and SUPABASE_KEY to secrets."
+
+    table = _forensic_patterns_table()
+    base = st.session_state.supabase_url
+    try:
+        lookup = requests.get(
+            f"{base}/rest/v1/{table}?select=id,ticker"
+            f"&or=(state.is.null,state.eq.active)"
+            f"&order=timestamp.desc&limit=1",
+            headers=_supabase_rest_headers(),
+            timeout=12,
+        )
+        if not lookup.ok:
+            return f"⚠️ Trash Vault lookup failed: {lookup.status_code}"
+        rows = lookup.json()
+        if not rows:
+            return "⚠️ No active patterns found to move to Trash Vault."
+
+        row_id = rows[0]["id"]
+        deleted_at = datetime.now(timezone.utc).isoformat()
+        patch = requests.patch(
+            f"{base}/rest/v1/{table}?id=eq.{row_id}",
+            headers={**_supabase_rest_headers(), "Prefer": "return=minimal"},
+            json={"state": "soft_deleted", "deleted_at": deleted_at},
+            timeout=12,
+        )
+        if patch.ok:
+            st.session_state.room2_last_rescue_vault_id = row_id
+            return TRASH_VAULT_NOTICE
+        return f"⚠️ Trash Vault move failed: {patch.status_code} {patch.text}"
+    except Exception as exc:
+        return f"⚠️ Trash Vault move failed: {exc}"
+
+
+def _restore_soft_deleted_pattern_from_vault() -> str:
+    """Rescue the most recent soft-deleted row from the 10-day Trash Vault."""
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return "⚠️ Trash Vault offline — add SUPABASE_URL and SUPABASE_KEY to secrets."
+
+    table = _forensic_patterns_table()
+    base = st.session_state.supabase_url
+    row_id = st.session_state.get("room2_last_rescue_vault_id")
+
+    try:
+        if not row_id:
+            lookup = requests.get(
+                f"{base}/rest/v1/{table}?select=id&state=eq.soft_deleted"
+                f"&order=deleted_at.desc&limit=1",
+                headers=_supabase_rest_headers(),
+                timeout=12,
+            )
+            if lookup.ok and lookup.json():
+                row_id = lookup.json()[0]["id"]
+            else:
+                return "⚠️ No soft-deleted patterns found in Trash Vault to restore."
+
+        patch = requests.patch(
+            f"{base}/rest/v1/{table}?id=eq.{row_id}",
+            headers={**_supabase_rest_headers(), "Prefer": "return=minimal"},
+            json={"state": "active", "deleted_at": None},
+            timeout=12,
+        )
+        if patch.ok:
+            st.session_state.room2_last_rescue_vault_id = None
+            return RESTORE_VAULT_SUCCESS
+        return f"⚠️ Restoration failed: {patch.status_code} {patch.text}"
+    except Exception as exc:
+        return f"⚠️ Restoration failed: {exc}"
 
 
 def _is_pattern_mining_query(text: str) -> bool:
@@ -957,8 +1085,16 @@ def process_room2_chat_submission():
         return
     st.session_state.room2_chat_history.append({"speaker": "You", "text": user_text})
 
+    if _is_room2_restore_command(user_text):
+        restore_msg = _restore_soft_deleted_pattern_from_vault()
+        st.session_state.room2_chat_history.append({"speaker": "Forensic Expert", "text": restore_msg})
+        st.session_state.room2_text_buffer = ""
+        return
+
     if _is_room2_delete_command(user_text):
-        purge_room2_conversation_and_cloud()
+        trash_msg = _soft_delete_latest_pattern_to_vault()
+        st.session_state.room2_chat_history.append({"speaker": "Forensic Expert", "text": trash_msg})
+        st.session_state.room2_text_buffer = ""
         return
 
     if _is_pattern_mining_query(user_text):
@@ -1317,9 +1453,6 @@ def _purge_room2_deck_inputs() -> None:
 
 
 def render_room2_forensic_lab():
-    if st.session_state.pop("_pending_room2_deck_purge", False):
-        _purge_room2_deck_inputs()
-
     st.markdown(
         """
         <div class="room2-hud">
@@ -1386,10 +1519,6 @@ def render_room2_forensic_lab():
                 if bad_deploy:
                     _handle_room2_deck_submit("bad")
 
-        if st.button("🧹 PURGE FORENSIC DECK INPUTS", key="room2_purge_deck", use_container_width=True):
-            st.session_state._pending_room2_deck_purge = True
-            st.rerun()
-
     with col_right:
         st.markdown(
             '<div class="room2-terminal-header">▸ WINDOW 1 — MATRIX REACTION PROCESSOR</div>',
@@ -1432,7 +1561,7 @@ def render_room2_forensic_lab():
             st.text_input(
                 "Lab Input",
                 key="room2_text_buffer",
-                placeholder="Ask about patterns, or say 'delete everything' to wipe cloud snapshot...",
+                placeholder="Ask about patterns, say 'delete pattern' for Trash Vault, or 'undo that delete' to restore...",
                 label_visibility="collapsed",
             )
             if st.form_submit_button("Send") and st.session_state.room2_text_buffer.strip():
