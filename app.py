@@ -396,9 +396,8 @@ if "r2_good_start_time" not in st.session_state: st.session_state.r2_good_start_
 if "r2_good_end_time" not in st.session_state: st.session_state.r2_good_end_time = "04:00 PM"
 if "r2_bad_start_time" not in st.session_state: st.session_state.r2_bad_start_time = "09:31 AM"
 if "r2_bad_end_time" not in st.session_state: st.session_state.r2_bad_end_time = "04:00 PM"
-if "r2_good_comments" not in st.session_state: st.session_state.r2_good_comments = ""
-if "r2_bad_notes" not in st.session_state: st.session_state.r2_bad_notes = ""
-if "r2_good_setup_label" not in st.session_state: st.session_state.r2_good_setup_label = ""
+if "r2_single_notes_field" not in st.session_state: st.session_state.r2_single_notes_field = ""
+if "r2_bad_single_notes_field" not in st.session_state: st.session_state.r2_bad_single_notes_field = ""
 if "r2_good_start_date" not in st.session_state: st.session_state.r2_good_start_date = date.today()
 if "r2_good_end_date" not in st.session_state: st.session_state.r2_good_end_date = date.today()
 if "r2_bad_start_date" not in st.session_state: st.session_state.r2_bad_start_date = date.today()
@@ -1189,8 +1188,7 @@ def _clear_room2_form_buffers(deck: str) -> None:
             "r2_good_start_time",
             "r2_good_end_date",
             "r2_good_end_time",
-            "r2_good_setup_label",
-            "r2_good_comments",
+            "r2_single_notes_field",
         )
     else:
         keys = (
@@ -1199,7 +1197,7 @@ def _clear_room2_form_buffers(deck: str) -> None:
             "r2_bad_start_time",
             "r2_bad_end_date",
             "r2_bad_end_time",
-            "r2_bad_notes",
+            "r2_bad_single_notes_field",
         )
     for key in keys:
         st.session_state.pop(key, None)
@@ -1234,19 +1232,18 @@ def _deploy_room2_deck(deck: str) -> None:
     exit_coord = _room2_coordinate_string(end_date, end_time) or None
 
     if deck == "good":
-        pattern_category = st.session_state.get("r2_good_setup_label", "") or "VALIDATED"
-        notes = st.session_state.get("r2_good_comments", "")
+        pattern_category = "VALIDATED"
+        notes = st.session_state.get("r2_single_notes_field", "")
         deck_tag = "VALID_PATTERN"
     else:
         pattern_category = "TOXIC_ANOMALY"
-        notes = st.session_state.get("r2_bad_notes", "")
+        notes = st.session_state.get("r2_bad_single_notes_field", "")
         deck_tag = "TOXIC_ANOMALY"
 
     feedback = notes.strip()
     if start_time or end_time:
-        feedback = (
-            f"{feedback} | START:{start_time} | END:{end_time} | DECK:{deck_tag}"
-        ).strip(" |")
+        time_meta = f"START:{start_time} | END:{end_time} | DECK:{deck_tag}"
+        feedback = f"{feedback} | {time_meta}".strip(" |") if feedback else time_meta
 
     data_stream = core_quantum.get_historical_15m_data(ticker)
     quantum_report = core_quantum.calculate_quantum_frequencies(
@@ -1313,9 +1310,8 @@ def _purge_room2_deck_inputs() -> None:
         "r2_good_end_time",
         "r2_bad_start_time",
         "r2_bad_end_time",
-        "r2_good_setup_label",
-        "r2_good_comments",
-        "r2_bad_notes",
+        "r2_single_notes_field",
+        "r2_bad_single_notes_field",
     ):
         st.session_state.pop(key, None)
 
@@ -1355,14 +1351,9 @@ def render_room2_forensic_lab():
                     st.text_input("Good File Ticker", key="r2_good_ticker")
                     _render_r2_datalink_group("r2_good")
                     st.text_input(
-                        "Setup Classification Label",
-                        key="r2_good_setup_label",
-                        placeholder="Breakout, Continuation, Accumulation...",
-                    )
-                    st.text_input(
-                        "Operator Comments",
-                        key="r2_good_comments",
-                        placeholder="Validated setup notes, context corrections...",
+                        "📝 Optional Technical Context:",
+                        placeholder="e.g., bounced off the VWAP breakout...",
+                        key="r2_single_notes_field",
                     )
                     good_deploy = st.form_submit_button(
                         "🔥 COMMIT VALID PATTERN TO INTERNET",
@@ -1384,9 +1375,9 @@ def render_room2_forensic_lab():
                     st.text_input("Bad File Ticker", key="r2_bad_ticker")
                     _render_r2_datalink_group("r2_bad")
                     st.text_input(
-                        "Danger Notes",
-                        key="r2_bad_notes",
-                        placeholder="Anomaly flags, trap signals, toxic failure context...",
+                        "📝 Optional Technical Context:",
+                        placeholder="e.g., bounced off the VWAP breakout...",
+                        key="r2_bad_single_notes_field",
                     )
                     bad_deploy = st.form_submit_button(
                         "🚨 COMMIT TOXIC ANOMALY TO INTERNET",
