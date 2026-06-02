@@ -236,6 +236,21 @@ st.markdown("""
             min-height: 140px;
             box-shadow: inset 0 0 24px rgba(52, 199, 89, 0.04);
         }
+        .room2-matrix-box {
+            background: #020802;
+            border: 1px solid #0D3D0D;
+            border-radius: 4px;
+            padding: 16px 18px;
+            font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+            font-size: 11px;
+            line-height: 1.55;
+            color: #34C759;
+            text-shadow: 0 0 8px rgba(52, 199, 89, 0.35);
+            white-space: pre;
+            overflow-x: auto;
+            min-height: 160px;
+            box-shadow: inset 0 0 32px rgba(52, 199, 89, 0.06);
+        }
         .room2-terminal-header {
             font-size: 10px;
             font-weight: 700;
@@ -377,13 +392,17 @@ if "room2_forensic_ticker" not in st.session_state: st.session_state.room2_foren
 if "room2_quantum_report" not in st.session_state: st.session_state.room2_quantum_report = ""
 if "room2_bar_count" not in st.session_state: st.session_state.room2_bar_count = 0
 if "room2_text_buffer" not in st.session_state: st.session_state.room2_text_buffer = ""
-if "r2_good_entry_time" not in st.session_state: st.session_state.r2_good_entry_time = "09:31 AM"
-if "r2_bad_exit_time" not in st.session_state: st.session_state.r2_bad_exit_time = "04:00 PM"
+if "r2_good_start_time" not in st.session_state: st.session_state.r2_good_start_time = "09:31 AM"
+if "r2_good_end_time" not in st.session_state: st.session_state.r2_good_end_time = "04:00 PM"
+if "r2_bad_start_time" not in st.session_state: st.session_state.r2_bad_start_time = "09:31 AM"
+if "r2_bad_end_time" not in st.session_state: st.session_state.r2_bad_end_time = "04:00 PM"
 if "r2_good_comments" not in st.session_state: st.session_state.r2_good_comments = ""
 if "r2_bad_notes" not in st.session_state: st.session_state.r2_bad_notes = ""
 if "r2_good_setup_label" not in st.session_state: st.session_state.r2_good_setup_label = ""
-if "r2_good_date" not in st.session_state: st.session_state.r2_good_date = date.today()
-if "r2_bad_date" not in st.session_state: st.session_state.r2_bad_date = date.today()
+if "r2_good_start_date" not in st.session_state: st.session_state.r2_good_start_date = date.today()
+if "r2_good_end_date" not in st.session_state: st.session_state.r2_good_end_date = date.today()
+if "r2_bad_start_date" not in st.session_state: st.session_state.r2_bad_start_date = date.today()
+if "r2_bad_end_date" not in st.session_state: st.session_state.r2_bad_end_date = date.today()
 if "room2_vault_flash" not in st.session_state: st.session_state.room2_vault_flash = ""
 if "supabase_ready" not in st.session_state:
     try:
@@ -1019,6 +1038,69 @@ def _room2_coordinate_string(date_val, time_val: str) -> str:
     return f"{date_val} {time_val}".strip()
 
 
+def _render_r2_datalink_group(deck_prefix: str) -> None:
+    """Linear datalink: Start anchor row + End anchor row, side-by-side columns."""
+    line1_col1, line1_col2 = st.columns([1.0, 1.0])
+    with line1_col1:
+        st.date_input("Start Date:", key=f"{deck_prefix}_start_date")
+    with line1_col2:
+        st.text_input(
+            "Start Time (HH:MM AM/PM):",
+            key=f"{deck_prefix}_start_time",
+            placeholder="09:31 AM",
+        )
+    line2_col1, line2_col2 = st.columns([1.0, 1.0])
+    with line2_col1:
+        st.date_input("End Date:", key=f"{deck_prefix}_end_date")
+    with line2_col2:
+        st.text_input(
+            "End Time (HH:MM AM/PM):",
+            key=f"{deck_prefix}_end_time",
+            placeholder="04:00 PM",
+        )
+
+
+def _matrix_cell(label: str, value: str, width: int = 36) -> str:
+    text = f"{label}: {value}" if value else f"{label}: —"
+    if len(text) > width:
+        text = text[: width - 3] + "..."
+    return f"║ {text:<{width}} ║"
+
+
+def _build_matrix_terminal_readout(
+    deck_tag: str,
+    ticker: str,
+    start_coord: str,
+    end_coord: str,
+    quantum_report: str,
+    vault_line: str,
+) -> str:
+    """Matrix reaction visualizer — live local processing calculation sheet."""
+    header = [
+        "╔══════════════════════════════════════╗",
+        "║  MATRIX REACTION PROCESSOR — LIVE    ║",
+        "╠══════════════════════════════════════╣",
+        _matrix_cell("DECK", deck_tag),
+        _matrix_cell("TICKER", ticker),
+        _matrix_cell("START ANCHOR", start_coord or "—"),
+        _matrix_cell("END ANCHOR", end_coord or "—"),
+        "╠══════════════════════════════════════╣",
+        "║ QUANT PROCESSOR OUTPUT               ║",
+    ]
+    body = []
+    for segment in quantum_report.split(" | "):
+        segment = segment.strip()
+        while segment:
+            body.append(_matrix_cell("", f"▸ {segment[:32]}", width=34))
+            segment = segment[32:]
+    footer = [
+        "╠══════════════════════════════════════╣",
+        _matrix_cell("VAULT", vault_line[:34], width=34),
+        "╚══════════════════════════════════════╝",
+    ]
+    return "\n".join(header + body + footer)
+
+
 def _render_room2_proxy_telemetry_banners() -> None:
     inst = st.session_state.get("forensic_institutional_tracker", {})
     form4 = st.session_state.get("forensic_form4_tracker", {})
@@ -1087,13 +1169,15 @@ def _validate_room2_timestamp(timestamp: str) -> bool:
 
 
 def _validate_room2_deck(deck: str) -> bool:
-    if deck == "good":
-        ticker = st.session_state.get("r2_good_ticker", "")
-        timestamp = st.session_state.get("r2_good_entry_time", "")
-    else:
-        ticker = st.session_state.get("r2_bad_ticker", "")
-        timestamp = st.session_state.get("r2_bad_exit_time", "")
-    return _validate_room2_ticker(ticker) and _validate_room2_timestamp(timestamp)
+    prefix = "r2_good" if deck == "good" else "r2_bad"
+    ticker = st.session_state.get(f"{prefix}_ticker", "")
+    start_time = st.session_state.get(f"{prefix}_start_time", "")
+    end_time = st.session_state.get(f"{prefix}_end_time", "")
+    return (
+        _validate_room2_ticker(ticker)
+        and _validate_room2_timestamp(start_time)
+        and _validate_room2_timestamp(end_time)
+    )
 
 
 def _clear_room2_form_buffers(deck: str) -> None:
@@ -1101,16 +1185,20 @@ def _clear_room2_form_buffers(deck: str) -> None:
     if deck == "good":
         keys = (
             "r2_good_ticker",
-            "r2_good_date",
-            "r2_good_entry_time",
+            "r2_good_start_date",
+            "r2_good_start_time",
+            "r2_good_end_date",
+            "r2_good_end_time",
             "r2_good_setup_label",
             "r2_good_comments",
         )
     else:
         keys = (
             "r2_bad_ticker",
-            "r2_bad_date",
-            "r2_bad_exit_time",
+            "r2_bad_start_date",
+            "r2_bad_start_time",
+            "r2_bad_end_date",
+            "r2_bad_end_time",
             "r2_bad_notes",
         )
     for key in keys:
@@ -1135,42 +1223,42 @@ def _handle_room2_deck_submit(deck: str) -> None:
 
 
 def _deploy_room2_deck(deck: str) -> None:
-    """Harvest quantum math, vault payload, and lock terminal output for a deck station."""
+    """Harvest quantum math, vault payload, and lock matrix terminal output."""
+    prefix = "r2_good" if deck == "good" else "r2_bad"
+    ticker = str(st.session_state.get(f"{prefix}_ticker", "")).strip().upper()
+    start_date = st.session_state.get(f"{prefix}_start_date")
+    start_time = st.session_state.get(f"{prefix}_start_time", "09:31 AM")
+    end_date = st.session_state.get(f"{prefix}_end_date")
+    end_time = st.session_state.get(f"{prefix}_end_time", "04:00 PM")
+    entry_coord = _room2_coordinate_string(start_date, start_time) or None
+    exit_coord = _room2_coordinate_string(end_date, end_time) or None
+
     if deck == "good":
-        ticker = str(st.session_state.r2_good_ticker).strip().upper()
         pattern_category = st.session_state.get("r2_good_setup_label", "") or "VALIDATED"
-        date_val = st.session_state.get("r2_good_date")
-        time_val = st.session_state.get("r2_good_entry_time", "09:31 AM")
         notes = st.session_state.get("r2_good_comments", "")
-        entry_coord = _room2_coordinate_string(date_val, time_val) or None
-        exit_coord = None
-        entry_time = time_val
-        exit_time = st.session_state.get("r2_bad_exit_time", "04:00 PM")
         deck_tag = "VALID_PATTERN"
     else:
-        ticker = str(st.session_state.r2_bad_ticker).strip().upper()
         pattern_category = "TOXIC_ANOMALY"
-        date_val = st.session_state.get("r2_bad_date")
-        time_val = st.session_state.get("r2_bad_exit_time", "04:00 PM")
         notes = st.session_state.get("r2_bad_notes", "")
-        entry_coord = None
-        exit_coord = _room2_coordinate_string(date_val, time_val) or None
-        entry_time = st.session_state.get("r2_good_entry_time", "09:31 AM")
-        exit_time = time_val
         deck_tag = "TOXIC_ANOMALY"
 
     feedback = notes.strip()
-    if time_val:
-        feedback = f"{feedback} | DECK_TIME:{time_val} | DECK:{deck_tag}".strip(" |")
+    if start_time or end_time:
+        feedback = (
+            f"{feedback} | START:{start_time} | END:{end_time} | DECK:{deck_tag}"
+        ).strip(" |")
 
     data_stream = core_quantum.get_historical_15m_data(ticker)
     quantum_report = core_quantum.calculate_quantum_frequencies(
         data_stream,
         pattern_category=pattern_category,
-        date_coordinates=(entry_coord, exit_coord),
-        prices=None,
-        human_feedback=feedback,
         ticker=ticker,
+        start_date=start_date,
+        start_time=start_time,
+        end_date=end_date,
+        end_time=end_time,
+        operator_context=notes,
+        human_feedback=feedback,
     )
 
     if data_stream == "THROTTLE":
@@ -1193,8 +1281,8 @@ def _deploy_room2_deck(deck: str) -> None:
         pattern_category=pattern_category,
         entry_coordinate=entry_coord or "",
         exit_coordinate=exit_coord or "",
-        entry_time=entry_time,
-        exit_time=exit_time,
+        entry_time=start_time,
+        exit_time=end_time,
         operator_notes=notes,
         quantum_report=quantum_report,
         bar_count=st.session_state.room2_bar_count,
@@ -1202,9 +1290,10 @@ def _deploy_room2_deck(deck: str) -> None:
     ok, vault_message = core_quantum.stream_payload_to_vault(payload)
     vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
     st.session_state.quantum_terminal_output = (
-        f"📡 [DATALINK: {deck_tag}_DEPLOYED]\n"
-        f"{quantum_report}\n\n"
-        f"[INTERNET_VAULT] {vault_line}"
+        f"{quantum_report}\n"
+        f"╠════════════════════════════════════════╣\n"
+        f"│ INTERNET VAULT: {vault_line[:32]:<32} │\n"
+        f"╚════════════════════════════════════════╝"
     )
     st.session_state.room2_vault_flash = vault_line if ok else ""
 
@@ -1216,10 +1305,14 @@ def _purge_room2_deck_inputs() -> None:
     for key in (
         "r2_good_ticker",
         "r2_bad_ticker",
-        "r2_good_date",
-        "r2_bad_date",
-        "r2_good_entry_time",
-        "r2_bad_exit_time",
+        "r2_good_start_date",
+        "r2_good_end_date",
+        "r2_bad_start_date",
+        "r2_bad_end_date",
+        "r2_good_start_time",
+        "r2_good_end_time",
+        "r2_bad_start_time",
+        "r2_bad_end_time",
         "r2_good_setup_label",
         "r2_good_comments",
         "r2_bad_notes",
@@ -1260,8 +1353,7 @@ def render_room2_forensic_lab():
                     st.error(ROOM2_INVALID_INPUT_MESSAGE)
                 with st.form("r2_good_form_chassis", clear_on_submit=False):
                     st.text_input("Good File Ticker", key="r2_good_ticker")
-                    st.date_input("Entry Date Coordinate", key="r2_good_date")
-                    st.text_input("Entry Time", key="r2_good_entry_time", placeholder="09:31 AM")
+                    _render_r2_datalink_group("r2_good")
                     st.text_input(
                         "Setup Classification Label",
                         key="r2_good_setup_label",
@@ -1290,8 +1382,7 @@ def render_room2_forensic_lab():
                     st.error(ROOM2_INVALID_INPUT_MESSAGE)
                 with st.form("r2_bad_form_chassis", clear_on_submit=False):
                     st.text_input("Bad File Ticker", key="r2_bad_ticker")
-                    st.date_input("Exit / Failure Date Coordinate", key="r2_bad_date")
-                    st.text_input("Exit Time", key="r2_bad_exit_time", placeholder="04:00 PM")
+                    _render_r2_datalink_group("r2_bad")
                     st.text_input(
                         "Danger Notes",
                         key="r2_bad_notes",
@@ -1310,11 +1401,11 @@ def render_room2_forensic_lab():
 
     with col_right:
         st.markdown(
-            '<div class="room2-terminal-header">▸ WINDOW 1 — QUANTUM ENGINE CORE</div>',
+            '<div class="room2-terminal-header">▸ WINDOW 1 — MATRIX REACTION PROCESSOR</div>',
             unsafe_allow_html=True,
         )
         st.markdown(
-            f'<div class="room2-terminal-box">{escape(st.session_state.quantum_terminal_output)}</div>',
+            f'<div class="room2-matrix-box">{escape(st.session_state.quantum_terminal_output)}</div>',
             unsafe_allow_html=True,
         )
 

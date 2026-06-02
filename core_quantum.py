@@ -661,6 +661,151 @@ def _local_pattern_math(
     }
 
 
+def _parse_session_datetime(date_val, time_str: str):
+    if not date_val or not time_str:
+        return None
+    try:
+        if hasattr(date_val, "strftime"):
+            date_str = date_val.strftime("%Y-%m-%d")
+        else:
+            date_str = str(date_val)[:10]
+        time_clean = str(time_str).strip().upper()
+        return datetime.datetime.strptime(f"{date_str} {time_clean}", "%Y-%m-%d %I:%M %p")
+    except Exception:
+        return None
+
+
+def _format_session_duration(start_dt, end_dt) -> str:
+    if not start_dt or not end_dt:
+        return "UNRESOLVED"
+    delta = end_dt - start_dt
+    if delta.total_seconds() < 0:
+        return "INVALID — END PRECEDES START"
+    total_min = int(delta.total_seconds() // 60)
+    hours, minutes = divmod(total_min, 60)
+    return f"{hours}H {minutes:02d}M | {total_min} MIN ELAPSED"
+
+
+def _compute_price_velocity_metrics(data_stream) -> dict:
+    """Raw percentage velocity moves from the active 15m execution window."""
+    series = _series_from_data_stream(data_stream)
+    if series is None:
+        return {
+            "session_velocity_pct": 0.0,
+            "peak_bar_velocity_pct": 0.0,
+            "mean_bar_velocity_pct": 0.0,
+            "window_amplitude_pct": 0.0,
+        }
+    if pd is not None and isinstance(series, pd.Series) and len(series) >= 2:
+        first = float(series.iloc[0])
+        last = float(series.iloc[-1])
+        session_velocity = ((last - first) / first * 100) if first else 0.0
+        returns = series.pct_change().dropna()
+        peak_bar = float(returns.abs().max() * 100) if len(returns) else 0.0
+        mean_bar = float(returns.abs().mean() * 100) if len(returns) else 0.0
+        amplitude = _wave_amplitude_pct(series)
+        return {
+            "session_velocity_pct": round(session_velocity, 4),
+            "peak_bar_velocity_pct": round(peak_bar, 4),
+            "mean_bar_velocity_pct": round(mean_bar, 4),
+            "window_amplitude_pct": round(amplitude, 4),
+        }
+    if isinstance(series, list) and len(series) >= 2:
+        first, last = series[0], series[-1]
+        session_velocity = ((last - first) / first * 100) if first else 0.0
+        return {
+            "session_velocity_pct": round(session_velocity, 4),
+            "peak_bar_velocity_pct": 0.0,
+            "mean_bar_velocity_pct": 0.0,
+            "window_amplitude_pct": round(_wave_amplitude_pct(series), 4),
+        }
+    return {
+        "session_velocity_pct": 0.0,
+        "peak_bar_velocity_pct": 0.0,
+        "mean_bar_velocity_pct": 0.0,
+        "window_amplitude_pct": 0.0,
+    }
+
+
+def _matrix_row(label: str, value: str, width: int = 38) -> str:
+    text = f"{label}: {value}" if label else str(value)
+    if len(text) > width:
+        text = text[: width - 3] + "..."
+    return f"│ {text:<{width}} │"
+
+
+def _wrap_matrix_context(notes: str, width: int = 36) -> list[str]:
+    if not notes.strip():
+        return [_matrix_row("OPERATOR CTX", "—", width=width)]
+    lines = []
+    chunk = notes.strip()
+    while chunk:
+        lines.append(_matrix_row("", f"▸ {chunk[:width - 2]}", width=width))
+        chunk = chunk[width - 2:]
+    return lines
+
+
+def _build_matrix_execution_readout(
+    *,
+    ticker: str,
+    pattern_category: str,
+    start_anchor: str,
+    end_anchor: str,
+    duration_label: str,
+    velocity: dict,
+    math_block: dict,
+    operator_context: str,
+    micro_block=None,
+    institutional_block=None,
+    form4_block=None,
+) -> str:
+    """Bloomberg-grade ASCII box-drawing execution deck for the main monitor."""
+    header = [
+        "╔════════════════════════════════════════╗",
+        "║  SAVANT MATRIX EXECUTION TERMINAL      ║",
+        "║  MACBOOK LOCAL QUANT PROCESSOR — LIVE  ║",
+        "╠════════════════════════════════════════╣",
+        _matrix_row("TICKER", ticker),
+        _matrix_row("PATTERN CLASS", pattern_category or "UNCLASSIFIED"),
+        _matrix_row("START ANCHOR", start_anchor or "—"),
+        _matrix_row("END ANCHOR", end_anchor or "—"),
+        _matrix_row("TIME DURATION", duration_label),
+        "╠════════════════════════════════════════╣",
+        "║  PRICE VELOCITY MATRIX                 ║",
+        _matrix_row("SESSION MOVE", f"{velocity['session_velocity_pct']:+.4f}%"),
+        _matrix_row("PEAK BAR VEL", f"{velocity['peak_bar_velocity_pct']:.4f}%"),
+        _matrix_row("MEAN BAR VEL", f"{velocity['mean_bar_velocity_pct']:.4f}%"),
+        _matrix_row("WINDOW AMPL", f"{velocity['window_amplitude_pct']:.4f}%"),
+        "╠════════════════════════════════════════╣",
+        "║  STRUCTURAL QUANT CORE                   ║",
+        _matrix_row("BARS", str(math_block.get("bar_count", 0))),
+        _matrix_row("PEARSON r", f"{math_block.get('pearson_r', 0):.4f}"),
+        _matrix_row("TREND BIAS", str(math_block.get("trend_bias", "NEUTRAL"))),
+        _matrix_row("STRUCT MATCH", f"{math_block.get('match_probability', 0)}%"),
+        _matrix_row(
+            "POLYGON SHIELD",
+            f"{_polygon_calls_remaining()}/{POLYGON_CALLS_PER_MINUTE} CALLS",
+        ),
+    ]
+    context_section = ["╠════════════════════════════════════════╣", "║  OPERATOR CONTEXT BIND                 ║"]
+    context_section.extend(_wrap_matrix_context(operator_context))
+
+    extras = []
+    if micro_block and micro_block.get("drill_active"):
+        extras.append(_matrix_row("5M DRILL", micro_block.get("summary", "—")[:34]))
+    if institutional_block and institutional_block.get("institutional_block_accumulation"):
+        extras.append(_matrix_row("INST BLOCK", "ACCUMULATION DETECTED"))
+    if form4_block and form4_block.get("insider_buy_detected"):
+        extras.append(_matrix_row("FORM4", form4_block.get("form4_summary", "—")[:34]))
+
+    footer = ["╚════════════════════════════════════════╝"]
+    if extras:
+        extras.insert(0, "╠════════════════════════════════════════╣")
+        extras.insert(1, "║  PROXY TRACKER FEED                      ║")
+
+    return "\n".join(header + context_section + extras + footer)
+
+
 def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
     """Direct secure Supabase REST anchor to live Postgres cloud table."""
     try:
@@ -699,10 +844,16 @@ def calculate_quantum_frequencies(
     prices=None,
     human_feedback="",
     ticker="",
+    start_date=None,
+    start_time="",
+    end_date=None,
+    end_time="",
+    operator_context="",
 ):
     """
     Runs permanent pattern categorization math locally on Mac silicon with adaptive
-    5-minute drill-down when 15-minute variance compresses.
+    5-minute drill-down when 15-minute variance compresses. Returns a Matrix-style
+    ASCII execution deck with velocity, duration, and operator context telemetry.
     """
     if data_stream == "THROTTLE":
         return THROTTLE_MESSAGE
@@ -714,6 +865,37 @@ def calculate_quantum_frequencies(
         or str(st.session_state.get("room2_forensic_ticker", "")).strip().upper()
         or str(st.session_state.get("current_ticker", "")).strip().upper()
     )
+
+    feedback = (operator_context or human_feedback or "").strip()
+    if not feedback:
+        feedback = str(st.session_state.get("room2_operator_context", "")).strip()
+
+    if start_date is not None or start_time:
+        start_anchor = f"{start_date} {start_time}".strip() if start_date else str(start_time)
+    else:
+        entry_coord, _ = _normalize_date_coordinates(date_coordinates)
+        start_anchor = entry_coord or ""
+
+    if end_date is not None or end_time:
+        end_anchor = f"{end_date} {end_time}".strip() if end_date else str(end_time)
+    else:
+        _, exit_coord = _normalize_date_coordinates(date_coordinates)
+        end_anchor = exit_coord or ""
+
+    start_dt = _parse_session_datetime(start_date, start_time)
+    if start_dt is None and start_anchor:
+        parts = start_anchor.rsplit(" ", 2)
+        if len(parts) >= 3:
+            start_dt = _parse_session_datetime(parts[0], f"{parts[1]} {parts[2]}")
+
+    end_dt = _parse_session_datetime(end_date, end_time)
+    if end_dt is None and end_anchor:
+        parts = end_anchor.rsplit(" ", 2)
+        if len(parts) >= 3:
+            end_dt = _parse_session_datetime(parts[0], f"{parts[1]} {parts[2]}")
+
+    duration_label = _format_session_duration(start_dt, end_dt)
+    velocity = _compute_price_velocity_metrics(data_stream)
 
     micro_block = None
     if _is_compressed_variance(data_stream) and resolved_ticker:
@@ -738,13 +920,26 @@ def calculate_quantum_frequencies(
     math_block = _local_pattern_math(
         data_stream,
         pattern_category,
-        date_coordinates,
+        (start_anchor or None, end_anchor or None),
         prices,
         micro_block=micro_block,
         institutional_block=institutional_block,
         form4_block=form4_block,
     )
-    return math_block["quantum_report"]
+
+    return _build_matrix_execution_readout(
+        ticker=resolved_ticker or "UNKNOWN",
+        pattern_category=math_block.get("pattern_category", pattern_category),
+        start_anchor=start_anchor,
+        end_anchor=end_anchor,
+        duration_label=duration_label,
+        velocity=velocity,
+        math_block=math_block,
+        operator_context=feedback,
+        micro_block=micro_block,
+        institutional_block=institutional_block,
+        form4_block=form4_block,
+    )
 
 
 def build_vault_payload(
