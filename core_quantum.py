@@ -433,18 +433,18 @@ def get_historical_interval_data(ticker, interval="15m", update_institutional_tr
                 "peak_surge_ratio": 0.0,
             }
             return "THROTTLE"
-        try:
-            api_key = st.secrets["POLYGON_API_KEY"]
-            start_date = (now - datetime.timedelta(days=730)).strftime("%Y-%m-%d")
-            end_date = now.strftime("%Y-%m-%d")
+    try:
+        api_key = st.secrets["POLYGON_API_KEY"]
+        start_date = (now - datetime.timedelta(days=730)).strftime("%Y-%m-%d")
+        end_date = now.strftime("%Y-%m-%d")
             url = (
                 f"https://api.polygon.io/v2/aggs/ticker/{ticker_clean}/range/15/minute/"
                 f"{start_date}/{end_date}?adjusted=true&sort=asc&apiKey={api_key}"
             )
             response = requests.get(url, timeout=15).json()
-            if "results" in response:
+        if "results" in response:
                 data_stream = response["results"]
-            elif response.get("status") == "ERROR" and "max requests" in response.get("error", "").lower():
+        elif response.get("status") == "ERROR" and "max requests" in response.get("error", "").lower():
                 st.session_state.polygon_calls_remaining = 0
                 st.session_state.polygon_lockout = True
                 st.session_state.forensic_institutional_tracker = {
@@ -859,7 +859,7 @@ def calculate_quantum_frequencies(
         return THROTTLE_MESSAGE
     if data_stream is None or data_stream == "LOCKOUT":
         return "System Sidelined: Awaiting Data Pipeline Clear"
-
+        
     resolved_ticker = (
         str(ticker).strip().upper()
         or str(st.session_state.get("room2_forensic_ticker", "")).strip().upper()
