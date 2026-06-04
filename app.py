@@ -1294,13 +1294,25 @@ def _validate_room2_ticker(ticker: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z.$-]{1,6}", cleaned))
 
 
-def _validate_room2_timestamp(timestamp: str) -> bool:
+def _normalize_room2_timestamp(timestamp: str) -> str | None:
+    """Accept flexible operator input; return canonical 'H:MM AM/PM' or None."""
     cleaned = str(timestamp).strip().upper()
-    if ":" not in cleaned:
-        return False
-    if not (cleaned.endswith(" AM") or cleaned.endswith(" PM")):
-        return False
-    return bool(R2_TIMESTAMP_PATTERN.match(cleaned))
+    if not cleaned:
+        return None
+    cleaned = re.sub(r"(\d{1,2}:\d{2})\s*(AM|PM)", r"\1 \2", cleaned)
+    if not R2_TIMESTAMP_PATTERN.match(cleaned):
+        return None
+    match = re.match(r"^(\d{1,2}):(\d{2})\s+(AM|PM)$", cleaned, re.IGNORECASE)
+    if not match:
+        return None
+    hour, minute, meridiem = int(match.group(1)), int(match.group(2)), match.group(3).upper()
+    if hour < 1 or hour > 12 or minute > 59:
+        return None
+    return f"{hour}:{minute:02d} {meridiem}"
+
+
+def _validate_room2_timestamp(timestamp: str) -> bool:
+    return _normalize_room2_timestamp(timestamp) is not None
 
 
 def _validate_room2_deck(deck: str) -> bool:
@@ -1351,19 +1363,23 @@ def _handle_room2_deck_submit(deck: str) -> None:
         st.session_state.r2_good_validation_error = False
     else:
         st.session_state.r2_bad_validation_error = False
-    _deploy_room2_deck(deck)
-    _clear_room2_form_buffers(deck)
+    if _deploy_room2_deck(deck):
+        _clear_room2_form_buffers(deck)
     st.rerun()
 
 
-def _deploy_room2_deck(deck: str) -> None:
+def _deploy_room2_deck(deck: str) -> bool:
     """Harvest quantum math, vault payload, and lock matrix terminal output."""
     prefix = "r2_good" if deck == "good" else "r2_bad"
     ticker = str(st.session_state.get(f"{prefix}_ticker", "")).strip().upper()
     start_date = st.session_state.get(f"{prefix}_start_date")
-    start_time = st.session_state.get(f"{prefix}_start_time", "09:31 AM")
+    start_time = _normalize_room2_timestamp(
+        st.session_state.get(f"{prefix}_start_time", "09:31 AM")
+    ) or "09:31 AM"
     end_date = st.session_state.get(f"{prefix}_end_date")
-    end_time = st.session_state.get(f"{prefix}_end_time", "04:00 PM")
+    end_time = _normalize_room2_timestamp(
+        st.session_state.get(f"{prefix}_end_time", "04:00 PM")
+    ) or "04:00 PM"
     entry_coord = _room2_coordinate_string(start_date, start_time) or None
     exit_coord = _room2_coordinate_string(end_date, end_time) or None
 
@@ -1381,55 +1397,71 @@ def _deploy_room2_deck(deck: str) -> None:
         time_meta = f"START:{start_time} | END:{end_time} | DECK:{deck_tag}"
         feedback = f"{feedback} | {time_meta}".strip(" |") if feedback else time_meta
 
-    data_stream = core_quantum.get_historical_15m_data(ticker)
+    try:
+        data_stream = core_quantum.get_historical_15m_data(ticker)
 
-    if core_quantum.is_pipeline_signal(data_stream, "THROTTLE"):
-        st.session_state.polygon_lockout = True
-        st.session_state.quantum_terminal_output = core_quantum.THROTTLE_MESSAGE
-        st.session_state.room2_quantum_report = core_quantum.THROTTLE_MESSAGE
-        return
+        if core_quantum.is_pipeline_signal(data_stream, "THROTTLE"):
+            st.session_state.polygon_lockout = True
+            st.session_state.quantum_terminal_output = core_quantum.THROTTLE_MESSAGE
+            st.session_state.room2_quantum_report = core_quantum.THROTTLE_MESSAGE
+            return False
 
-    if data_stream is None or core_quantum.is_pipeline_signal(data_stream, "LOCKOUT"):
-        st.session_state.quantum_terminal_output = "⚠️ [DATALINK: NO_DATA] Historical wire returned empty."
-        return
+        if not core_quantum.is_usable_data_stream(data_stream):
+            st.session_state.quantum_terminal_output = (
+                f"⚠️ [DATALINK: NO_DATA] No 15m bars for {ticker}. "
+                "Verify ticker symbol and market session dates."
+            )
+            st.session_state.room2_quantum_report = st.session_state.quantum_terminal_output
+            return False
 
-    quantum_report = core_quantum.calculate_quantum_frequencies(
-        data_stream,
-        pattern_category=pattern_category,
-        ticker=ticker,
-        start_date=start_date,
-        start_time=start_time,
-        end_date=end_date,
-        end_time=end_time,
-        operator_context=notes,
-        human_feedback=feedback,
-    )
+        quantum_report = core_quantum.calculate_quantum_frequencies(
+            data_stream,
+            pattern_category=pattern_category,
+            ticker=ticker,
+            start_date=start_date,
+            start_time=start_time,
+            end_date=end_date,
+            end_time=end_time,
+            operator_context=notes,
+            human_feedback=feedback,
+        )
 
-    st.session_state.polygon_lockout = False
-    st.session_state.room2_bar_count = len(data_stream) if hasattr(data_stream, "__len__") else 0
-    st.session_state.room2_quantum_report = quantum_report
-    st.session_state.room2_forensic_ticker = ticker
+        st.session_state.polygon_lockout = False
+        st.session_state.room2_bar_count = (
+            len(data_stream) if core_quantum.is_usable_data_stream(data_stream) else 0
+        )
+        st.session_state.room2_quantum_report = quantum_report
+        st.session_state.room2_forensic_ticker = ticker
 
-    payload = core_quantum.build_vault_payload(
-        ticker=ticker,
-        pattern_category=pattern_category,
-        entry_coordinate=entry_coord or "",
-        exit_coordinate=exit_coord or "",
-        entry_time=start_time,
-        exit_time=end_time,
-        operator_notes=notes,
-        quantum_report=quantum_report,
-        bar_count=st.session_state.room2_bar_count,
-    )
-    ok, vault_message = core_quantum.stream_payload_to_vault(payload)
-    vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
-    st.session_state.quantum_terminal_output = (
-        f"{quantum_report}\n"
-        f"╠════════════════════════════════════════╣\n"
-        f"│ INTERNET VAULT: {vault_line[:32]:<32} │\n"
-        f"╚════════════════════════════════════════╝"
-    )
-    st.session_state.room2_vault_flash = vault_line if ok else ""
+        payload = core_quantum.build_vault_payload(
+            ticker=ticker,
+            pattern_category=pattern_category,
+            entry_coordinate=entry_coord or "",
+            exit_coordinate=exit_coord or "",
+            entry_time=start_time,
+            exit_time=end_time,
+            operator_notes=notes,
+            quantum_report=quantum_report,
+            bar_count=st.session_state.room2_bar_count,
+        )
+        ok, vault_message = core_quantum.stream_payload_to_vault(payload)
+        vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
+        st.session_state.quantum_terminal_output = (
+            f"{quantum_report}\n"
+            f"╠════════════════════════════════════════╣\n"
+            f"│ INTERNET VAULT: {vault_line[:32]:<32} │\n"
+            f"╚════════════════════════════════════════╝"
+        )
+        st.session_state.room2_vault_flash = vault_line if ok else ""
+        return True
+    except Exception as exc:
+        st.session_state.quantum_terminal_output = (
+            "⚠️ [PROCESSOR FAULT] Deploy halted safely.\n"
+            f"│ Detail: {str(exc)[:100]} │\n"
+            "│ Check: ticker letters only, times like 09:31 AM │"
+        )
+        st.session_state.room2_quantum_report = st.session_state.quantum_terminal_output
+        return False
 
 
 def _purge_room2_deck_inputs() -> None:

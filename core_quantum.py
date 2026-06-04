@@ -32,10 +32,22 @@ def is_usable_data_stream(data_stream) -> bool:
     """True when data_stream holds bar/table data rather than a pipeline signal."""
     if data_stream is None or isinstance(data_stream, str):
         return False
+    if pd is not None and isinstance(data_stream, pd.DataFrame):
+        return not data_stream.empty
     try:
         return len(data_stream) > 0
     except TypeError:
         return False
+
+
+def _flatten_yfinance_frame(df):
+    """Normalize yfinance MultiIndex columns so Close/Volume accessors work."""
+    if pd is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        df.columns = df.columns.get_level_values(0)
+    return df
 
 
 def _init_polygon_rate_monitor() -> None:
@@ -435,7 +447,7 @@ def get_historical_interval_data(ticker, interval="15m", update_institutional_tr
             progress=False,
         )
         if df_yf is not None and not df_yf.empty:
-            data_stream = df_yf
+            data_stream = _flatten_yfinance_frame(df_yf)
     except Exception:
         pass
 
@@ -874,7 +886,9 @@ def calculate_quantum_frequencies(
         return THROTTLE_MESSAGE
     if data_stream is None or is_pipeline_signal(data_stream, "LOCKOUT"):
         return "System Sidelined: Awaiting Data Pipeline Clear"
-        
+    if not is_usable_data_stream(data_stream):
+        return "⚠️ [DATALINK: NO_DATA] Historical wire returned empty."
+
     resolved_ticker = (
         str(ticker).strip().upper()
         or str(st.session_state.get("room2_forensic_ticker", "")).strip().upper()
@@ -915,21 +929,39 @@ def calculate_quantum_frequencies(
     micro_block = None
     if _is_compressed_variance(data_stream) and resolved_ticker:
         data_5m = get_historical_5m_data(resolved_ticker)
-        if data_5m is not None and data_5m not in ("THROTTLE", "LOCKOUT"):
+        if is_usable_data_stream(data_5m):
             micro_block = _analyze_5m_micro_traps(data_5m, resolved_ticker)
 
     institutional_block = st.session_state.get("forensic_institutional_tracker", {})
     if not institutional_block and resolved_ticker:
-        institutional_block = _detect_institutional_block_accumulation(
-            resolved_ticker, data_stream, "15m"
-        )
-        st.session_state.forensic_institutional_tracker = institutional_block
+        try:
+            institutional_block = _detect_institutional_block_accumulation(
+                resolved_ticker, data_stream, "15m"
+            )
+            st.session_state.forensic_institutional_tracker = institutional_block
+        except Exception:
+            institutional_block = {
+                "institutional_block_accumulation": False,
+                "inst_block_summary": "INST_BLOCK: PROCESSOR_FAULT",
+                "volume_baseline_20d": 0.0,
+                "peak_surge_ratio": 0.0,
+            }
 
-    form4_block = _scrape_form4_insider_buys(resolved_ticker) if resolved_ticker else {
-        "insider_buy_detected": False,
-        "form4_summary": "FORM4: NO_TICKER",
-        "insider_events": [],
-    }
+    if resolved_ticker:
+        try:
+            form4_block = _scrape_form4_insider_buys(resolved_ticker)
+        except Exception:
+            form4_block = {
+                "insider_buy_detected": False,
+                "form4_summary": "FORM4: EDGAR_WIRE_TIMEOUT",
+                "insider_events": [],
+            }
+    else:
+        form4_block = {
+            "insider_buy_detected": False,
+            "form4_summary": "FORM4: NO_TICKER",
+            "insider_events": [],
+        }
     st.session_state.forensic_form4_tracker = form4_block
 
     math_block = _local_pattern_math(
