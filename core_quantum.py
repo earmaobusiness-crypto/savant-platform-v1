@@ -433,18 +433,18 @@ def get_historical_interval_data(ticker, interval="15m", update_institutional_tr
                 "peak_surge_ratio": 0.0,
             }
             return "THROTTLE"
-    try:
-        api_key = st.secrets["POLYGON_API_KEY"]
-        start_date = (now - datetime.timedelta(days=730)).strftime("%Y-%m-%d")
-        end_date = now.strftime("%Y-%m-%d")
+        try:
+            api_key = st.secrets["POLYGON_API_KEY"]
+            start_date = (now - datetime.timedelta(days=730)).strftime("%Y-%m-%d")
+            end_date = now.strftime("%Y-%m-%d")
             url = (
                 f"https://api.polygon.io/v2/aggs/ticker/{ticker_clean}/range/15/minute/"
                 f"{start_date}/{end_date}?adjusted=true&sort=asc&apiKey={api_key}"
             )
             response = requests.get(url, timeout=15).json()
-        if "results" in response:
+            if "results" in response:
                 data_stream = response["results"]
-        elif response.get("status") == "ERROR" and "max requests" in response.get("error", "").lower():
+            elif response.get("status") == "ERROR" and "max requests" in response.get("error", "").lower():
                 st.session_state.polygon_calls_remaining = 0
                 st.session_state.polygon_lockout = True
                 st.session_state.forensic_institutional_tracker = {
@@ -457,7 +457,12 @@ def get_historical_interval_data(ticker, interval="15m", update_institutional_tr
         except Exception:
             data_stream = None
 
-    if data_stream not in (None, "THROTTLE", "LOCKOUT") and update_institutional_tracker:
+    if (
+        data_stream is not None
+        and not isinstance(data_stream, str)
+        and len(data_stream) > 0
+        and update_institutional_tracker
+    ):
         tracker = _detect_institutional_block_accumulation(ticker_clean, data_stream, yf_interval)
         st.session_state.forensic_institutional_tracker = tracker
     elif update_institutional_tracker and "forensic_institutional_tracker" not in st.session_state:
