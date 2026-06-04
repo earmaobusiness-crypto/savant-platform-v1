@@ -23,6 +23,21 @@ SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
 BARS_PER_SESSION = {"5m": 78, "15m": 26, "1h": 7, "1d": 1}
 
 
+def is_pipeline_signal(data_stream, *signals: str) -> bool:
+    """True only for string status tokens (THROTTLE/LOCKOUT), never for DataFrames."""
+    return isinstance(data_stream, str) and data_stream in signals
+
+
+def is_usable_data_stream(data_stream) -> bool:
+    """True when data_stream holds bar/table data rather than a pipeline signal."""
+    if data_stream is None or isinstance(data_stream, str):
+        return False
+    try:
+        return len(data_stream) > 0
+    except TypeError:
+        return False
+
+
 def _init_polygon_rate_monitor() -> None:
     now = time.time()
     if "polygon_calls_remaining" not in st.session_state:
@@ -81,7 +96,7 @@ def _normalize_date_coordinates(date_coordinates):
 
 
 def _series_from_data_stream(data_stream):
-    if data_stream is None or data_stream in ("LOCKOUT", "THROTTLE"):
+    if data_stream is None or is_pipeline_signal(data_stream, "LOCKOUT", "THROTTLE"):
         return None
     if pd is not None and isinstance(data_stream, pd.DataFrame) and not data_stream.empty:
         close_col = "Close" if "Close" in data_stream.columns else data_stream.columns[-1]
@@ -101,7 +116,7 @@ def _series_from_data_stream(data_stream):
 
 
 def _volume_series_from_data_stream(data_stream):
-    if data_stream is None or data_stream in ("LOCKOUT", "THROTTLE"):
+    if data_stream is None or is_pipeline_signal(data_stream, "LOCKOUT", "THROTTLE"):
         return None
     if pd is not None and isinstance(data_stream, pd.DataFrame) and not data_stream.empty:
         vol_col = "Volume" if "Volume" in data_stream.columns else None
@@ -457,12 +472,7 @@ def get_historical_interval_data(ticker, interval="15m", update_institutional_tr
         except Exception:
             data_stream = None
 
-    if (
-        data_stream is not None
-        and not isinstance(data_stream, str)
-        and len(data_stream) > 0
-        and update_institutional_tracker
-    ):
+    if is_usable_data_stream(data_stream) and update_institutional_tracker:
         tracker = _detect_institutional_block_accumulation(ticker_clean, data_stream, yf_interval)
         st.session_state.forensic_institutional_tracker = tracker
     elif update_institutional_tracker and "forensic_institutional_tracker" not in st.session_state:
@@ -860,9 +870,9 @@ def calculate_quantum_frequencies(
     5-minute drill-down when 15-minute variance compresses. Returns a Matrix-style
     ASCII execution deck with velocity, duration, and operator context telemetry.
     """
-    if data_stream == "THROTTLE":
+    if is_pipeline_signal(data_stream, "THROTTLE"):
         return THROTTLE_MESSAGE
-    if data_stream is None or data_stream == "LOCKOUT":
+    if data_stream is None or is_pipeline_signal(data_stream, "LOCKOUT"):
         return "System Sidelined: Awaiting Data Pipeline Clear"
         
     resolved_ticker = (

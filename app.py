@@ -1382,6 +1382,17 @@ def _deploy_room2_deck(deck: str) -> None:
         feedback = f"{feedback} | {time_meta}".strip(" |") if feedback else time_meta
 
     data_stream = core_quantum.get_historical_15m_data(ticker)
+
+    if core_quantum.is_pipeline_signal(data_stream, "THROTTLE"):
+        st.session_state.polygon_lockout = True
+        st.session_state.quantum_terminal_output = core_quantum.THROTTLE_MESSAGE
+        st.session_state.room2_quantum_report = core_quantum.THROTTLE_MESSAGE
+        return
+
+    if data_stream is None or core_quantum.is_pipeline_signal(data_stream, "LOCKOUT"):
+        st.session_state.quantum_terminal_output = "⚠️ [DATALINK: NO_DATA] Historical wire returned empty."
+        return
+
     quantum_report = core_quantum.calculate_quantum_frequencies(
         data_stream,
         pattern_category=pattern_category,
@@ -1393,16 +1404,6 @@ def _deploy_room2_deck(deck: str) -> None:
         operator_context=notes,
         human_feedback=feedback,
     )
-
-    if data_stream == "THROTTLE":
-        st.session_state.polygon_lockout = True
-        st.session_state.quantum_terminal_output = core_quantum.THROTTLE_MESSAGE
-        st.session_state.room2_quantum_report = core_quantum.THROTTLE_MESSAGE
-        return
-
-    if data_stream is None or data_stream == "LOCKOUT":
-        st.session_state.quantum_terminal_output = "⚠️ [DATALINK: NO_DATA] Historical wire returned empty."
-        return
 
     st.session_state.polygon_lockout = False
     st.session_state.room2_bar_count = len(data_stream) if hasattr(data_stream, "__len__") else 0
