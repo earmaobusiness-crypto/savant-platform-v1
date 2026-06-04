@@ -50,6 +50,33 @@ def _flatten_yfinance_frame(df):
     return df
 
 
+def _download_yfinance_bars(ticker_clean: str, yf_interval: str):
+    """Primary local datalink — avoids Polygon fallback when bars are available."""
+    try:
+        hist = yf.Ticker(ticker_clean).history(period="60d", interval=yf_interval)
+        flat = _flatten_yfinance_frame(hist)
+        if is_usable_data_stream(flat):
+            return flat
+    except Exception:
+        pass
+    try:
+        df_yf = yf.download(
+            ticker_clean,
+            period="60d",
+            interval=yf_interval,
+            progress=False,
+            group_by="column",
+            auto_adjust=True,
+            threads=False,
+        )
+        flat = _flatten_yfinance_frame(df_yf)
+        if is_usable_data_stream(flat):
+            return flat
+    except Exception:
+        pass
+    return None
+
+
 def _fetch_polygon_15m_bars(ticker_clean: str, start_date: str, end_date: str):
     """
     Safe Polygon aggs wire — only inspects plain dict JSON (never pandas objects).
@@ -474,24 +501,24 @@ def get_historical_interval_data(ticker, interval="15m", update_institutional_tr
     - Under 60 Days: yfinance local Mac silicon wire.
     - Extended history: Polygon API with live 5-call/min throttle shield (15m only).
     """
+    try:
+        return _get_historical_interval_data_impl(
+            ticker, interval=interval, update_institutional_tracker=update_institutional_tracker
+        )
+    except Exception:
+        return None
+
+
+def _get_historical_interval_data_impl(ticker, interval="15m", update_institutional_tracker=True):
     ticker_clean = str(ticker).strip().upper()
+    if not ticker_clean:
+        return None
+
     now = datetime.datetime.now()
     interval = str(interval).lower()
     yf_interval = interval if interval in {"5m", "15m", "1h", "1d"} else "15m"
 
-    data_stream = None
-    try:
-        df_yf = yf.download(
-            ticker_clean,
-            period="60d",
-            interval=yf_interval,
-            progress=False,
-        )
-        flat = _flatten_yfinance_frame(df_yf)
-        if is_usable_data_stream(flat):
-            data_stream = flat
-    except Exception:
-        pass
+    data_stream = _download_yfinance_bars(ticker_clean, yf_interval)
 
     if data_stream is None and yf_interval == "15m":
         start_date = (now - datetime.timedelta(days=730)).strftime("%Y-%m-%d")
