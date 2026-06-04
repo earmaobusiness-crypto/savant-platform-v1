@@ -50,6 +50,47 @@ def _flatten_yfinance_frame(df):
     return df
 
 
+def _fetch_polygon_15m_bars(ticker_clean: str, start_date: str, end_date: str):
+    """
+    Safe Polygon aggs wire — only inspects plain dict JSON (never pandas objects).
+    Returns (bars, pipeline_signal) where pipeline_signal is None or 'THROTTLE'.
+    """
+    try:
+        api_key = st.secrets["POLYGON_API_KEY"]
+    except Exception:
+        return None, None
+
+    if not _consume_polygon_call():
+        return None, "THROTTLE"
+
+    try:
+        url = (
+            f"https://api.polygon.io/v2/aggs/ticker/{ticker_clean}/range/15/minute/"
+            f"{start_date}/{end_date}?adjusted=true&sort=asc&apiKey={api_key}"
+        )
+        http_resp = requests.get(url, timeout=15)
+        if not http_resp.ok:
+            return None, None
+        payload = http_resp.json()
+    except Exception:
+        return None, None
+
+    if not isinstance(payload, dict):
+        return None, None
+
+    results = payload.get("results")
+    if isinstance(results, list) and len(results) > 0:
+        return results, None
+
+    status = str(payload.get("status", "")).upper()
+    error_text = str(payload.get("error") or payload.get("message") or "").lower()
+    if status == "ERROR" and "max requests" in error_text:
+        st.session_state.polygon_calls_remaining = 0
+        st.session_state.polygon_lockout = True
+        return None, "THROTTLE"
+    return None, None
+
+
 def _init_polygon_rate_monitor() -> None:
     now = time.time()
     if "polygon_calls_remaining" not in st.session_state:
@@ -446,13 +487,19 @@ def get_historical_interval_data(ticker, interval="15m", update_institutional_tr
             interval=yf_interval,
             progress=False,
         )
-        if df_yf is not None and not df_yf.empty:
-            data_stream = _flatten_yfinance_frame(df_yf)
+        flat = _flatten_yfinance_frame(df_yf)
+        if is_usable_data_stream(flat):
+            data_stream = flat
     except Exception:
         pass
 
     if data_stream is None and yf_interval == "15m":
-        if not _consume_polygon_call():
+        start_date = (now - datetime.timedelta(days=730)).strftime("%Y-%m-%d")
+        end_date = now.strftime("%Y-%m-%d")
+        polygon_bars, polygon_signal = _fetch_polygon_15m_bars(
+            ticker_clean, start_date, end_date
+        )
+        if polygon_signal == "THROTTLE":
             st.session_state.forensic_institutional_tracker = {
                 "institutional_block_accumulation": False,
                 "inst_block_summary": "INST_BLOCK: THROTTLED",
@@ -460,33 +507,22 @@ def get_historical_interval_data(ticker, interval="15m", update_institutional_tr
                 "peak_surge_ratio": 0.0,
             }
             return "THROTTLE"
-        try:
-            api_key = st.secrets["POLYGON_API_KEY"]
-            start_date = (now - datetime.timedelta(days=730)).strftime("%Y-%m-%d")
-            end_date = now.strftime("%Y-%m-%d")
-            url = (
-                f"https://api.polygon.io/v2/aggs/ticker/{ticker_clean}/range/15/minute/"
-                f"{start_date}/{end_date}?adjusted=true&sort=asc&apiKey={api_key}"
-            )
-            response = requests.get(url, timeout=15).json()
-            if "results" in response:
-                data_stream = response["results"]
-            elif response.get("status") == "ERROR" and "max requests" in response.get("error", "").lower():
-                st.session_state.polygon_calls_remaining = 0
-                st.session_state.polygon_lockout = True
-                st.session_state.forensic_institutional_tracker = {
-                    "institutional_block_accumulation": False,
-                    "inst_block_summary": "INST_BLOCK: THROTTLED",
-                    "volume_baseline_20d": 0.0,
-                    "peak_surge_ratio": 0.0,
-                }
-                return "THROTTLE"
-        except Exception:
-            data_stream = None
+        if is_usable_data_stream(polygon_bars):
+            data_stream = polygon_bars
 
     if is_usable_data_stream(data_stream) and update_institutional_tracker:
-        tracker = _detect_institutional_block_accumulation(ticker_clean, data_stream, yf_interval)
-        st.session_state.forensic_institutional_tracker = tracker
+        try:
+            tracker = _detect_institutional_block_accumulation(
+                ticker_clean, data_stream, yf_interval
+            )
+            st.session_state.forensic_institutional_tracker = tracker
+        except Exception:
+            st.session_state.forensic_institutional_tracker = {
+                "institutional_block_accumulation": False,
+                "inst_block_summary": "INST_BLOCK: PROCESSOR_FAULT",
+                "volume_baseline_20d": 0.0,
+                "peak_surge_ratio": 0.0,
+            }
     elif update_institutional_tracker and "forensic_institutional_tracker" not in st.session_state:
         st.session_state.forensic_institutional_tracker = {
             "institutional_block_accumulation": False,
