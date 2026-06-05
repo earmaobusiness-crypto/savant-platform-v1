@@ -1,6 +1,7 @@
 import os
 import re
 import statistics
+import time
 import urllib.parse
 import json
 from datetime import date, datetime, timedelta, timezone
@@ -66,6 +67,12 @@ RESCUE_VAULT_RETENTION_DAYS = 15
 MATRIX_CHAT_LOG_TICKER = "_LAB_SESSION_"
 MATRIX_CHAT_LOG_CATEGORY = "MATRIX_CHAT_LOG"
 MATRIX_ENGINE_IDLE_MARKER = "ENGINE_IDLE"
+MATRIX_CASCADE_DURATION_SEC = 2.0
+MATRIX_CASCADE_LINES = (
+    "⚡ CORE_PROCESSOR: ENGAGING MATRIX CRAWL... RECONSTRUCTING COVARIANCE FREQUENCY ARRAYS...",
+    "🛰️ NET_SCANNER: CAPTURING SEC FORM 4 INSIDER TRACKS... MONITORING 20-DAY VOLUME SPREADS...",
+    "📊 QUANT_ENGINE: AGGREGATING 30-DAY CONTEXT HORIZON... DRILLING TO 5-MINUTE SUB-INTERVAL FILTERS...",
+)
 
 st.set_page_config(
     page_title="Savant Apprentice",
@@ -241,7 +248,7 @@ st.markdown("""
             box-shadow: inset 0 0 24px rgba(52, 199, 89, 0.04);
         }
         .room2-matrix-box {
-            background: #020802;
+            background: #050505;
             border: 1px solid #0D3D0D;
             border-radius: 4px;
             padding: 16px 18px;
@@ -252,8 +259,46 @@ st.markdown("""
             text-shadow: 0 0 8px rgba(52, 199, 89, 0.35);
             white-space: pre;
             overflow-x: auto;
-            min-height: 160px;
+            min-height: 220px;
+            width: 100%;
+            box-sizing: border-box;
             box-shadow: inset 0 0 32px rgba(52, 199, 89, 0.06);
+        }
+        .room2-matrix-cascade-shell {
+            background: #050505;
+            border: 1px solid #0D3D0D;
+            border-radius: 4px;
+            min-height: 220px;
+            max-height: 280px;
+            width: 100%;
+            overflow: hidden;
+            position: relative;
+            box-shadow: inset 0 0 40px rgba(52, 199, 89, 0.1);
+        }
+        .matrix-cascade-track {
+            animation: matrixTerminalScroll 2s linear infinite;
+            padding: 18px;
+            font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+            font-size: 11px;
+            line-height: 1.75;
+            color: #34C759;
+            text-shadow: 0 0 10px rgba(52, 199, 89, 0.45);
+        }
+        .matrix-cascade-line {
+            margin-bottom: 14px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        @keyframes matrixTerminalScroll {
+            0% { transform: translateY(110%); opacity: 0.25; }
+            12% { opacity: 1; }
+            88% { opacity: 1; }
+            100% { transform: translateY(-130%); opacity: 0.2; }
+        }
+        .room2-satellite-shell {
+            width: 100%;
+            margin-top: 12px;
+            margin-bottom: 8px;
         }
         .room2-terminal-header {
             font-size: 10px;
@@ -301,8 +346,12 @@ st.markdown("""
             background: #07111A !important;
             border: 1px solid #143A52 !important;
             border-radius: 4px;
-            padding: 10px;
-            margin-top: 8px;
+            padding: 14px 16px;
+            margin-top: 0;
+            margin-bottom: 10px;
+            width: 100%;
+            box-sizing: border-box;
+            min-height: 78px;
             font-family: monospace;
             color: #52A2D9;
         }
@@ -317,8 +366,11 @@ st.markdown("""
             background: #1A1607 !important;
             border: 1px solid #524114 !important;
             border-radius: 4px;
-            padding: 10px;
-            margin-top: 8px;
+            padding: 14px 16px;
+            margin-top: 0;
+            width: 100%;
+            box-sizing: border-box;
+            min-height: 78px;
             font-family: monospace;
             color: #D9B352;
         }
@@ -412,6 +464,10 @@ if "matrix_cloud_hydrated" not in st.session_state: st.session_state.matrix_clou
 if "matrix_form_seeded" not in st.session_state: st.session_state.matrix_form_seeded = False
 if "matrix_active_pattern_count" not in st.session_state: st.session_state.matrix_active_pattern_count = 0
 if "matrix_trash_vault_count" not in st.session_state: st.session_state.matrix_trash_vault_count = 0
+if "matrix_cascade_active" not in st.session_state: st.session_state.matrix_cascade_active = False
+if "matrix_cascade_started_at" not in st.session_state: st.session_state.matrix_cascade_started_at = 0.0
+if "matrix_cascade_final_output" not in st.session_state: st.session_state.matrix_cascade_final_output = ""
+if "matrix_satellites_ready" not in st.session_state: st.session_state.matrix_satellites_ready = True
 if "supabase_ready" not in st.session_state:
     try:
         st.session_state.supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
@@ -1582,7 +1638,122 @@ def _build_matrix_terminal_readout(
     return "\n".join(header + body + footer)
 
 
+def _coerce_quantum_summary_to_text(quantum_summary) -> str:
+    """Explicit safety filter — coerce tables/objects to strict terminal text."""
+    if quantum_summary is None:
+        return "⚠️ [DATALINK: NO_DATA] Matrix processor returned empty."
+    if isinstance(quantum_summary, str):
+        return quantum_summary
+    if hasattr(quantum_summary, "empty") or isinstance(quantum_summary, (dict, list)):
+        try:
+            if hasattr(quantum_summary, "to_string"):
+                frame = quantum_summary
+                if hasattr(frame, "empty") and frame.empty:
+                    return "⚠️ [DATALINK: NO_DATA] Matrix processor returned empty frame."
+                return str(frame.to_string())
+            if isinstance(quantum_summary, dict):
+                return json.dumps(quantum_summary, indent=2, default=str)
+            if isinstance(quantum_summary, list):
+                return "\n".join(str(row) for row in quantum_summary)
+        except Exception as exc:
+            return f"⚠️ [PROCESSOR FAULT] Could not serialize matrix output: {exc}"
+    return str(quantum_summary)
+
+
+def _assign_matrix_terminal_output(quantum_summary, vault_line: str | None = None) -> str:
+    """Normalize quantum output and optionally append vault footer as plain text."""
+    terminal_text = _coerce_quantum_summary_to_text(quantum_summary)
+    if vault_line:
+        terminal_text = (
+            f"{terminal_text}\n"
+            f"╠════════════════════════════════════════╣\n"
+            f"│ INTERNET VAULT: {vault_line[:32]:<32} │\n"
+            f"╚════════════════════════════════════════╝"
+        )
+    return terminal_text
+
+
+def _build_matrix_cascade_html() -> str:
+    loop_lines = list(MATRIX_CASCADE_LINES) + list(MATRIX_CASCADE_LINES)
+    rows = "".join(
+        f'<div class="matrix-cascade-line">{escape(line)}</div>' for line in loop_lines
+    )
+    return (
+        '<div class="room2-matrix-cascade-shell">'
+        f'<div class="matrix-cascade-track">{rows}</div>'
+        "</div>"
+    )
+
+
+def _tick_matrix_cascade_sequence() -> bool:
+    """
+    Advance the 2-second Matrix crawl. Returns True while cascade animation runs.
+    On completion, snaps finalized readout and unlocks satellite tiles.
+    """
+    if not st.session_state.get("matrix_cascade_active"):
+        return False
+
+    elapsed = time.time() - float(st.session_state.get("matrix_cascade_started_at", 0.0))
+    if elapsed >= MATRIX_CASCADE_DURATION_SEC:
+        final_out = st.session_state.get("matrix_cascade_final_output", "")
+        if final_out:
+            st.session_state.quantum_terminal_output = _coerce_quantum_summary_to_text(final_out)
+        st.session_state.matrix_cascade_active = False
+        st.session_state.matrix_satellites_ready = True
+        return False
+
+    st.session_state.matrix_satellites_ready = False
+    return True
+
+
+def _render_matrix_window1_panel() -> None:
+    """Window 1 — scrolling Matrix cascade or finalized institutional readout."""
+    cascade_running = _tick_matrix_cascade_sequence()
+
+    st.markdown(
+        '<div class="room2-terminal-header">▸ WINDOW 1 — MATRIX REACTION PROCESSOR</div>',
+        unsafe_allow_html=True,
+    )
+
+    if cascade_running:
+        st.markdown(_build_matrix_cascade_html(), unsafe_allow_html=True)
+        with st.spinner("Matrix crawl in progress..."):
+            time.sleep(0.35)
+        st.rerun()
+        return
+
+    terminal_text = _coerce_quantum_summary_to_text(st.session_state.quantum_terminal_output)
+    st.markdown(
+        f'<div class="room2-matrix-box">{escape(terminal_text)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_room2_proxy_telemetry_banners() -> None:
+    st.markdown(
+        '<div class="room2-terminal-header">▸ WINDOW 2 & 3 — INSTITUTIONAL SATELLITE TELEMETRY</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="room2-satellite-shell">', unsafe_allow_html=True)
+
+    if not st.session_state.get("matrix_satellites_ready", True):
+        st.markdown(
+            '<div class="whale-banner">'
+            '<div class="proxy-banner-title">🐳 INSTITUTIONAL BLOCK FLOWS</div>'
+            '<div class="proxy-banner-body">⏳ MATRIX CRAWL ACTIVE — RECALIBRATING 20-DAY VOLUME BASELINE...</div>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="insider-banner">'
+            '<div class="proxy-banner-title">👔 MANAGEMENT INSIDER RECONNAISSANCE</div>'
+            '<div class="proxy-banner-body">⏳ MATRIX CRAWL ACTIVE — SCANNING SEC FORM 4 DISCLOSURE WIRE...</div>'
+            "</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
     inst = st.session_state.get("forensic_institutional_tracker", {})
     form4 = st.session_state.get("forensic_form4_tracker", {})
 
@@ -1626,6 +1797,7 @@ def _render_room2_proxy_telemetry_banners() -> None:
         f'<div class="{insider_class}">'
         f'<div class="proxy-banner-title">👔 MANAGEMENT INSIDER RECONNAISSANCE</div>'
         f'<div class="proxy-banner-body">{escape(insider_body)}</div>'
+        f"</div>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -1744,23 +1916,40 @@ def _deploy_room2_deck(deck: str) -> bool:
         feedback = f"{feedback} | {time_meta}".strip(" |") if feedback else time_meta
 
     try:
+        st.session_state.matrix_satellites_ready = False
+        st.session_state.forensic_institutional_tracker = {
+            "institutional_block_accumulation": False,
+            "inst_block_summary": "INST_BLOCK: RECALIBRATING...",
+            "volume_baseline_20d": 0.0,
+            "peak_surge_ratio": 0.0,
+        }
+        st.session_state.forensic_form4_tracker = {
+            "insider_buy_detected": False,
+            "form4_summary": "FORM4: RECALIBRATING...",
+            "insider_events": [],
+        }
+
         data_stream = core_quantum.get_historical_15m_data(ticker)
 
         if core_quantum.is_pipeline_signal(data_stream, "THROTTLE"):
             st.session_state.polygon_lockout = True
-            st.session_state.quantum_terminal_output = core_quantum.THROTTLE_MESSAGE
-            st.session_state.room2_quantum_report = core_quantum.THROTTLE_MESSAGE
+            throttle_text = _coerce_quantum_summary_to_text(core_quantum.THROTTLE_MESSAGE)
+            st.session_state.quantum_terminal_output = throttle_text
+            st.session_state.room2_quantum_report = throttle_text
+            st.session_state.matrix_satellites_ready = True
             return False
 
         if not core_quantum.is_usable_data_stream(data_stream):
-            st.session_state.quantum_terminal_output = (
+            no_data_text = (
                 f"⚠️ [DATALINK: NO_DATA] No 15m bars for {ticker}. "
                 "Verify ticker symbol and market session dates."
             )
-            st.session_state.room2_quantum_report = st.session_state.quantum_terminal_output
+            st.session_state.quantum_terminal_output = no_data_text
+            st.session_state.room2_quantum_report = no_data_text
+            st.session_state.matrix_satellites_ready = True
             return False
 
-        quantum_report = core_quantum.calculate_quantum_frequencies(
+        quantum_summary = core_quantum.calculate_quantum_frequencies(
             data_stream,
             pattern_category=pattern_category,
             ticker=ticker,
@@ -1771,6 +1960,12 @@ def _deploy_room2_deck(deck: str) -> bool:
             operator_context=notes,
             human_feedback=feedback,
         )
+
+        # ValueError plug — coerce tables/objects to strict terminal text before Window 1 bind.
+        if hasattr(quantum_summary, "empty") or isinstance(quantum_summary, (dict, list, str)):
+            quantum_report = _coerce_quantum_summary_to_text(quantum_summary)
+        else:
+            quantum_report = _coerce_quantum_summary_to_text(quantum_summary)
 
         st.session_state.polygon_lockout = False
         st.session_state.room2_bar_count = (
@@ -1792,24 +1987,26 @@ def _deploy_room2_deck(deck: str) -> bool:
         )
         ok, vault_message = core_quantum.stream_payload_to_vault(payload)
         vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
-        st.session_state.quantum_terminal_output = (
-            f"{quantum_report}\n"
-            f"╠════════════════════════════════════════╣\n"
-            f"│ INTERNET VAULT: {vault_line[:32]:<32} │\n"
-            f"╚════════════════════════════════════════╝"
-        )
+        final_terminal = _assign_matrix_terminal_output(quantum_report, vault_line)
+        st.session_state.matrix_cascade_final_output = final_terminal
+        st.session_state.matrix_cascade_active = True
+        st.session_state.matrix_cascade_started_at = time.time()
+        st.session_state.matrix_satellites_ready = False
         st.session_state.room2_vault_flash = vault_line if ok else ""
         st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
         st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
         _sync_matrix_chat_to_cloud()
         return True
     except Exception as exc:
-        st.session_state.quantum_terminal_output = (
+        fault_text = (
             "⚠️ [PROCESSOR FAULT] Deploy halted safely.\n"
             f"│ Detail: {str(exc)[:100]} │\n"
             "│ Check: ticker letters only, times like 09:31 AM │"
         )
-        st.session_state.room2_quantum_report = st.session_state.quantum_terminal_output
+        st.session_state.quantum_terminal_output = fault_text
+        st.session_state.room2_quantum_report = fault_text
+        st.session_state.matrix_satellites_ready = True
+        st.session_state.matrix_cascade_active = False
         return False
 
 
@@ -1911,15 +2108,7 @@ def render_room2_forensic_lab():
                     _handle_room2_deck_submit("bad")
 
     with col_right:
-        st.markdown(
-            '<div class="room2-terminal-header">▸ WINDOW 1 — MATRIX REACTION PROCESSOR</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f'<div class="room2-matrix-box">{escape(st.session_state.quantum_terminal_output)}</div>',
-            unsafe_allow_html=True,
-        )
-
+        _render_matrix_window1_panel()
         _render_room2_proxy_telemetry_banners()
 
         st.markdown(
