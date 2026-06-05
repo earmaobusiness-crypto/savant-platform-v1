@@ -3,7 +3,7 @@ import re
 import statistics
 import urllib.parse
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from html import escape
 from xml.etree import ElementTree
@@ -59,9 +59,13 @@ ROOM2_INVALID_INPUT_MESSAGE = (
 )
 R2_TIMESTAMP_PATTERN = re.compile(r"^\d{1,2}:\d{2}\s+(AM|PM)$", re.IGNORECASE)
 ROOM2_CLEAN_SLATE_MESSAGE = (
-    "DATABASE SNAPSHOT: 100% CLEAN SLATE. No patterns logged. "
-    "System is an empty quantitative canvas waiting for training input."
+    "DATABASE SNAPSHOT: 100% CLEAN SLATE. No active patterns logged. "
+    "All prior records moved to the 15-day Trash Vault — say 'restore my patterns' to undo."
 )
+RESCUE_VAULT_RETENTION_DAYS = 15
+MATRIX_CHAT_LOG_TICKER = "_LAB_SESSION_"
+MATRIX_CHAT_LOG_CATEGORY = "MATRIX_CHAT_LOG"
+MATRIX_ENGINE_IDLE_MARKER = "ENGINE_IDLE"
 
 st.set_page_config(
     page_title="Savant Apprentice",
@@ -404,6 +408,10 @@ if "r2_bad_start_date" not in st.session_state: st.session_state.r2_bad_start_da
 if "r2_bad_end_date" not in st.session_state: st.session_state.r2_bad_end_date = date.today()
 if "room2_vault_flash" not in st.session_state: st.session_state.room2_vault_flash = ""
 if "room2_last_rescue_vault_id" not in st.session_state: st.session_state.room2_last_rescue_vault_id = None
+if "matrix_cloud_hydrated" not in st.session_state: st.session_state.matrix_cloud_hydrated = False
+if "matrix_form_seeded" not in st.session_state: st.session_state.matrix_form_seeded = False
+if "matrix_active_pattern_count" not in st.session_state: st.session_state.matrix_active_pattern_count = 0
+if "matrix_trash_vault_count" not in st.session_state: st.session_state.matrix_trash_vault_count = 0
 if "supabase_ready" not in st.session_state:
     try:
         st.session_state.supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
@@ -884,12 +892,16 @@ PATTERN_STRATEGIST_SYSTEM = (
 )
 
 TRASH_VAULT_NOTICE = (
-    "⚠️ SYSTEM NOTICE: Pattern moved to Trash Vault. You have exactly 10 days to restore this "
-    "record before permanent cloud purging occurs."
+    f"⚠️ SYSTEM NOTICE: Pattern moved to Trash Vault. You have {RESCUE_VAULT_RETENTION_DAYS} days "
+    "to restore this record before permanent cloud purging occurs."
 )
 RESTORE_VAULT_SUCCESS = (
     "🔄 RESTORATION SACCADE: Soft-deleted pattern successfully rescued from the Trash Vault "
-    "and restored to active memory."
+    "and restored to active Matrix memory."
+)
+TRASH_VAULT_BULK_NOTICE = (
+    f"⚠️ SYSTEM NOTICE: All active patterns moved to the Trash Vault. "
+    f"You have {RESCUE_VAULT_RETENTION_DAYS} days to restore them."
 )
 
 
@@ -919,6 +931,211 @@ def _forensic_patterns_table() -> str:
         return "forensic_patterns"
 
 
+def _pattern_archive_query_suffix(*, active_only: bool = True, trash_only: bool = False) -> str:
+    """PostgREST filters excluding the Matrix chat log row."""
+    parts = [f"pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"]
+    if trash_only:
+        parts.append("state=eq.soft_deleted")
+    elif active_only:
+        parts.append("or=(state.is.null,state.eq.active)")
+    return "&" + "&".join(parts)
+
+
+def _purge_expired_trash_vault() -> None:
+    """Permanently purge Trash Vault rows older than the retention window."""
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=RESCUE_VAULT_RETENTION_DAYS)
+    ).isoformat()
+    table = _forensic_patterns_table()
+    base = st.session_state.supabase_url
+    try:
+        requests.delete(
+            f"{base}/rest/v1/{table}?state=eq.soft_deleted"
+            f"&deleted_at=lt.{cutoff}"
+            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}",
+            headers=_supabase_rest_headers(),
+            timeout=12,
+        )
+    except Exception:
+        pass
+
+
+def _count_cloud_pattern_rows(*, trash_only: bool = False) -> int:
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return 0
+    table = _forensic_patterns_table()
+    base = st.session_state.supabase_url
+    try:
+        resp = requests.get(
+            f"{base}/rest/v1/{table}?select=id"
+            f"{_pattern_archive_query_suffix(active_only=not trash_only, trash_only=trash_only)}",
+            headers={**_supabase_rest_headers(), "Prefer": "count=exact"},
+            timeout=12,
+        )
+        if resp.ok:
+            content_range = resp.headers.get("Content-Range", "")
+            if "/" in content_range:
+                total = content_range.split("/")[-1]
+                if total.isdigit():
+                    return int(total)
+            rows = resp.json()
+            return len(rows) if isinstance(rows, list) else 0
+    except Exception:
+        pass
+    return 0
+
+
+def _fetch_latest_active_pattern_row() -> dict | None:
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return None
+    table = _forensic_patterns_table()
+    base = st.session_state.supabase_url
+    try:
+        resp = requests.get(
+            f"{base}/rest/v1/{table}?select=*"
+            f"{_pattern_archive_query_suffix(active_only=True)}"
+            f"&order=timestamp.desc&limit=1",
+            headers=_supabase_rest_headers(),
+            timeout=12,
+        )
+        if resp.ok:
+            rows = resp.json()
+            if rows:
+                return rows[0]
+    except Exception:
+        pass
+    return None
+
+
+def _seed_room2_form_from_pattern_row(row: dict) -> None:
+    """Restore latest cloud pattern coordinates into the Room 2 input deck."""
+    cat = str(row.get("pattern_category", "")).upper()
+    ticker = str(row.get("ticker", "")).strip().upper()
+    if not ticker:
+        return
+    if cat == "VALIDATED":
+        prefix = "r2_good"
+        notes_key = "r2_single_notes_field"
+    elif cat == "TOXIC_ANOMALY":
+        prefix = "r2_bad"
+        notes_key = "r2_bad_single_notes_field"
+    else:
+        return
+    st.session_state[f"{prefix}_ticker"] = ticker
+    if row.get("entry_time"):
+        st.session_state[f"{prefix}_start_time"] = str(row["entry_time"])
+    if row.get("exit_time"):
+        st.session_state[f"{prefix}_end_time"] = str(row["exit_time"])
+    notes = str(row.get("operator_context") or "").strip()
+    if notes:
+        st.session_state[notes_key] = notes
+
+
+def _sync_matrix_chat_to_cloud() -> None:
+    """Persist Room 2 lab chat so the Matrix remembers across refresh and devices."""
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return
+    table = _forensic_patterns_table()
+    base = st.session_state.supabase_url
+    chat_blob = json.dumps(st.session_state.room2_chat_history[-80:], default=str)
+    terminal_snapshot = str(st.session_state.get("quantum_terminal_output", ""))[:12000]
+    payload = {
+        "ticker": MATRIX_CHAT_LOG_TICKER,
+        "pattern_category": MATRIX_CHAT_LOG_CATEGORY,
+        "operator_context": chat_blob,
+        "quantum_report": terminal_snapshot,
+        "source_room": "forensic_pattern_lab",
+        "state": "active",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        lookup = requests.get(
+            f"{base}/rest/v1/{table}?ticker=eq.{MATRIX_CHAT_LOG_TICKER}"
+            f"&pattern_category=eq.{MATRIX_CHAT_LOG_CATEGORY}&select=id&limit=1",
+            headers=_supabase_rest_headers(),
+            timeout=12,
+        )
+        if lookup.ok and lookup.json():
+            row_id = lookup.json()[0]["id"]
+            requests.patch(
+                f"{base}/rest/v1/{table}?id=eq.{row_id}",
+                headers={**_supabase_rest_headers(), "Prefer": "return=minimal"},
+                json=payload,
+                timeout=12,
+            )
+        else:
+            requests.post(
+                f"{base}/rest/v1/{table}",
+                headers={**_supabase_rest_headers(), "Prefer": "return=minimal"},
+                json=[payload],
+                timeout=12,
+            )
+    except Exception:
+        pass
+
+
+def _load_matrix_chat_from_cloud() -> None:
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return
+    table = _forensic_patterns_table()
+    base = st.session_state.supabase_url
+    try:
+        resp = requests.get(
+            f"{base}/rest/v1/{table}?ticker=eq.{MATRIX_CHAT_LOG_TICKER}"
+            f"&pattern_category=eq.{MATRIX_CHAT_LOG_CATEGORY}"
+            f"&select=operator_context,quantum_report&limit=1",
+            headers=_supabase_rest_headers(),
+            timeout=12,
+        )
+        if not resp.ok:
+            return
+        rows = resp.json()
+        if not rows:
+            return
+        raw_chat = rows[0].get("operator_context") or "[]"
+        parsed = json.loads(raw_chat)
+        if isinstance(parsed, list) and parsed:
+            st.session_state.room2_chat_history = parsed
+        saved_terminal = str(rows[0].get("quantum_report") or "").strip()
+        if saved_terminal and MATRIX_ENGINE_IDLE_MARKER not in saved_terminal:
+            st.session_state.quantum_terminal_output = saved_terminal
+    except Exception:
+        pass
+
+
+def _hydrate_matrix_memory_from_cloud() -> None:
+    """Load Matrix pattern archive + lab chat from Supabase once per session."""
+    if st.session_state.get("matrix_cloud_hydrated"):
+        return
+    st.session_state.matrix_cloud_hydrated = True
+
+    _purge_expired_trash_vault()
+    _load_matrix_chat_from_cloud()
+
+    latest = _fetch_latest_active_pattern_row()
+    if latest:
+        report = str(latest.get("quantum_report") or "").strip()
+        if report:
+            st.session_state.room2_quantum_report = report
+            if MATRIX_ENGINE_IDLE_MARKER in st.session_state.quantum_terminal_output:
+                st.session_state.quantum_terminal_output = report
+        st.session_state.room2_forensic_ticker = str(latest.get("ticker") or "")
+        st.session_state.room2_bar_count = int(latest.get("bar_count") or 0)
+        if not st.session_state.get("matrix_form_seeded"):
+            _seed_room2_form_from_pattern_row(latest)
+            st.session_state.matrix_form_seeded = True
+
+    st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
+    st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
+
+
 def _fetch_live_cloud_patterns() -> str:
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
@@ -926,7 +1143,8 @@ def _fetch_live_cloud_patterns() -> str:
     try:
         resp = requests.get(
             f"{st.session_state.supabase_url}/rest/v1/{_forensic_patterns_table()}"
-            f"?select=*&or=(state.is.null,state.eq.active)&order=timestamp.desc&limit=12",
+            f"?select=*{_pattern_archive_query_suffix(active_only=True)}"
+            f"&order=timestamp.desc&limit=12",
             headers=_supabase_rest_headers(),
             timeout=12,
         )
@@ -937,24 +1155,84 @@ def _fetch_live_cloud_patterns() -> str:
     return "CLOUD:FETCH_FAIL"
 
 
-def _is_room2_delete_command(text: str) -> bool:
+def _is_room2_delete_all_command(text: str) -> bool:
     low = text.lower()
-    return (
-        "delete everything" in low
-        or "get rid of" in low
-        or "get rid" in low
-        or "delete that" in low
-        or "delete pattern" in low
-        or "move to trash" in low
+    return any(
+        phrase in low
+        for phrase in (
+            "delete everything",
+            "delete all",
+            "clear everything",
+            "wipe everything",
+            "clean slate",
+            "zero patterns",
+            "get rid of everything",
+            "get rid of all",
+            "remove all patterns",
+            "erase everything",
+        )
+    )
+
+
+def _is_room2_delete_command(text: str) -> bool:
+    if _is_room2_delete_all_command(text):
+        return True
+    low = text.lower()
+    return any(
+        phrase in low
+        for phrase in (
+            "get rid of",
+            "get rid",
+            "delete that",
+            "delete pattern",
+            "delete this",
+            "move to trash",
+            "remove pattern",
+            "remove that",
+        )
     )
 
 
 def _is_room2_restore_command(text: str) -> bool:
     low = text.lower()
-    return (
-        "bring that back" in low
-        or "undo that delete" in low
-        or "that was an accident" in low
+    return any(
+        phrase in low
+        for phrase in (
+            "bring that back",
+            "bring back",
+            "undo that delete",
+            "undo delete",
+            "that was an accident",
+            "didn't mean to delete",
+            "didnt mean to delete",
+            "i didn't mean",
+            "i didnt mean",
+            "retrieve it",
+            "retrieve that",
+            "restore it",
+            "restore pattern",
+            "restore my pattern",
+            "restore my patterns",
+            "restore all",
+            "get it back",
+            "rescue",
+            "recover",
+            "recover my pattern",
+        )
+    )
+
+
+def _is_room2_restore_all_command(text: str) -> bool:
+    low = text.lower()
+    return any(
+        phrase in low
+        for phrase in (
+            "restore all",
+            "restore my patterns",
+            "bring everything back",
+            "undo delete all",
+            "recover all",
+        )
     )
 
 
@@ -969,7 +1247,7 @@ def _soft_delete_latest_pattern_to_vault() -> str:
     try:
         lookup = requests.get(
             f"{base}/rest/v1/{table}?select=id,ticker"
-            f"&or=(state.is.null,state.eq.active)"
+            f"{_pattern_archive_query_suffix(active_only=True)}"
             f"&order=timestamp.desc&limit=1",
             headers=_supabase_rest_headers(),
             timeout=12,
@@ -990,26 +1268,83 @@ def _soft_delete_latest_pattern_to_vault() -> str:
         )
         if patch.ok:
             st.session_state.room2_last_rescue_vault_id = row_id
+            st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
+            st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
             return TRASH_VAULT_NOTICE
         return f"⚠️ Trash Vault move failed: {patch.status_code} {patch.text}"
     except Exception as exc:
         return f"⚠️ Trash Vault move failed: {exc}"
 
 
-def _restore_soft_deleted_pattern_from_vault() -> str:
-    """Rescue the most recent soft-deleted row from the 10-day Trash Vault."""
+def _soft_delete_all_patterns_to_vault() -> str:
+    """Move every active pattern row into the 15-day Trash Vault (not permanent delete)."""
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return "⚠️ Trash Vault offline — add SUPABASE_URL and SUPABASE_KEY to secrets."
 
     table = _forensic_patterns_table()
     base = st.session_state.supabase_url
-    row_id = st.session_state.get("room2_last_rescue_vault_id")
+    deleted_at = datetime.now(timezone.utc).isoformat()
+    try:
+        patch = requests.patch(
+            f"{base}/rest/v1/{table}?{_pattern_archive_query_suffix(active_only=True)[1:]}",
+            headers={**_supabase_rest_headers(), "Prefer": "return=minimal"},
+            json={"state": "soft_deleted", "deleted_at": deleted_at},
+            timeout=12,
+        )
+        if patch.ok:
+            st.session_state.matrix_active_pattern_count = 0
+            st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
+            st.session_state.quantum_terminal_output = (
+                f"📡 [DATALINK: TRASH_VAULT] {TRASH_VAULT_BULK_NOTICE}"
+            )
+            return TRASH_VAULT_BULK_NOTICE
+        return f"⚠️ Bulk Trash Vault move failed: {patch.status_code} {patch.text}"
+    except Exception as exc:
+        return f"⚠️ Bulk Trash Vault move failed: {exc}"
+
+
+def _restore_soft_deleted_pattern_from_vault(restore_all: bool = False) -> str:
+    """Rescue soft-deleted row(s) from the Trash Vault within the retention window."""
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return "⚠️ Trash Vault offline — add SUPABASE_URL and SUPABASE_KEY to secrets."
+
+    table = _forensic_patterns_table()
+    base = st.session_state.supabase_url
 
     try:
+        if restore_all:
+            patch = requests.patch(
+                f"{base}/rest/v1/{table}?state=eq.soft_deleted"
+                f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}",
+                headers={**_supabase_rest_headers(), "Prefer": "return=minimal"},
+                json={"state": "active", "deleted_at": None},
+                timeout=12,
+            )
+            if patch.ok:
+                st.session_state.room2_last_rescue_vault_id = None
+                st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(
+                    trash_only=False
+                )
+                st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(
+                    trash_only=True
+                )
+                latest = _fetch_latest_active_pattern_row()
+                if latest and latest.get("quantum_report"):
+                    st.session_state.quantum_terminal_output = str(latest["quantum_report"])
+                return (
+                    f"🔄 RESTORATION SACCADE: All Trash Vault patterns restored to active "
+                    f"Matrix memory ({RESCUE_VAULT_RETENTION_DAYS}-day window)."
+                )
+            return f"⚠️ Bulk restoration failed: {patch.status_code} {patch.text}"
+
+        row_id = st.session_state.get("room2_last_rescue_vault_id")
+
         if not row_id:
             lookup = requests.get(
                 f"{base}/rest/v1/{table}?select=id&state=eq.soft_deleted"
+                f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"
                 f"&order=deleted_at.desc&limit=1",
                 headers=_supabase_rest_headers(),
                 timeout=12,
@@ -1027,6 +1362,20 @@ def _restore_soft_deleted_pattern_from_vault() -> str:
         )
         if patch.ok:
             st.session_state.room2_last_rescue_vault_id = None
+            st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(
+                trash_only=False
+            )
+            st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
+            lookup_row = requests.get(
+                f"{base}/rest/v1/{table}?id=eq.{row_id}&select=quantum_report,ticker",
+                headers=_supabase_rest_headers(),
+                timeout=12,
+            )
+            if lookup_row.ok and lookup_row.json():
+                row = lookup_row.json()[0]
+                if row.get("quantum_report"):
+                    st.session_state.quantum_terminal_output = str(row["quantum_report"])
+                st.session_state.room2_forensic_ticker = str(row.get("ticker") or "")
             return RESTORE_VAULT_SUCCESS
         return f"⚠️ Restoration failed: {patch.status_code} {patch.text}"
     except Exception as exc:
@@ -1086,15 +1435,24 @@ def process_room2_chat_submission():
     st.session_state.room2_chat_history.append({"speaker": "You", "text": user_text})
 
     if _is_room2_restore_command(user_text):
-        restore_msg = _restore_soft_deleted_pattern_from_vault()
+        restore_msg = _restore_soft_deleted_pattern_from_vault(
+            restore_all=_is_room2_restore_all_command(user_text)
+        )
         st.session_state.room2_chat_history.append({"speaker": "Forensic Expert", "text": restore_msg})
         st.session_state.room2_text_buffer = ""
+        _sync_matrix_chat_to_cloud()
         return
 
     if _is_room2_delete_command(user_text):
-        trash_msg = _soft_delete_latest_pattern_to_vault()
+        if _is_room2_delete_all_command(user_text):
+            trash_msg = _soft_delete_all_patterns_to_vault()
+        else:
+            trash_msg = _soft_delete_latest_pattern_to_vault()
+            st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
+            st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
         st.session_state.room2_chat_history.append({"speaker": "Forensic Expert", "text": trash_msg})
         st.session_state.room2_text_buffer = ""
+        _sync_matrix_chat_to_cloud()
         return
 
     if _is_pattern_mining_query(user_text):
@@ -1104,29 +1462,17 @@ def process_room2_chat_submission():
 
     st.session_state.room2_chat_history.append({"speaker": "Forensic Expert", "text": ai_text})
     st.session_state.room2_text_buffer = ""
+    _sync_matrix_chat_to_cloud()
 
 
 def purge_room2_conversation_and_cloud() -> None:
-    """Wipe Room 2 lab chat and force PostgREST forensic_patterns clean slate."""
-    _ensure_supabase_session()
-    if st.session_state.get("supabase_ready"):
-        endpoint = f"{st.session_state.supabase_url}/rest/v1/forensic_patterns?id=not.is.null"
-        requests.delete(
-            endpoint,
-            headers={
-                "apikey": st.session_state.supabase_key,
-                "Authorization": f"Bearer {st.session_state.supabase_key}",
-            },
-            timeout=12,
-        )
-
+    """Soft-delete all active patterns into the Trash Vault and reset local lab chat."""
+    trash_msg = _soft_delete_all_patterns_to_vault()
     st.session_state.room2_chat_history = [
-        {"speaker": "Forensic Expert", "text": ROOM2_CLEAN_SLATE_MESSAGE}
+        {"speaker": "Forensic Expert", "text": trash_msg}
     ]
     st.session_state.room2_text_buffer = ""
-    st.session_state.quantum_terminal_output = (
-        f"📡 [DATALINK: CLOUD_PURGED] {ROOM2_CLEAN_SLATE_MESSAGE}"
-    )
+    _sync_matrix_chat_to_cloud()
 
 
 @st.cache_resource
@@ -1453,6 +1799,9 @@ def _deploy_room2_deck(deck: str) -> bool:
             f"╚════════════════════════════════════════╝"
         )
         st.session_state.room2_vault_flash = vault_line if ok else ""
+        st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
+        st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
+        _sync_matrix_chat_to_cloud()
         return True
     except Exception as exc:
         st.session_state.quantum_terminal_output = (
@@ -1486,6 +1835,10 @@ def _purge_room2_deck_inputs() -> None:
 
 
 def render_room2_forensic_lab():
+    _hydrate_matrix_memory_from_cloud()
+
+    active_count = st.session_state.get("matrix_active_pattern_count", 0)
+    trash_count = st.session_state.get("matrix_trash_vault_count", 0)
     st.markdown(
         """
         <div class="room2-hud">
@@ -1494,6 +1847,11 @@ def render_room2_forensic_lab():
         </div>
         """,
         unsafe_allow_html=True,
+    )
+    st.caption(
+        f"☁️ **Matrix Memory (cloud-synced):** {active_count} active pattern(s) · "
+        f"{trash_count} in {RESCUE_VAULT_RETENTION_DAYS}-day Trash Vault · "
+        "restores work on any device within the window."
     )
 
     if st.session_state.polygon_lockout:
@@ -1594,7 +1952,7 @@ def render_room2_forensic_lab():
             st.text_input(
                 "Lab Input",
                 key="room2_text_buffer",
-                placeholder="Ask about patterns, say 'delete pattern' for Trash Vault, or 'undo that delete' to restore...",
+                placeholder="Ask about patterns, 'delete pattern' / 'delete everything', or 'I didn't mean to delete' / 'restore all'...",
                 label_visibility="collapsed",
             )
             if st.form_submit_button("Send") and st.session_state.room2_text_buffer.strip():

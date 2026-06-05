@@ -1083,5 +1083,7 @@ def build_vault_payload(
             st.session_state.get("forensic_form4_tracker", {}).get("form4_summary", "")
         ),
         "source_room": "forensic_pattern_lab",
+        "state": "active",
+        "deleted_at": None,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
