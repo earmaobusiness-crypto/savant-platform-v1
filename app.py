@@ -73,6 +73,22 @@ MATRIX_CASCADE_LINES = (
     "🛰️ NET_SCANNER: CAPTURING SEC FORM 4 INSIDER TRACKS... MONITORING 20-DAY VOLUME SPREADS...",
     "📊 QUANT_ENGINE: AGGREGATING 30-DAY CONTEXT HORIZON... DRILLING TO 5-MINUTE SUB-INTERVAL FILTERS...",
 )
+R2_BUFFER_WINDOWS = {
+    "1-Minute": "±30-45 second tight context window",
+    "5-Minute": "±1-2 minute structural pivot zone",
+    "15-Minute": "±5-7 minute macro structural parameter",
+}
+R2_MACRO_LAYOUTS = (
+    "Layout 1: Hot / High Velocity",
+    "Layout 2: Choppy / Liquidity Trap",
+)
+R2_EXECUTION_STRATEGIES = (
+    "Strategy 1B: Momentum Chaser",
+    "Strategy 1C: Staircase Dip-Buy",
+    "Mints Evolved Version (v2)",
+)
+FUZZY_CLUSTER_MINT_THRESHOLD = 72
+PURGATORY_REPLICATION_TARGET = 5
 
 st.set_page_config(
     page_title="Savant Apprentice",
@@ -431,6 +447,44 @@ st.markdown("""
             color: #E5E5E5;
             font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
         }
+        .r2-buffer-caption {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: #6B6B6B;
+            margin: 8px 0 6px 0;
+        }
+        .r2-buffer-readout {
+            font-size: 10px;
+            font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+            color: #34C759;
+            margin-bottom: 10px;
+            opacity: 0.9;
+        }
+        .purgatory-shelf {
+            background: #080808;
+            border: 1px solid #2A2A2A;
+            border-radius: 4px;
+            padding: 14px 16px;
+            margin-top: 12px;
+            margin-bottom: 12px;
+            min-height: 88px;
+            width: 100%;
+            box-sizing: border-box;
+            font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+            font-size: 11px;
+            line-height: 1.6;
+            color: #B8B8B8;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .purgatory-shelf-active {
+            border-color: #524114;
+            color: #D9B352;
+            text-shadow: 0 0 8px rgba(217, 179, 82, 0.25);
+            box-shadow: inset 0 0 24px rgba(82, 65, 20, 0.12);
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -468,6 +522,21 @@ if "matrix_cascade_active" not in st.session_state: st.session_state.matrix_casc
 if "matrix_cascade_started_at" not in st.session_state: st.session_state.matrix_cascade_started_at = 0.0
 if "matrix_cascade_final_output" not in st.session_state: st.session_state.matrix_cascade_final_output = ""
 if "matrix_satellites_ready" not in st.session_state: st.session_state.matrix_satellites_ready = True
+if "r2_timeframe_mode" not in st.session_state: st.session_state.r2_timeframe_mode = "15-Minute"
+if "r2_buffer_context_window" not in st.session_state:
+    st.session_state.r2_buffer_context_window = R2_BUFFER_WINDOWS["15-Minute"]
+if "r2_good_macro_weather_layout" not in st.session_state:
+    st.session_state.r2_good_macro_weather_layout = R2_MACRO_LAYOUTS[0]
+if "r2_bad_macro_weather_layout" not in st.session_state:
+    st.session_state.r2_bad_macro_weather_layout = R2_MACRO_LAYOUTS[0]
+if "r2_good_execution_strategy" not in st.session_state:
+    st.session_state.r2_good_execution_strategy = R2_EXECUTION_STRATEGIES[0]
+if "r2_bad_execution_strategy" not in st.session_state:
+    st.session_state.r2_bad_execution_strategy = R2_EXECUTION_STRATEGIES[0]
+if "purgatory_shelf_active" not in st.session_state: st.session_state.purgatory_shelf_active = False
+if "purgatory_shelf_message" not in st.session_state: st.session_state.purgatory_shelf_message = ""
+if "purgatory_repetition_count" not in st.session_state: st.session_state.purgatory_repetition_count = 0
+if "purgatory_signature" not in st.session_state: st.session_state.purgatory_signature = ""
 if "supabase_ready" not in st.session_state:
     try:
         st.session_state.supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
@@ -1575,6 +1644,162 @@ def _room2_coordinate_string(date_val, time_val: str) -> str:
     return f"{date_val} {time_val}".strip()
 
 
+def _as_calendar_date(value) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if hasattr(value, "date"):
+        try:
+            return value.date()
+        except Exception:
+            pass
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except Exception:
+        return None
+
+
+def _deck_dates_are_today(start_date, end_date) -> bool:
+    today = date.today()
+    start = _as_calendar_date(start_date)
+    end = _as_calendar_date(end_date)
+    return start == today and end == today
+
+
+def _lock_r2_timeframe_mode(mode: str) -> None:
+    st.session_state.r2_timeframe_mode = mode
+    st.session_state.r2_buffer_context_window = R2_BUFFER_WINDOWS.get(
+        mode, R2_BUFFER_WINDOWS["15-Minute"]
+    )
+
+
+def _r2_yfinance_interval_from_mode(mode: str) -> str:
+    return {"1-Minute": "1m", "5-Minute": "5m", "15-Minute": "15m"}.get(mode, "15m")
+
+
+def _render_r2_adaptive_buffer_toggles(deck_prefix: str) -> None:
+    """Adaptive Buffer Matrix — shared timeframe resolution toggles per card."""
+    st.markdown(
+        '<div class="r2-buffer-caption">Adaptive Buffer Matrix — Timeframe Resolution</div>',
+        unsafe_allow_html=True,
+    )
+    active = st.session_state.get("r2_timeframe_mode", "15-Minute")
+    col_1m, col_5m, col_15m = st.columns(3)
+    with col_1m:
+        st.button(
+            "1m",
+            key=f"r2_tf_1m_{deck_prefix}",
+            type="primary" if active == "1-Minute" else "secondary",
+            use_container_width=True,
+            on_click=_lock_r2_timeframe_mode,
+            args=("1-Minute",),
+        )
+    with col_5m:
+        st.button(
+            "5m",
+            key=f"r2_tf_5m_{deck_prefix}",
+            type="primary" if active == "5-Minute" else "secondary",
+            use_container_width=True,
+            on_click=_lock_r2_timeframe_mode,
+            args=("5-Minute",),
+        )
+    with col_15m:
+        st.button(
+            "15m",
+            key=f"r2_tf_15m_{deck_prefix}",
+            type="primary" if active == "15-Minute" else "secondary",
+            use_container_width=True,
+            on_click=_lock_r2_timeframe_mode,
+            args=("15-Minute",),
+        )
+    st.markdown(
+        f'<div class="r2-buffer-readout">LOCKED BUFFER: '
+        f'{escape(st.session_state.get("r2_buffer_context_window", ""))}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_r2_macro_strategy_deck(deck_prefix: str) -> None:
+    """Macro layout + execution strategy — isolated DB column bindings."""
+    st.selectbox(
+        "Macro Weather Layout:",
+        R2_MACRO_LAYOUTS,
+        key=f"{deck_prefix}_macro_weather_layout",
+    )
+    st.selectbox(
+        "Execution Strategy Playbook:",
+        R2_EXECUTION_STRATEGIES,
+        key=f"{deck_prefix}_execution_strategy",
+    )
+
+
+def _evaluate_purgatory_cluster(
+    *,
+    ticker: str,
+    pattern_category: str,
+    deck: str,
+) -> tuple[bool, str]:
+    """
+    Fuzzy clustering gate — toxic anomalies below mint threshold route to Purgatory Shelf.
+    Validated (good) patterns always mint regardless of score.
+    """
+    if pattern_category == "VALIDATED":
+        st.session_state.purgatory_shelf_active = False
+        st.session_state.purgatory_repetition_count = 0
+        st.session_state.purgatory_signature = ""
+        return False, ""
+
+    math_block = st.session_state.get("room2_last_math_block", {}) or {}
+    match_score = int(math_block.get("match_probability") or 0)
+    signature = f"{ticker}|{pattern_category}|{deck}|{match_score // 5}"
+
+    if match_score >= FUZZY_CLUSTER_MINT_THRESHOLD:
+        st.session_state.purgatory_shelf_active = False
+        st.session_state.purgatory_repetition_count = 0
+        st.session_state.purgatory_signature = ""
+        return False, ""
+
+    if st.session_state.get("purgatory_signature") == signature:
+        count = min(
+            PURGATORY_REPLICATION_TARGET,
+            int(st.session_state.get("purgatory_repetition_count", 0)) + 1,
+        )
+    else:
+        count = 1
+        st.session_state.purgatory_signature = signature
+
+    st.session_state.purgatory_repetition_count = count
+    st.session_state.purgatory_shelf_active = True
+    message = (
+        "⏳ [PURGATORY STATUS: HOLDING] Unclassified data anomaly locked. "
+        f"Pattern repetition count: [{count}/{PURGATORY_REPLICATION_TARGET}]. "
+        "Awaiting structural replication before minting new strategy execution files."
+    )
+    st.session_state.purgatory_shelf_message = message
+    return True, message
+
+
+def _render_purgatory_shelf() -> None:
+    st.markdown(
+        '<div class="room2-terminal-header">▸ THE PURGATORY SHELF</div>',
+        unsafe_allow_html=True,
+    )
+    if st.session_state.get("purgatory_shelf_active"):
+        shelf_class = "purgatory-shelf purgatory-shelf-active"
+        body = st.session_state.get("purgatory_shelf_message", "")
+    else:
+        shelf_class = "purgatory-shelf"
+        body = (
+            "░ PURGATORY SHELF STANDBY — Classified patterns mint directly to the Internet Vault. "
+            "Unclassified fuzzy-cluster anomalies will hold here pending structural replication."
+        )
+    st.markdown(
+        f'<div class="{shelf_class}">{escape(body)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_r2_datalink_group(deck_prefix: str) -> None:
     """Linear datalink: Start anchor row + End anchor row, side-by-side columns."""
     line1_col1, line1_col2 = st.columns([1.0, 1.0])
@@ -1845,6 +2070,28 @@ def _validate_room2_deck(deck: str) -> bool:
     )
 
 
+def _ensure_room2_widget_defaults() -> None:
+    """Bind missing Room 2 widget keys before render (safe after form-buffer pop)."""
+    today = date.today()
+    bindings = {
+        "r2_good_ticker": "MLGO",
+        "r2_bad_ticker": "AAPL",
+        "r2_good_start_date": today,
+        "r2_good_end_date": today,
+        "r2_bad_start_date": today,
+        "r2_bad_end_date": today,
+        "r2_good_start_time": "09:31 AM",
+        "r2_good_end_time": "04:00 PM",
+        "r2_bad_start_time": "09:31 AM",
+        "r2_bad_end_time": "04:00 PM",
+        "r2_single_notes_field": "",
+        "r2_bad_single_notes_field": "",
+    }
+    for key, value in bindings.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
 def _clear_room2_form_buffers(deck: str) -> None:
     """Reset only the target form chassis keys after a validated deploy."""
     if deck == "good":
@@ -1915,6 +2162,19 @@ def _deploy_room2_deck(deck: str) -> bool:
         time_meta = f"START:{start_time} | END:{end_time} | DECK:{deck_tag}"
         feedback = f"{feedback} | {time_meta}".strip(" |") if feedback else time_meta
 
+    timeframe_resolution = st.session_state.get("r2_timeframe_mode", "15-Minute")
+    buffer_context_window = st.session_state.get(
+        "r2_buffer_context_window", R2_BUFFER_WINDOWS["15-Minute"]
+    )
+    macro_weather_layout = st.session_state.get(
+        f"{prefix}_macro_weather_layout", R2_MACRO_LAYOUTS[0]
+    )
+    execution_strategy = st.session_state.get(
+        f"{prefix}_execution_strategy", R2_EXECUTION_STRATEGIES[0]
+    )
+    yf_interval = _r2_yfinance_interval_from_mode(timeframe_resolution)
+    force_yfinance_track = _deck_dates_are_today(start_date, end_date)
+
     try:
         st.session_state.matrix_satellites_ready = False
         st.session_state.forensic_institutional_tracker = {
@@ -1929,7 +2189,11 @@ def _deploy_room2_deck(deck: str) -> bool:
             "insider_events": [],
         }
 
-        data_stream = core_quantum.get_historical_15m_data(ticker)
+        data_stream = core_quantum.get_historical_interval_data(
+            ticker,
+            interval=yf_interval,
+            force_yfinance_only=force_yfinance_track,
+        )
 
         if core_quantum.is_pipeline_signal(data_stream, "THROTTLE"):
             st.session_state.polygon_lockout = True
@@ -1941,7 +2205,7 @@ def _deploy_room2_deck(deck: str) -> bool:
 
         if not core_quantum.is_usable_data_stream(data_stream):
             no_data_text = (
-                f"⚠️ [DATALINK: NO_DATA] No 15m bars for {ticker}. "
+                f"⚠️ [DATALINK: NO_DATA] No {yf_interval} bars for {ticker}. "
                 "Verify ticker symbol and market session dates."
             )
             st.session_state.quantum_terminal_output = no_data_text
@@ -1962,10 +2226,7 @@ def _deploy_room2_deck(deck: str) -> bool:
         )
 
         # ValueError plug — coerce tables/objects to strict terminal text before Window 1 bind.
-        if hasattr(quantum_summary, "empty") or isinstance(quantum_summary, (dict, list, str)):
-            quantum_report = _coerce_quantum_summary_to_text(quantum_summary)
-        else:
-            quantum_report = _coerce_quantum_summary_to_text(quantum_summary)
+        quantum_report = _coerce_quantum_summary_to_text(quantum_summary)
 
         st.session_state.polygon_lockout = False
         st.session_state.room2_bar_count = (
@@ -1973,6 +2234,12 @@ def _deploy_room2_deck(deck: str) -> bool:
         )
         st.session_state.room2_quantum_report = quantum_report
         st.session_state.room2_forensic_ticker = ticker
+
+        in_purgatory, purgatory_message = _evaluate_purgatory_cluster(
+            ticker=ticker,
+            pattern_category=pattern_category,
+            deck=deck,
+        )
 
         payload = core_quantum.build_vault_payload(
             ticker=ticker,
@@ -1984,10 +2251,26 @@ def _deploy_room2_deck(deck: str) -> bool:
             operator_notes=notes,
             quantum_report=quantum_report,
             bar_count=st.session_state.room2_bar_count,
+            timeframe_resolution=timeframe_resolution,
+            macro_weather_layout=macro_weather_layout,
+            execution_strategy=execution_strategy,
+            buffer_context_window=buffer_context_window,
         )
-        ok, vault_message = core_quantum.stream_payload_to_vault(payload)
-        vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
-        final_terminal = _assign_matrix_terminal_output(quantum_report, vault_line)
+
+        if in_purgatory:
+            vault_line = "PURGATORY HOLD — Vault mint deferred pending replication."
+            ok = False
+        else:
+            ok, vault_message = core_quantum.stream_payload_to_vault(payload)
+            vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
+
+        if in_purgatory:
+            final_terminal = _assign_matrix_terminal_output(
+                f"{quantum_report}\n\n{purgatory_message}",
+                None,
+            )
+        else:
+            final_terminal = _assign_matrix_terminal_output(quantum_report, vault_line)
         st.session_state.matrix_cascade_final_output = final_terminal
         st.session_state.matrix_cascade_active = True
         st.session_state.matrix_cascade_started_at = time.time()
@@ -2033,6 +2316,7 @@ def _purge_room2_deck_inputs() -> None:
 
 def render_room2_forensic_lab():
     _hydrate_matrix_memory_from_cloud()
+    _ensure_room2_widget_defaults()
 
     active_count = st.session_state.get("matrix_active_pattern_count", 0)
     trash_count = st.session_state.get("matrix_trash_vault_count", 0)
@@ -2068,6 +2352,8 @@ def render_room2_forensic_lab():
                 )
                 if st.session_state.get("r2_good_validation_error"):
                     st.error(ROOM2_INVALID_INPUT_MESSAGE)
+                _render_r2_adaptive_buffer_toggles("good")
+                _render_r2_macro_strategy_deck("r2_good")
                 with st.form("r2_good_form_chassis", clear_on_submit=False):
                     st.text_input("Good File Ticker", key="r2_good_ticker")
                     _render_r2_datalink_group("r2_good")
@@ -2092,6 +2378,8 @@ def render_room2_forensic_lab():
                 )
                 if st.session_state.get("r2_bad_validation_error"):
                     st.error(ROOM2_INVALID_INPUT_MESSAGE)
+                _render_r2_adaptive_buffer_toggles("bad")
+                _render_r2_macro_strategy_deck("r2_bad")
                 with st.form("r2_bad_form_chassis", clear_on_submit=False):
                     st.text_input("Bad File Ticker", key="r2_bad_ticker")
                     _render_r2_datalink_group("r2_bad")
@@ -2110,6 +2398,7 @@ def render_room2_forensic_lab():
     with col_right:
         _render_matrix_window1_panel()
         _render_room2_proxy_telemetry_banners()
+        _render_purgatory_shelf()
 
         st.markdown(
             '<div class="room2-wire-title">💬 WINDOW 4 — FORENSIC LAB CONVERSATION WIRE</div>',

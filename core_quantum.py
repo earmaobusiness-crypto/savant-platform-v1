@@ -1,4 +1,5 @@
 import datetime
+import json
 import re
 import statistics
 import time
@@ -20,7 +21,7 @@ THROTTLE_MESSAGE = (
 COMPRESSED_VARIANCE_THRESHOLD = 1.25
 INSTITUTIONAL_SURGE_MULTIPLIER = 4.0
 SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
-BARS_PER_SESSION = {"5m": 78, "15m": 26, "1h": 7, "1d": 1}
+BARS_PER_SESSION = {"1m": 390, "5m": 78, "15m": 26, "1h": 7, "1d": 1}
 
 
 def is_pipeline_signal(data_stream, *signals: str) -> bool:
@@ -52,8 +53,9 @@ def _flatten_yfinance_frame(df):
 
 def _download_yfinance_bars(ticker_clean: str, yf_interval: str):
     """Primary local datalink — avoids Polygon fallback when bars are available."""
+    period = "7d" if yf_interval == "1m" else "60d"
     try:
-        hist = yf.Ticker(ticker_clean).history(period="60d", interval=yf_interval)
+        hist = yf.Ticker(ticker_clean).history(period=period, interval=yf_interval)
         flat = _flatten_yfinance_frame(hist)
         if is_usable_data_stream(flat):
             return flat
@@ -62,7 +64,7 @@ def _download_yfinance_bars(ticker_clean: str, yf_interval: str):
     try:
         df_yf = yf.download(
             ticker_clean,
-            period="60d",
+            period=period,
             interval=yf_interval,
             progress=False,
             group_by="column",
@@ -495,7 +497,12 @@ def _scrape_form4_insider_buys(ticker: str) -> dict:
     }
 
 
-def get_historical_interval_data(ticker, interval="15m", update_institutional_tracker=True):
+def get_historical_interval_data(
+    ticker,
+    interval="15m",
+    update_institutional_tracker=True,
+    force_yfinance_only=False,
+):
     """
     Free institutional proxy interval wire with 20-day volume baseline tracker.
     - Under 60 Days: yfinance local Mac silicon wire.
@@ -503,24 +510,36 @@ def get_historical_interval_data(ticker, interval="15m", update_institutional_tr
     """
     try:
         return _get_historical_interval_data_impl(
-            ticker, interval=interval, update_institutional_tracker=update_institutional_tracker
+            ticker,
+            interval=interval,
+            update_institutional_tracker=update_institutional_tracker,
+            force_yfinance_only=force_yfinance_only,
         )
     except Exception:
         return None
 
 
-def _get_historical_interval_data_impl(ticker, interval="15m", update_institutional_tracker=True):
+def _get_historical_interval_data_impl(
+    ticker,
+    interval="15m",
+    update_institutional_tracker=True,
+    force_yfinance_only=False,
+):
     ticker_clean = str(ticker).strip().upper()
     if not ticker_clean:
         return None
 
     now = datetime.datetime.now()
     interval = str(interval).lower()
-    yf_interval = interval if interval in {"5m", "15m", "1h", "1d"} else "15m"
+    yf_interval = interval if interval in {"1m", "5m", "15m", "1h", "1d"} else "15m"
 
     data_stream = _download_yfinance_bars(ticker_clean, yf_interval)
 
-    if data_stream is None and yf_interval == "15m":
+    if (
+        data_stream is None
+        and not force_yfinance_only
+        and yf_interval == "15m"
+    ):
         start_date = (now - datetime.timedelta(days=730)).strftime("%Y-%m-%d")
         end_date = now.strftime("%Y-%m-%d")
         polygon_bars, polygon_signal = _fetch_polygon_15m_bars(
@@ -905,8 +924,17 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
         return False, "Supabase offline. Add SUPABASE_URL and SUPABASE_KEY to `.streamlit/secrets.toml`."
 
     table = _supabase_table_name()
-    try:
-        resp = requests.post(
+    extended_fields = (
+        "timeframe_resolution",
+        "macro_weather_layout",
+        "execution_strategy",
+        "buffer_context_window",
+        "state",
+        "deleted_at",
+    )
+
+    def _post(body: dict):
+        return requests.post(
             f"{supabase_url}/rest/v1/{table}",
             headers={
                 "apikey": supabase_key,
@@ -914,14 +942,37 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
                 "Content-Type": "application/json",
                 "Prefer": "return=minimal",
             },
-            json=[payload],
+            json=[body],
             timeout=12,
         )
+
+    try:
+        resp = _post(payload)
         if resp.ok:
             return True, (
                 f"INTERNET VAULT SYNC CONFIRMED — `{table}` anchored for "
                 f"{payload.get('ticker', 'UNKNOWN')} @ {payload.get('timestamp', 'UTC')}."
             )
+
+        err_text = resp.text.lower()
+        if resp.status_code in (400, 404) and (
+            "column" in err_text or "schema" in err_text or "could not" in err_text
+        ):
+            meta = {field: payload.get(field) for field in extended_fields if field in payload}
+            slim = {key: value for key, value in payload.items() if key not in extended_fields}
+            ctx = str(slim.get("operator_context", "")).strip()
+            meta_blob = json.dumps(meta, default=str)
+            slim["operator_context"] = (
+                f"{ctx} | MATRIX_META:{meta_blob}".strip(" |") if ctx else f"MATRIX_META:{meta_blob}"
+            )
+            retry = _post(slim)
+            if retry.ok:
+                return True, (
+                    f"INTERNET VAULT SYNC CONFIRMED — `{table}` anchored (compact schema fallback) "
+                    f"for {payload.get('ticker', 'UNKNOWN')}."
+                )
+            return False, f"Vault upload failed: {retry.status_code} {retry.text}"
+
         return False, f"Vault upload failed: {resp.status_code} {resp.text}"
     except Exception as exc:
         return False, f"Vault upload failed: {exc}"
@@ -1036,6 +1087,7 @@ def calculate_quantum_frequencies(
         institutional_block=institutional_block,
         form4_block=form4_block,
     )
+    st.session_state.room2_last_math_block = math_block
 
     return _build_matrix_execution_readout(
         ticker=resolved_ticker or "UNKNOWN",
@@ -1063,6 +1115,10 @@ def build_vault_payload(
     operator_notes: str,
     quantum_report: str,
     bar_count: int,
+    timeframe_resolution: str = "15-Minute",
+    macro_weather_layout: str = "",
+    execution_strategy: str = "",
+    buffer_context_window: str = "",
 ) -> dict:
     """Package Room 2 deck parameters for Internet Vault streaming."""
     return {
@@ -1075,6 +1131,10 @@ def build_vault_payload(
         "operator_context": operator_notes.strip(),
         "quantum_report": quantum_report,
         "bar_count": bar_count,
+        "timeframe_resolution": timeframe_resolution,
+        "macro_weather_layout": macro_weather_layout,
+        "execution_strategy": execution_strategy,
+        "buffer_context_window": buffer_context_window,
         "polygon_calls_remaining": _polygon_calls_remaining(),
         "institutional_block_accumulation": st.session_state.get(
             "forensic_institutional_tracker", {}
