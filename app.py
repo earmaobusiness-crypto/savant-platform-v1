@@ -64,6 +64,13 @@ ROOM2_CLEAN_SLATE_MESSAGE = (
     "All prior records moved to the 15-day Trash Vault — say 'restore my patterns' to undo."
 )
 RESCUE_VAULT_RETENTION_DAYS = 15
+BLACKLIST_SIGNATURE_STATE = "blacklist_signature"
+VAULT_TRACK_VALIDATED = "track_1_validated"
+VAULT_TRACK_TOXIC_BLACKLIST = "track_2_blacklist"
+MACRO_CAROUSEL_POLL_SEC = 15
+MICRO_FAST_TRACK_TARGET_MS = 100
+DATA_FEED_WEBSOCKET = "websocket_subsecond"
+DATA_FEED_CAROUSEL = "carousel_15s"
 MATRIX_CHAT_LOG_TICKER = "_LAB_SESSION_"
 MATRIX_CHAT_LOG_CATEGORY = "MATRIX_CHAT_LOG"
 MATRIX_ENGINE_IDLE_MARKER = "ENGINE_IDLE"
@@ -522,6 +529,8 @@ if "matrix_cascade_active" not in st.session_state: st.session_state.matrix_casc
 if "matrix_cascade_started_at" not in st.session_state: st.session_state.matrix_cascade_started_at = 0.0
 if "matrix_cascade_final_output" not in st.session_state: st.session_state.matrix_cascade_final_output = ""
 if "matrix_satellites_ready" not in st.session_state: st.session_state.matrix_satellites_ready = True
+if "matrix_blacklist_count" not in st.session_state: st.session_state.matrix_blacklist_count = 0
+if "r2_data_feed_mode" not in st.session_state: st.session_state.r2_data_feed_mode = DATA_FEED_CAROUSEL
 if "r2_timeframe_mode" not in st.session_state: st.session_state.r2_timeframe_mode = "15-Minute"
 if "r2_buffer_context_window" not in st.session_state:
     st.session_state.r2_buffer_context_window = R2_BUFFER_WINDOWS["15-Minute"]
@@ -1015,6 +1024,13 @@ The High-Friction Profit Filter: If a trade trigger is a late, low-margin chase 
 
 The Evolving Phase Gate: If actual profit margins drop below the strict floor due to a permanent shift in market microstructure (and not just poor execution fills), you must declare that the strategy has officially entered the Evolving phase. You will archive the failing parameters and support the complete rewriting and minting of an updated version (e.g., Strategy 1A for Layout 2 (1m) v2) to maximize capital extraction.
 
+Dual-Track Vault Architecture
+Track 1 (Validated): Standard active pattern archive subject to the floating Trash Vault retention window for operator-initiated cleanup.
+Track 2 (Toxic Trap Preservation): Any setup officially validated as TOXIC — a trap, failed entry, or high-friction chase — bypasses all deletion clocks entirely. These are minted permanently to the Blacklist Signature Index. The system must never forget an institutional trap, even if it occurs only once per year. Toxic blacklist rows are immune to soft-delete, bulk purge, and retention expiry.
+
+Sub-Second Fast Track (1m Isolation)
+The 1-minute resolution is too fast for a standard 15-second scanning carousel; a 15-second delay misses roughly 25% of a micro-burst lifespan and forces entries into high-friction zones. All 1-minute strategy bins are isolated onto a continuous sub-second streaming live data path (WebSocket-class feed, sub-100 millisecond execution target), completely separated from the slower 15-second polling carousel used for macro 5m and 15m layouts. Never cross-pollinate latency domains.
+
 Strategic Assignment
 Absorb this complex matrix entirely into your active context. From this moment forward, stop giving generic, textbook AI answers. When the operator hands you a stock setup, you must decode it through these exact rules: identify its Layout DNA, isolate it to its strict timeframe bin, blind yourself to all future knowledge, check the profit runway to filter out late chasers, and track its version evolution over time.
 """.strip()
@@ -1099,13 +1115,14 @@ def _pattern_archive_query_suffix(*, active_only: bool = True, trash_only: bool 
     parts = [f"pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"]
     if trash_only:
         parts.append("state=eq.soft_deleted")
+        parts.append("pattern_category=neq.TOXIC_ANOMALY")
     elif active_only:
-        parts.append("or=(state.is.null,state.eq.active)")
+        parts.append("or=(state.is.null,state.eq.active,state.eq.blacklist_signature)")
     return "&" + "&".join(parts)
 
 
 def _purge_expired_trash_vault() -> None:
-    """Permanently purge Trash Vault rows older than the retention window."""
+    """Permanently purge Trash Vault rows older than retention — never touches toxic blacklist."""
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return
@@ -1118,12 +1135,71 @@ def _purge_expired_trash_vault() -> None:
         requests.delete(
             f"{base}/rest/v1/{table}?state=eq.soft_deleted"
             f"&deleted_at=lt.{cutoff}"
-            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}",
+            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"
+            f"&pattern_category=neq.TOXIC_ANOMALY",
             headers=_supabase_rest_headers(),
             timeout=12,
         )
     except Exception:
         pass
+
+
+def _count_blacklist_signature_rows() -> int:
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return 0
+    table = _forensic_patterns_table()
+    base = st.session_state.supabase_url
+    try:
+        resp = requests.get(
+            f"{base}/rest/v1/{table}?select=id"
+            f"&state=eq.{BLACKLIST_SIGNATURE_STATE}"
+            f"&pattern_category=eq.TOXIC_ANOMALY",
+            headers={**_supabase_rest_headers(), "Prefer": "count=exact"},
+            timeout=12,
+        )
+        if resp.ok:
+            content_range = resp.headers.get("Content-Range", "")
+            if "/" in content_range:
+                total = content_range.split("/")[-1]
+                if total.isdigit():
+                    return int(total)
+            rows = resp.json()
+            return len(rows) if isinstance(rows, list) else 0
+    except Exception:
+        pass
+    return 0
+
+
+def _resolve_data_feed_mode(timeframe_resolution: str) -> str:
+    if timeframe_resolution == "1-Minute":
+        return st.session_state.get(
+            "r2_micro_feed_source", core_quantum.DATA_FEED_YFINANCE_1M
+        )
+    return DATA_FEED_CAROUSEL
+
+
+def _micro_feed_readout_label() -> str:
+    source = st.session_state.get("r2_micro_feed_source", core_quantum.DATA_FEED_YFINANCE_1M)
+    if source == core_quantum.DATA_FEED_POLYGON_1M:
+        return "Polygon 1m REST (live aggs) · isolated from macro carousel"
+    return "yfinance 1m fallback · isolated from macro carousel"
+
+
+def _pattern_row_effective_fields(row: dict) -> dict:
+    """Merge top-level vault columns with MATRIX_META fallback blob."""
+    merged = dict(row or {})
+    meta = core_quantum.parse_matrix_meta_from_context(merged.get("operator_context", ""))
+    for key, value in meta.items():
+        if merged.get(key) in (None, ""):
+            merged[key] = value
+    return merged
+
+
+def _resolve_vault_track(pattern_category: str) -> tuple[str, str]:
+    if pattern_category == "TOXIC_ANOMALY":
+        return VAULT_TRACK_TOXIC_BLACKLIST, BLACKLIST_SIGNATURE_STATE
+    return VAULT_TRACK_VALIDATED, "active"
 
 
 def _count_cloud_pattern_rows(*, trash_only: bool = False) -> int:
@@ -1284,6 +1360,7 @@ def _hydrate_matrix_memory_from_cloud() -> None:
 
     latest = _fetch_latest_active_pattern_row()
     if latest:
+        latest = _pattern_row_effective_fields(latest)
         report = str(latest.get("quantum_report") or "").strip()
         if report:
             st.session_state.room2_quantum_report = report
@@ -1297,6 +1374,7 @@ def _hydrate_matrix_memory_from_cloud() -> None:
 
     st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
+    st.session_state.matrix_blacklist_count = _count_blacklist_signature_rows()
 
 
 def _fetch_live_cloud_patterns() -> str:
@@ -1409,7 +1487,7 @@ def _soft_delete_latest_pattern_to_vault() -> str:
     base = st.session_state.supabase_url
     try:
         lookup = requests.get(
-            f"{base}/rest/v1/{table}?select=id,ticker"
+            f"{base}/rest/v1/{table}?select=id,ticker,pattern_category"
             f"{_pattern_archive_query_suffix(active_only=True)}"
             f"&order=timestamp.desc&limit=1",
             headers=_supabase_rest_headers(),
@@ -1421,7 +1499,14 @@ def _soft_delete_latest_pattern_to_vault() -> str:
         if not rows:
             return "⚠️ No active patterns found to move to Trash Vault."
 
-        row_id = rows[0]["id"]
+        row = rows[0]
+        if str(row.get("pattern_category", "")).upper() == "TOXIC_ANOMALY":
+            return (
+                "🛡️ BLACKLIST LOCK: Toxic trap signatures on Track 2 are permanent. "
+                "This record cannot enter the Trash Vault."
+            )
+
+        row_id = row["id"]
         deleted_at = datetime.now(timezone.utc).isoformat()
         patch = requests.patch(
             f"{base}/rest/v1/{table}?id=eq.{row_id}",
@@ -1450,7 +1535,8 @@ def _soft_delete_all_patterns_to_vault() -> str:
     deleted_at = datetime.now(timezone.utc).isoformat()
     try:
         patch = requests.patch(
-            f"{base}/rest/v1/{table}?{_pattern_archive_query_suffix(active_only=True)[1:]}",
+            f"{base}/rest/v1/{table}?{_pattern_archive_query_suffix(active_only=True)[1:]}"
+            f"&pattern_category=eq.VALIDATED",
             headers={**_supabase_rest_headers(), "Prefer": "return=minimal"},
             json={"state": "soft_deleted", "deleted_at": deleted_at},
             timeout=12,
@@ -1570,6 +1656,12 @@ def _build_room2_groq_messages(user_text: str) -> list[dict]:
         context_bits.append(
             f"[PURGATORY]{st.session_state.get('purgatory_shelf_message', '')}[/PURGATORY]"
         )
+    context_bits.append(
+        f"[DATA_FEED]{st.session_state.get('r2_data_feed_mode', DATA_FEED_CAROUSEL)}[/DATA_FEED]"
+    )
+    context_bits.append(
+        f"[BLACKLIST_INDEX]count={st.session_state.get('matrix_blacklist_count', 0)}[/BLACKLIST_INDEX]"
+    )
     if st.session_state.r2_good_ticker:
         context_bits.append(f"[GOOD_TICKER]{st.session_state.r2_good_ticker}[/GOOD_TICKER]")
     if st.session_state.r2_bad_ticker:
@@ -1772,6 +1864,18 @@ def _render_r2_adaptive_buffer_toggles(deck_prefix: str) -> None:
         f'{escape(st.session_state.get("r2_buffer_context_window", ""))}</div>',
         unsafe_allow_html=True,
     )
+    if active == "1-Minute":
+        st.markdown(
+            f'<div class="r2-buffer-readout">⚡ 1M FAST TRACK — '
+            f'{escape(_micro_feed_readout_label())}</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div class="r2-buffer-readout">🔄 MACRO CAROUSEL — '
+            f'{MACRO_CAROUSEL_POLL_SEC}s polling loop (5m/15m layouts)</div>',
+            unsafe_allow_html=True,
+        )
 
 
 def _render_r2_macro_strategy_deck(deck_prefix: str) -> None:
@@ -1795,10 +1899,10 @@ def _evaluate_purgatory_cluster(
     deck: str,
 ) -> tuple[bool, str]:
     """
-    Fuzzy clustering gate — toxic anomalies below mint threshold route to Purgatory Shelf.
-    Validated (good) patterns always mint regardless of score.
+    Fuzzy clustering gate — only ambiguous non-toxic edge cases route to Purgatory Shelf.
+    Validated patterns always mint. Toxic traps always mint to permanent blacklist (Track 2).
     """
-    if pattern_category == "VALIDATED":
+    if pattern_category in ("VALIDATED", "TOXIC_ANOMALY"):
         st.session_state.purgatory_shelf_active = False
         st.session_state.purgatory_repetition_count = 0
         st.session_state.purgatory_signature = ""
@@ -2008,11 +2112,7 @@ def _render_matrix_window1_panel() -> None:
     )
 
 
-def _render_room2_proxy_telemetry_banners() -> None:
-    st.markdown(
-        '<div class="room2-terminal-header">▸ WINDOW 2 & 3 — INSTITUTIONAL SATELLITE TELEMETRY</div>',
-        unsafe_allow_html=True,
-    )
+def _render_room2_proxy_telemetry_body() -> None:
     st.markdown('<div class="room2-satellite-shell">', unsafe_allow_html=True)
 
     if not st.session_state.get("matrix_satellites_ready", True):
@@ -2080,6 +2180,30 @@ def _render_room2_proxy_telemetry_banners() -> None:
         f"</div>",
         unsafe_allow_html=True,
     )
+
+
+def _render_room2_proxy_telemetry_banners() -> None:
+    st.markdown(
+        '<div class="room2-terminal-header">▸ WINDOW 2 & 3 — INSTITUTIONAL SATELLITE TELEMETRY</div>',
+        unsafe_allow_html=True,
+    )
+    tick = st.session_state.get("macro_carousel_last_tick")
+    if tick and st.session_state.get("r2_timeframe_mode") != "1-Minute":
+        st.caption(f"Macro carousel refresh (UTC): {tick}")
+    _render_room2_proxy_telemetry_body()
+
+
+@st.fragment(run_every=timedelta(seconds=MACRO_CAROUSEL_POLL_SEC))
+def _render_room2_proxy_telemetry_live() -> None:
+    mode = st.session_state.get("r2_timeframe_mode", "15-Minute")
+    ticker = str(st.session_state.get("room2_forensic_ticker", "")).strip()
+    if (
+        mode != "1-Minute"
+        and ticker
+        and st.session_state.get("matrix_satellites_ready", True)
+    ):
+        core_quantum.refresh_macro_carousel_telemetry(ticker)
+    _render_room2_proxy_telemetry_banners()
 
 
 def _validate_room2_ticker(ticker: str) -> bool:
@@ -2227,7 +2351,13 @@ def _deploy_room2_deck(deck: str) -> bool:
         f"{prefix}_execution_strategy", R2_EXECUTION_STRATEGIES[0]
     )
     yf_interval = _r2_yfinance_interval_from_mode(timeframe_resolution)
-    force_yfinance_track = _deck_dates_are_today(start_date, end_date)
+    data_feed_mode = _resolve_data_feed_mode(timeframe_resolution)
+    st.session_state.r2_data_feed_mode = data_feed_mode
+    force_yfinance_track = _deck_dates_are_today(start_date, end_date) or (
+        timeframe_resolution == "1-Minute"
+    )
+    micro_fast_track = timeframe_resolution == "1-Minute"
+    vault_track, vault_state = _resolve_vault_track(pattern_category)
 
     try:
         st.session_state.matrix_satellites_ready = False
@@ -2247,7 +2377,10 @@ def _deploy_room2_deck(deck: str) -> bool:
             ticker,
             interval=yf_interval,
             force_yfinance_only=force_yfinance_track,
+            micro_fast_track=micro_fast_track,
         )
+        if micro_fast_track:
+            data_feed_mode = _resolve_data_feed_mode(timeframe_resolution)
 
         if core_quantum.is_pipeline_signal(data_stream, "THROTTLE"):
             st.session_state.polygon_lockout = True
@@ -2309,6 +2442,9 @@ def _deploy_room2_deck(deck: str) -> bool:
             macro_weather_layout=macro_weather_layout,
             execution_strategy=execution_strategy,
             buffer_context_window=buffer_context_window,
+            vault_track=vault_track,
+            vault_state=vault_state,
+            data_feed_mode=data_feed_mode,
         )
 
         if in_purgatory:
@@ -2316,7 +2452,32 @@ def _deploy_room2_deck(deck: str) -> bool:
             ok = False
         else:
             ok, vault_message = core_quantum.stream_payload_to_vault(payload)
-            vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
+            if pattern_category == "TOXIC_ANOMALY" and ok:
+                vault_line = (
+                    f"BLACKLIST SIGNATURE INDEX — permanent Track 2 anchor for {ticker}."
+                )
+            elif pattern_category == "VALIDATED" and ok:
+                velocity = st.session_state.get("room2_last_velocity", {}) or {}
+                margin_pct = abs(float(velocity.get("session_velocity_pct") or 0.0))
+                decay = core_quantum.log_strategy_execution_with_fallback(
+                    ticker=ticker,
+                    macro_weather_layout=macro_weather_layout,
+                    execution_strategy=execution_strategy,
+                    timeframe_resolution=timeframe_resolution,
+                    margin_pct=margin_pct,
+                    pattern_category=pattern_category,
+                )
+                st.session_state.room2_alpha_decay_status = decay
+                if decay.get("evolving"):
+                    vault_line = (
+                        f"{vault_message} · ⚠️ ALPHA DECAY EVOLVING — "
+                        f"avg margin {decay['avg_margin_pct']:.2f}% "
+                        f"({decay['sample_count']}/{decay['window']}) — mint Strategy v2."
+                    )
+                else:
+                    vault_line = vault_message
+            else:
+                vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
 
         if in_purgatory:
             final_terminal = _assign_matrix_terminal_output(
@@ -2332,6 +2493,7 @@ def _deploy_room2_deck(deck: str) -> bool:
         st.session_state.room2_vault_flash = vault_line if ok else ""
         st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
         st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
+        st.session_state.matrix_blacklist_count = _count_blacklist_signature_rows()
         _sync_matrix_chat_to_cloud()
         return True
     except Exception as exc:
@@ -2374,6 +2536,7 @@ def render_room2_forensic_lab():
 
     active_count = st.session_state.get("matrix_active_pattern_count", 0)
     trash_count = st.session_state.get("matrix_trash_vault_count", 0)
+    blacklist_count = st.session_state.get("matrix_blacklist_count", 0)
     st.markdown(
         """
         <div class="room2-hud">
@@ -2384,10 +2547,25 @@ def render_room2_forensic_lab():
         unsafe_allow_html=True,
     )
     st.caption(
-        f"☁️ **Matrix Memory (cloud-synced):** {active_count} active pattern(s) · "
-        f"{trash_count} in {RESCUE_VAULT_RETENTION_DAYS}-day Trash Vault · "
-        "restores work on any device within the window."
+        f"☁️ **Matrix Memory (cloud-synced):** {active_count} active · "
+        f"{blacklist_count} permanent toxic blacklist (Track 2) · "
+        f"{trash_count} in {RESCUE_VAULT_RETENTION_DAYS}-day Trash Vault (validated only)."
     )
+    decay_status = st.session_state.get("room2_alpha_decay_status")
+    if decay_status:
+        if decay_status.get("evolving"):
+            st.warning(
+                f"⚠️ **Alpha Decay — EVOLVING:** {decay_status.get('sample_count', 0)}/"
+                f"{decay_status.get('window', 15)} samples · avg margin "
+                f"{decay_status.get('avg_margin_pct', 0):.2f}% (floor "
+                f"{decay_status.get('floor_pct', 0):.2f}%). Consider minting Strategy v2."
+            )
+        else:
+            st.caption(
+                f"📉 Alpha Decay monitor: **{decay_status.get('status', 'STABLE')}** · "
+                f"{decay_status.get('sample_count', 0)}/{decay_status.get('window', 15)} "
+                f"rolling samples · avg margin {decay_status.get('avg_margin_pct', 0):.2f}%."
+            )
 
     if st.session_state.polygon_lockout:
         st.error(core_quantum.THROTTLE_MESSAGE)
@@ -2451,7 +2629,7 @@ def render_room2_forensic_lab():
 
     with col_right:
         _render_matrix_window1_panel()
-        _render_room2_proxy_telemetry_banners()
+        _render_room2_proxy_telemetry_live()
         _render_purgatory_shelf()
 
         st.markdown(

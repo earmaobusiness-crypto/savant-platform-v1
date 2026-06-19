@@ -3,6 +3,7 @@ import json
 import re
 import statistics
 import time
+import urllib.parse
 from xml.etree import ElementTree
 
 import requests
@@ -15,6 +16,10 @@ except ImportError:
     pd = None
 
 POLYGON_CALLS_PER_MINUTE = 5
+ALPHA_DECAY_ROLLING_N = 15
+ALPHA_DECAY_MARGIN_FLOOR_PCT = 0.15
+DATA_FEED_POLYGON_1M = "polygon_rest_1m"
+DATA_FEED_YFINANCE_1M = "yfinance_1m"
 THROTTLE_MESSAGE = (
     "⚠️ NETWORK THROTTLING SHIELD ACTIVE: 0 API CALLS REMAINING. COOLING DOWN PROCESSOR."
 )
@@ -51,9 +56,14 @@ def _flatten_yfinance_frame(df):
     return df
 
 
-def _download_yfinance_bars(ticker_clean: str, yf_interval: str):
-    """Primary local datalink — avoids Polygon fallback when bars are available."""
-    period = "7d" if yf_interval == "1m" else "60d"
+def _download_yfinance_bars(ticker_clean: str, yf_interval: str, micro_fast_track: bool = False):
+    """Primary local datalink — 1m micro path uses tight lookback for sub-second routing."""
+    if micro_fast_track or yf_interval == "1m":
+        period = "1d"
+    elif yf_interval == "5m":
+        period = "30d"
+    else:
+        period = "60d"
     try:
         hist = yf.Ticker(ticker_clean).history(period=period, interval=yf_interval)
         flat = _flatten_yfinance_frame(hist)
@@ -118,6 +128,262 @@ def _fetch_polygon_15m_bars(ticker_clean: str, start_date: str, end_date: str):
         st.session_state.polygon_lockout = True
         return None, "THROTTLE"
     return None, None
+
+
+def _fetch_polygon_1m_bars(ticker_clean: str, start_date: str, end_date: str):
+    """Recent 1-minute aggs — preferred micro fast-track wire when Polygon key is live."""
+    try:
+        api_key = st.secrets["POLYGON_API_KEY"]
+    except Exception:
+        return None, None
+
+    if not _consume_polygon_call():
+        return None, "THROTTLE"
+
+    try:
+        url = (
+            f"https://api.polygon.io/v2/aggs/ticker/{ticker_clean}/range/1/minute/"
+            f"{start_date}/{end_date}?adjusted=true&sort=asc&limit=50000&apiKey={api_key}"
+        )
+        http_resp = requests.get(url, timeout=15)
+        if not http_resp.ok:
+            return None, None
+        payload = http_resp.json()
+    except Exception:
+        return None, None
+
+    if not isinstance(payload, dict):
+        return None, None
+
+    results = payload.get("results")
+    if isinstance(results, list) and len(results) > 0:
+        return results, None
+
+    status = str(payload.get("status", "")).upper()
+    error_text = str(payload.get("error") or payload.get("message") or "").lower()
+    if status == "ERROR" and "max requests" in error_text:
+        st.session_state.polygon_calls_remaining = 0
+        st.session_state.polygon_lockout = True
+        return None, "THROTTLE"
+    return None, None
+
+
+def _polygon_aggs_to_dataframe(results):
+    """Convert Polygon agg list into a yfinance-compatible OHLCV frame."""
+    if pd is None or not isinstance(results, list) or not results:
+        return None
+    rows = []
+    for bar in results:
+        if not isinstance(bar, dict):
+            continue
+        ts_ms = bar.get("t")
+        if ts_ms is None:
+            continue
+        ts = datetime.datetime.fromtimestamp(float(ts_ms) / 1000.0)
+        rows.append(
+            {
+                "Datetime": ts,
+                "Open": float(bar.get("o", 0) or 0),
+                "High": float(bar.get("h", 0) or 0),
+                "Low": float(bar.get("l", 0) or 0),
+                "Close": float(bar.get("c", 0) or 0),
+                "Volume": float(bar.get("v", 0) or 0),
+            }
+        )
+    if not rows:
+        return None
+    frame = pd.DataFrame(rows).set_index("Datetime")
+    return frame if not frame.empty else None
+
+
+def parse_matrix_meta_from_context(operator_context: str) -> dict:
+    """Recover extended vault fields embedded via compact schema fallback."""
+    ctx = str(operator_context or "")
+    marker = "MATRIX_META:"
+    if marker not in ctx:
+        return {}
+    try:
+        blob = ctx.split(marker, 1)[1].strip()
+        if " | " in blob:
+            blob = blob.split(" | ", 1)[0]
+        parsed = json.loads(blob)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _strategy_executions_table() -> str:
+    try:
+        return st.secrets["SUPABASE_EXECUTIONS_TABLE"]
+    except (KeyError, FileNotFoundError, AttributeError):
+        return "strategy_executions"
+
+
+def _strategy_timeline_key(
+    *,
+    macro_weather_layout: str,
+    execution_strategy: str,
+    timeframe_resolution: str,
+) -> str:
+    return "|".join(
+        (
+            str(macro_weather_layout or "").strip(),
+            str(execution_strategy or "").strip(),
+            str(timeframe_resolution or "").strip(),
+        )
+    )
+
+
+def record_strategy_execution(
+    *,
+    ticker: str,
+    macro_weather_layout: str,
+    execution_strategy: str,
+    timeframe_resolution: str,
+    margin_pct: float,
+    pattern_category: str = "VALIDATED",
+) -> tuple[bool, str]:
+    """Append one deploy to the alpha-decay ledger (rolling last 15 per timeline)."""
+    try:
+        supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+        supabase_key = st.secrets["SUPABASE_KEY"]
+    except Exception:
+        return False, "offline"
+
+    payload = {
+        "ticker": str(ticker).strip().upper(),
+        "pattern_category": pattern_category,
+        "macro_weather_layout": macro_weather_layout,
+        "execution_strategy": execution_strategy,
+        "timeframe_resolution": timeframe_resolution,
+        "timeline_key": _strategy_timeline_key(
+            macro_weather_layout=macro_weather_layout,
+            execution_strategy=execution_strategy,
+            timeframe_resolution=timeframe_resolution,
+        ),
+        "margin_pct": round(float(margin_pct), 4),
+        "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    table = _strategy_executions_table()
+    try:
+        resp = requests.post(
+            f"{supabase_url}/rest/v1/{table}",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            json=[payload],
+            timeout=12,
+        )
+        return (True, "logged") if resp.ok else (False, resp.text[:120])
+    except Exception as exc:
+        return False, str(exc)[:120]
+
+
+def _append_local_alpha_decay_sample(timeline_key: str, margin_pct: float) -> None:
+    session_key = f"alpha_decay_local::{timeline_key}"
+    bucket = list(st.session_state.get(session_key, []))
+    bucket.insert(0, abs(float(margin_pct)))
+    st.session_state[session_key] = bucket[:ALPHA_DECAY_ROLLING_N]
+
+
+def log_strategy_execution_with_fallback(**kwargs) -> dict:
+    """Record execution to Supabase; mirror into session if cloud table missing."""
+    margin_pct = float(kwargs.get("margin_pct") or 0.0)
+    timeline_key = _strategy_timeline_key(
+        macro_weather_layout=kwargs.get("macro_weather_layout", ""),
+        execution_strategy=kwargs.get("execution_strategy", ""),
+        timeframe_resolution=kwargs.get("timeframe_resolution", ""),
+    )
+    ok, _detail = record_strategy_execution(**kwargs)
+    if not ok:
+        _append_local_alpha_decay_sample(timeline_key, margin_pct)
+    decay = evaluate_alpha_decay(
+        macro_weather_layout=kwargs.get("macro_weather_layout", ""),
+        execution_strategy=kwargs.get("execution_strategy", ""),
+        timeframe_resolution=kwargs.get("timeframe_resolution", ""),
+    )
+    decay["logged_to_cloud"] = ok
+    return decay
+
+
+def evaluate_alpha_decay(
+    *,
+    macro_weather_layout: str,
+    execution_strategy: str,
+    timeframe_resolution: str,
+) -> dict:
+    """
+    Rolling last-N margin monitor — returns EVOLVING when average edge drops below floor.
+    Falls back to session ledger when Supabase executions table is unavailable.
+    """
+    timeline_key = _strategy_timeline_key(
+        macro_weather_layout=macro_weather_layout,
+        execution_strategy=execution_strategy,
+        timeframe_resolution=timeframe_resolution,
+    )
+    margins: list[float] = []
+
+    try:
+        supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+        supabase_key = st.secrets["SUPABASE_KEY"]
+        table = _strategy_executions_table()
+        resp = requests.get(
+            f"{supabase_url}/rest/v1/{table}"
+            f"?timeline_key=eq.{urllib.parse.quote(timeline_key, safe='')}"
+            f"&select=margin_pct&order=recorded_at.desc&limit={ALPHA_DECAY_ROLLING_N}",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+            },
+            timeout=12,
+        )
+        if resp.ok:
+            for row in resp.json():
+                try:
+                    margins.append(abs(float(row.get("margin_pct", 0))))
+                except (TypeError, ValueError):
+                    pass
+    except Exception:
+        pass
+
+    if not margins:
+        session_key = f"alpha_decay_local::{timeline_key}"
+        margins = list(st.session_state.get(session_key, []))
+
+    count = len(margins)
+    avg_margin = round(sum(margins) / count, 4) if count else 0.0
+    evolving = count >= ALPHA_DECAY_ROLLING_N and avg_margin < ALPHA_DECAY_MARGIN_FLOOR_PCT
+    status = "EVOLVING" if evolving else ("WATCH" if count >= 5 else "STABLE")
+    return {
+        "status": status,
+        "timeline_key": timeline_key,
+        "sample_count": count,
+        "avg_margin_pct": avg_margin,
+        "floor_pct": ALPHA_DECAY_MARGIN_FLOOR_PCT,
+        "window": ALPHA_DECAY_ROLLING_N,
+        "evolving": evolving,
+    }
+
+
+def refresh_macro_carousel_telemetry(ticker: str) -> None:
+    """Light 15s macro refresh — yfinance 15m institutional baseline only."""
+    ticker_clean = str(ticker or "").strip().upper()
+    if not ticker_clean:
+        return
+    bars = _download_yfinance_bars(ticker_clean, "15m", micro_fast_track=False)
+    if not is_usable_data_stream(bars):
+        return
+    try:
+        tracker = _detect_institutional_block_accumulation(ticker_clean, bars, "15m")
+        st.session_state.forensic_institutional_tracker = tracker
+        st.session_state.macro_carousel_last_tick = datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat()
+    except Exception:
+        pass
 
 
 def _init_polygon_rate_monitor() -> None:
@@ -502,18 +768,21 @@ def get_historical_interval_data(
     interval="15m",
     update_institutional_tracker=True,
     force_yfinance_only=False,
+    micro_fast_track=False,
 ):
     """
     Free institutional proxy interval wire with 20-day volume baseline tracker.
     - Under 60 Days: yfinance local Mac silicon wire.
     - Extended history: Polygon API with live 5-call/min throttle shield (15m only).
+    - micro_fast_track: 1m sub-second path — yfinance only, no Polygon carousel.
     """
     try:
         return _get_historical_interval_data_impl(
             ticker,
             interval=interval,
             update_institutional_tracker=update_institutional_tracker,
-            force_yfinance_only=force_yfinance_only,
+            force_yfinance_only=force_yfinance_only or micro_fast_track,
+            micro_fast_track=micro_fast_track,
         )
     except Exception:
         return None
@@ -524,6 +793,7 @@ def _get_historical_interval_data_impl(
     interval="15m",
     update_institutional_tracker=True,
     force_yfinance_only=False,
+    micro_fast_track=False,
 ):
     ticker_clean = str(ticker).strip().upper()
     if not ticker_clean:
@@ -533,11 +803,31 @@ def _get_historical_interval_data_impl(
     interval = str(interval).lower()
     yf_interval = interval if interval in {"1m", "5m", "15m", "1h", "1d"} else "15m"
 
-    data_stream = _download_yfinance_bars(ticker_clean, yf_interval)
+    if micro_fast_track:
+        update_institutional_tracker = False
+        start_date = (now - datetime.timedelta(hours=8)).strftime("%Y-%m-%d")
+        end_date = now.strftime("%Y-%m-%d")
+        polygon_bars, polygon_signal = _fetch_polygon_1m_bars(
+            ticker_clean, start_date, end_date
+        )
+        if polygon_signal == "THROTTLE":
+            st.session_state.r2_micro_feed_source = DATA_FEED_YFINANCE_1M
+            st.session_state.polygon_lockout = True
+            return "THROTTLE"
+        polygon_frame = _polygon_aggs_to_dataframe(polygon_bars)
+        if is_usable_data_stream(polygon_frame):
+            st.session_state.r2_micro_feed_source = DATA_FEED_POLYGON_1M
+            return polygon_frame
+        st.session_state.r2_micro_feed_source = DATA_FEED_YFINANCE_1M
+
+    data_stream = _download_yfinance_bars(
+        ticker_clean, yf_interval, micro_fast_track=micro_fast_track
+    )
 
     if (
         data_stream is None
         and not force_yfinance_only
+        and not micro_fast_track
         and yf_interval == "15m"
     ):
         start_date = (now - datetime.timedelta(days=730)).strftime("%Y-%m-%d")
@@ -554,7 +844,9 @@ def _get_historical_interval_data_impl(
             }
             return "THROTTLE"
         if is_usable_data_stream(polygon_bars):
-            data_stream = polygon_bars
+            polygon_frame = _polygon_aggs_to_dataframe(polygon_bars)
+            if is_usable_data_stream(polygon_frame):
+                data_stream = polygon_frame
 
     if is_usable_data_stream(data_stream) and update_institutional_tracker:
         try:
@@ -929,6 +1221,8 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
         "macro_weather_layout",
         "execution_strategy",
         "buffer_context_window",
+        "vault_track",
+        "data_feed_mode",
         "state",
         "deleted_at",
     )
@@ -1039,6 +1333,7 @@ def calculate_quantum_frequencies(
 
     duration_label = _format_session_duration(start_dt, end_dt)
     velocity = _compute_price_velocity_metrics(data_stream)
+    st.session_state.room2_last_velocity = velocity
 
     micro_block = None
     if _is_compressed_variance(data_stream) and resolved_ticker:
@@ -1119,6 +1414,9 @@ def build_vault_payload(
     macro_weather_layout: str = "",
     execution_strategy: str = "",
     buffer_context_window: str = "",
+    vault_track: str = "track_1_validated",
+    vault_state: str = "active",
+    data_feed_mode: str = "carousel_15s",
 ) -> dict:
     """Package Room 2 deck parameters for Internet Vault streaming."""
     return {
@@ -1135,6 +1433,8 @@ def build_vault_payload(
         "macro_weather_layout": macro_weather_layout,
         "execution_strategy": execution_strategy,
         "buffer_context_window": buffer_context_window,
+        "vault_track": vault_track,
+        "data_feed_mode": data_feed_mode,
         "polygon_calls_remaining": _polygon_calls_remaining(),
         "institutional_block_accumulation": st.session_state.get(
             "forensic_institutional_tracker", {}
@@ -1143,7 +1443,7 @@ def build_vault_payload(
             st.session_state.get("forensic_form4_tracker", {}).get("form4_summary", "")
         ),
         "source_room": "forensic_pattern_lab",
-        "state": "active",
+        "state": vault_state,
         "deleted_at": None,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
