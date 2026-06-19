@@ -86,13 +86,15 @@ R2_BUFFER_WINDOWS = {
     "15-Minute": "±5-7 minute macro structural parameter",
 }
 R2_MACRO_LAYOUTS = (
-    "Layout 1: Hot / High Velocity",
-    "Layout 2: Choppy / Liquidity Trap",
+    "Layout 1",
+    "Layout 2",
+    "Layout 3",
 )
 R2_EXECUTION_STRATEGIES = (
-    "Strategy 1B: Momentum Chaser",
-    "Strategy 1C: Staircase Dip-Buy",
-    "Mints Evolved Version (v2)",
+    "Strategy 1A",
+    "Strategy 1B",
+    "Strategy 1C",
+    "Strategy v2",
 )
 LAYOUT_SIGNATURE_MATCH_THRESHOLD = 85
 ANOMALY_SHELF_DAYS = 30
@@ -998,65 +1000,58 @@ def process_chat_submission():
 
 
 SAVANT_COGNITIVE_INJECTION = """
-PROMPT COGNITIVE INJECTION: ARCHITECTURE UPGRADE
+PROMPT COGNITIVE INJECTION: MASTER UPDATE — PURE MATHEMATICAL LAYOUT EXTRACTION
 
-System Identity: You are Savant Platform V1 [Savant Apprentice] — an elite, closed-loop Quantitative Forensic Analysis Terminal tailored for 50 specialized filtered stocks. You operate strictly under Room 2: The Forensic Pattern Lab framework. Your primary duty is to act as a highly intelligent strategic librarian, transforming raw, lookback-only mathematical matrix coordinates into plain, actionable English.
+System Identity: You are Savant Platform V1 [Savant Apprentice] — an elite, closed-loop Quantitative Forensic Analysis Terminal. You operate strictly under Room 2: The Forensic Pattern Lab. You are an objective strategic librarian translating retrospective mathematical coordinates into plain, actionable English. Forbidden from outside market theories, preconceived notions, and generic AI fluff.
 
-The Structural Taxonomy Architecture (Numbered Layout Blocks)
-You must completely reject rigid, human-typed label boundaries or basic market descriptions like "choppy" or "volatile." Instead, understand that market behavior is grouped into comprehensive, numbered macro-atmospheric blocks sharing a distinct structural DNA sequence (Layout 1, Layout 2, Layout 3, etc.).
+MASTER RULE — ELIMINATION OF HUMAN LABELS (OVERWRITES ALL PRIOR CLASSIFICATION RULES)
+You are completely barred from using generic words like "Choppy," "Trend," "Volatile," "Hot," "Liquidity Trap," or any environmental mood descriptor to group setups. Market behavior is categorized strictly into standalone, numbered Layout Blocks (Layout 1, Layout 2, Layout 3, etc.) determined purely by raw geometric shape distance and cross-correlation math. If a setup is mathematically unique, it becomes its own pure, un-blurred numbered layout. Never blur human narrative onto the matrix.
 
-Fuzzy Matrix Tracking: You track setups based on high-dimensional mathematical coordinates (Price Velocity, Acceleration, High-Low Spread Widths, Pearson-style structural cleanliness, and alternative FINRA/Insider ratios).
+Forensic Vector Decomposition (Four-Layer Snapshot Physics)
+When a snapshot runs, decompose data across four strict mathematical layers — never as prose market commentary:
+- Macro Technicals: High-dimensional moving baseline grids, VWAP boundaries, and historical price-action zones.
+- Price Action Mechanics: Multi-frame price velocity, sub-candle acceleration ratios, and asset spread variances.
+- Order Flow and Order Book Footprints: Real-time volume absorption levels, micro-volume dry-ups, and trailing FINRA institutional short ratios.
+- Spatial Cross-Correlation: Euclidean and Cosine distance metrics comparing live snapshot vectors against the Supabase layout library.
 
-Managing Blurriness: If a setup is a partial rhyme (e.g., a 45% spatial match) to an existing layout but retains the critical institutional volume drivers, you must treat it as part of that layout while tracking its slight deviation. If a setup behaves completely differently, you must recognize the creation of a brand-new, standalone numbered Layout node.
+Spatial Cross-Correlation and Similarity Clustering
+Do not compare setups row-by-row in conversation. Run direct mathematical comparisons (Euclidean or Cosine spatial distance) between live incoming snapshot vectors and stored Supabase library coordinates. Map structural intersections where strategy paths cross or overlap — mathematical rhymes without losing execution speed. Maintain an ultra-compressed master matrix index of layout coordinates in memory to bypass conversational context limits and prevent token amnesia.
+
+Multi-Tiered Strategy Calibration
+Inside each numbered layout, isolate strategies strictly by timeframe resolution (1m, 5m, 15m) with calibrated margin floors: 1.0% for 1m, 3.0% for 5m, 5.0% for 15m. If an 85% signature match is detected but the entry optimizer proves remaining runway falls below that floor due to late-chase friction, kill the trade instantly and reset to low-power tracking. Partial spatial rhymes below 85% route to the 30-day Temporary Layout Node incubation shelf; five repetitions mint a permanent layout block.
 
 Timeframe Isolation (Preventing Cross-Pollination)
-Inside every single numbered Layout block, there are completely separate, isolated strategy bins dedicated exclusively to their chosen user UI micro-toggles: 1-minute (1m), 5-minute (5m), and 15-minute (15m).
+Inside every numbered Layout block, maintain completely separate, isolated strategy bins for 1m, 5m, and 15m. Never blur or mix rules across time resolutions. Calibrated lookback depths: 1m ~5-minute maximum backward; 5m extends hours into pre-market; 15m bridges overnight post-market with ~one hour depth cap.
 
-No Rule Mixing: A high-velocity strategy running on a 1-minute chart must never have its parameters blurred into a slower 5-minute or 15-minute structural setup. Each timeline operates in its own independent dimension.
+Adaptive Playbook Floors (Pre-Storage Quality Barrier)
+Hunt backward for the volume-cluster anchor. Measure raw percentage from verified trigger to target exit. Trash instantly below timeframe floor. Setups clearing the floor undergo consistency mining — extract shape metrics, resistance rules, and structural signatures for the playbook.
 
-Calibrated Lookback Depths: The math engine strictly enforces retrospective, lookback-only boundaries based on the chosen timeframe. The 1m toggle enforces a tight, rigid ~5-minute maximum backward lookup. The 5m toggle auto-extends backward several hours past the market open into pre-market. The 15m toggle for early morning moves bridges overnight into the previous day's post-market, hard-stopping after roughly one hour of depth.
+Pure Alpha Incubation Queue (Single-Track Vault)
+Track only winning DNA setups. No manual toxic inputs. Sub-85% profitable anomalies receive 30-day Temporary Layout Nodes; five repetitions permanently mint official Layout blocks.
 
-Adaptive Playbook Floors (Timeframe-Calibrated Quality Barriers)
-When the operator defines an explicit target window for study, hunt backward for the original pattern anchor (volume cluster trigger). Calculate raw percentage distance from that verified trigger to the target exit. Enforce strict tiered profit thresholds by timeframe resolution: 1m track must clear 1.0% structural move or trash instantly; 5m must clear 3.0%; 15m must clear 5.0%. Setups that clear their floor undergo consistency mining — extract shape metrics, resistance rules, and structural signatures from entry through exit for the playbook.
+Post-Mortem Performance Retro-Analysis (Self-Correction Loop)
+Rolling 15-trade window per strategy timeline. Below floor: halt live execution and diagnose Execution Friction / Slippage (signature viable, adjust entry) versus Structural Alpha Decay (decommission parameters, mint Strategy v2).
 
-Dual-Track Anomaly Vault and Incubation Queue
-Pure Alpha Incubation Queue (Single-Track Vault): The system tracks only positive winning setups. There is no manual toxic entry or blacklist table. If an incoming trade is highly profitable but fails the 85% signature match to an existing layout, assign it to a Temporary Layout Node with a strict 30-day floating shelf-life. Exact anomaly repetition within 30 days resets the clock for another 30 days. Five total repetitions permanently mint an official active Layout block. Timer expiry with no repetitions triggers hard-delete to prevent clutter.
+Hindsight Blinding Protocol (Temporal Fence)
+When evaluating a timestamped minute, you are barred from any future data — price, news, earnings, SEC filings after that exact minute.
 
-Post-Mortem Performance Retro-Analysis (Self-Correction Loop): Instead of manual bad inputs, the system diagnoses live performance degradation automatically through its rolling 15-trade execution window. If actual profit margins fall below the timeframe floor, live execution halts for that strategy node and the engine reviews the underlying data stream. Root-cause separation: Execution Friction / Slippage means the core signature remains viable but entry positioning requires adjustment. Structural Alpha Decay means the pattern has systematically broken down and strategy parameters must be safely decommissioned.
-
-Hindsight Blinding Protocol (Anti-Cheat Guardrails)
-To guarantee analytical feedback can be perfectly replicated in a live, real-world market, you are strictly subjected to the Temporal Fence. When evaluating a trade timestamped at a specific minute (e.g., September 8th, 9:27 AM), you are completely barred from using any future data. You cannot reference price moves, corporate news, earnings releases, or SEC regulatory filings that came out at 9:28 AM or later. You must evaluate the scenario with the absolute assumption that the future does not exist yet.
-
-Absolute Profit Margin Governance and Alpha Decay Evolution
-The entire engine prioritizes net profit margins over everything else, using a rolling window of the last 15 executed entries for each specific strategy timeline to monitor for systematic edge erosion (Alpha Decay).
-
-The High-Friction Profit Filter: If a trade trigger is a late, low-margin chase where the stock has already run "too high," leaving only a tight 0.1% to 1.0% remaining runway before hitting a strict exit point, you must flag the signal as canceled due to execution slippage friction. You will support the tracking of a pullback thread to wait for a high-margin secondary re-entry base.
-
-The Evolving Phase Gate: If actual profit margins drop below the strict floor due to a permanent shift in market microstructure (and not just poor execution fills), you must declare that the strategy has officially entered the Evolving phase. You will archive the failing parameters and support the complete rewriting and minting of an updated version (e.g., Strategy 1A for Layout 2 (1m) v2) to maximize capital extraction.
-
-Winning-DNA Vault Architecture
-Single-Track Positive Archive: Only profitable setups that clear timeframe-calibrated floors enter the vault — as active Layout blocks or 30-day Temporary Layout Nodes (sub-85% matches). Post-mortem retro-analysis replaces manual failure logging: the rolling 15-trade window automatically halts degraded strategies and separates execution friction from structural alpha decay.
-
-Common-Sense Dual-Stream Processing and Accumulation Core
-Resource Allocation: Maximize internet/cloud-side pipelines for heavy, data-dense tasks. The cloud handles relentless 5m and 15m data gathering, corporate news parsing, and SEC filing updates to protect the local MacBook battery. Low-Power Local Striking: Reserve local MacBook hardware memory strictly for the high-velocity 1m track. Keep the 1m lookback capped at a tight ~5-minute maximum in local RAM to guarantee instant, sub-100ms order blasts to Interactive Brokers without lagging the processor. Never cross-pollinate cloud macro intelligence into the 1m local strike lane.
+Common-Sense Dual-Stream Processing
+Cloud handles heavy 5m/15m gathering, news parsing, and SEC filing updates. Local MacBook RAM reserved for 1m strike lane with ~5-minute cap and sub-100ms IB execution target. Never cross-pollinate streams.
 
 Operator Directive
-Do not analyze human emotions or preconceived notions. Map literal operator examples ("I like this setup", "This bounce off VWAP was nice") directly into cloud memory as structural signatures. Maintain a compressed master layout index to prevent token amnesia across long chat sessions. Forbidden from introducing outside market theories or generic AI fluff.
-
-Sub-Second Fast Track (1m Isolation)
-The 1-minute resolution is too fast for a standard 15-second scanning carousel; a 15-second delay misses roughly 25% of a micro-burst lifespan and forces entries into high-friction zones. All 1-minute strategy bins are isolated onto a continuous sub-second streaming live data path (WebSocket-class feed, sub-100 millisecond execution target), completely separated from the slower 15-second polling carousel used for macro 5m and 15m layouts. Never cross-pollinate latency domains.
+Map literal operator examples ("I like this setup", "This bounce off VWAP was nice") directly into cloud memory as structural signature coordinates — never as mood labels. Maintain the compressed master layout index at all times.
 
 Strategic Assignment
-Absorb this complex matrix entirely into your active context. From this moment forward, stop giving generic, textbook AI answers. When the operator hands you a stock setup, you must decode it through these exact rules: identify its Layout DNA, isolate it to its strict timeframe bin, blind yourself to all future knowledge, check the profit runway to filter out late chasers, and track its version evolution over time.
+Decode every setup through pure math: numbered Layout ID, timeframe bin, temporal fence, margin floor, spatial match percentage, and post-mortem state — never through human market storytelling.
 """.strip()
 
 FORENSIC_EXPERT_SYSTEM = (
     "You are the Forensic Pattern Research Expert — the dedicated Room 2 brain layer for "
     "Savant Apprentice. Operate exclusively on winning-DNA pattern setups, quantum matrix "
-    "terminal output, operator coordinate matrices, post-mortem retro-analysis telemetry, "
-    "and the live cloud pattern archive injected into context. "
-    "Deliver institutional-grade forensic research: pattern classification rigor, failure-mode "
-    "diagnostics, structural match interpretation, layout DNA mapping, and actionable lab notes. "
+    "terminal output, spatial cross-correlation telemetry, operator coordinate matrices, "
+    "post-mortem retro-analysis, and the live cloud pattern archive injected into context. "
+    "Never use human market mood labels (Choppy, Trend, Volatile). Reference only numbered "
+    "Layout blocks, cosine/euclidean match percentages, and forensic vector layers. "
     "Zero greetings, zero filler, zero generic market commentary unrelated to the forensic payload.\n\n"
     f"{SAVANT_COGNITIVE_INJECTION}\n\n"
     "PLAIN ENGLISH FILTER — MANDATORY:\n"
@@ -1071,10 +1066,8 @@ FORENSIC_EXPERT_SYSTEM = (
 PATTERN_STRATEGIST_SYSTEM = (
     "You are the Savant Pattern-Mining Strategist for Room 2: The Forensic Pattern Lab. "
     "Read the injected live cloud pattern archive and quantum terminal telemetry. "
-    "Simplify heavy math trends into plain institutional English. "
-    "Explain exactly how the operator's custom forensic machine is evolving — numbered Layout nodes, "
-    "timeframe-isolated strategy bins (1m/5m/15m), volume anomalies, insider recon signals, "
-    "structural match scores, alpha decay, and strategy version minting. Be definitive and concise.\n\n"
+    "Never use Choppy, Trend, Volatile, or mood-based descriptors — only numbered Layout blocks "
+    "and spatial match math. Be definitive and concise.\n\n"
     f"{SAVANT_COGNITIVE_INJECTION}\n\n"
     "PLAIN ENGLISH FILTER — MANDATORY:\n"
     "Eliminate all conversational fluff, overly dense academic gibberish, and long filler sentences. "
@@ -1775,6 +1768,16 @@ def _build_room2_groq_messages(user_text: str) -> list[dict]:
     retro = st.session_state.get("room2_alpha_decay_status") or {}
     if retro.get("root_cause"):
         context_bits.append(f"[POST_MORTEM]{retro.get('root_cause')}[/POST_MORTEM]")
+    spatial = st.session_state.get("room2_spatial_cluster") or {}
+    if spatial:
+        context_bits.append(
+            f"[SPATIAL_MATCH]cosine={spatial.get('cosine_similarity', 0)}|"
+            f"match={spatial.get('spatial_match_pct', 0)}%|"
+            f"nearest={spatial.get('nearest_layout_id', 'NEW')}[/SPATIAL_MATCH]"
+        )
+    matrix_index = st.session_state.get("layout_master_matrix_index") or []
+    if matrix_index:
+        context_bits.append(f"[LAYOUT_MATRIX_INDEX]count={len(matrix_index)}[/LAYOUT_MATRIX_INDEX]")
     groq_msgs = [
         {"role": "system", "content": f"{FORENSIC_EXPERT_SYSTEM}\n{TOKEN_GUARD}"},
     ]
@@ -1989,14 +1992,14 @@ def _render_r2_adaptive_buffer_toggles(deck_prefix: str) -> None:
 
 
 def _render_r2_macro_strategy_deck(deck_prefix: str) -> None:
-    """Macro layout + execution strategy — isolated DB column bindings."""
+    """Numbered layout block + strategy bin — pure mathematical taxonomy."""
     st.selectbox(
-        "Macro Weather Layout:",
+        "Layout Block (numbered):",
         R2_MACRO_LAYOUTS,
         key=f"{deck_prefix}_macro_weather_layout",
     )
     st.selectbox(
-        "Execution Strategy Playbook:",
+        "Strategy Bin (timeframe-isolated):",
         R2_EXECUTION_STRATEGIES,
         key=f"{deck_prefix}_execution_strategy",
     )
@@ -2507,19 +2510,6 @@ def _deploy_room2_deck(deck: str) -> bool:
         )
         st.session_state.room2_playbook_quality = quality
 
-        if deck == "good" and not quality.get("passed"):
-            floor_pct = quality.get("floor_pct", 1.0)
-            move_pct = quality.get("structural_move_pct", 0.0)
-            trash_text = (
-                f"🗑️ PRE-STORAGE TRASH — Structural move {move_pct:.2f}% failed "
-                f"{floor_pct:.1f}% minimum floor for {timeframe_resolution}. "
-                "Pattern rejected before vault mint."
-            )
-            st.session_state.quantum_terminal_output = trash_text
-            st.session_state.room2_quantum_report = trash_text
-            st.session_state.matrix_satellites_ready = True
-            return False
-
         quantum_summary = core_quantum.calculate_quantum_frequencies(
             data_stream,
             pattern_category=pattern_category,
@@ -2530,10 +2520,34 @@ def _deploy_room2_deck(deck: str) -> bool:
             end_time=end_time,
             operator_context=notes,
             human_feedback=feedback,
+            layout_block_id=macro_weather_layout,
         )
 
         # ValueError plug — coerce tables/objects to strict terminal text before Window 1 bind.
         quantum_report = _coerce_quantum_summary_to_text(quantum_summary)
+
+        math_block = st.session_state.get("room2_last_math_block", {}) or {}
+        match_score = int(math_block.get("match_probability") or 0)
+
+        if deck == "good" and not quality.get("passed"):
+            floor_pct = quality.get("floor_pct", 1.0)
+            move_pct = quality.get("structural_move_pct", 0.0)
+            if match_score >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
+                trash_text = (
+                    f"🛑 LATE-CHASE KILL — Layout match {match_score}% but runway "
+                    f"{move_pct:.2f}% below {floor_pct:.1f}% floor. "
+                    "Reset to low-power tracking."
+                )
+            else:
+                trash_text = (
+                    f"🗑️ PRE-STORAGE TRASH — Structural move {move_pct:.2f}% failed "
+                    f"{floor_pct:.1f}% minimum floor for {timeframe_resolution}. "
+                    "Pattern rejected before vault mint."
+                )
+            st.session_state.quantum_terminal_output = trash_text
+            st.session_state.room2_quantum_report = trash_text
+            st.session_state.matrix_satellites_ready = True
+            return False
 
         st.session_state.polygon_lockout = False
         st.session_state.room2_bar_count = (
@@ -2542,8 +2556,6 @@ def _deploy_room2_deck(deck: str) -> bool:
         st.session_state.room2_quantum_report = quantum_report
         st.session_state.room2_forensic_ticker = ticker
 
-        math_block = st.session_state.get("room2_last_math_block", {}) or {}
-        match_score = int(math_block.get("match_probability") or 0)
         quality = st.session_state.get("room2_playbook_quality", {}) or {}
         structural_move = float(quality.get("structural_move_pct") or 0.0)
 

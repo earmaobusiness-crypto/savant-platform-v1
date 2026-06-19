@@ -1353,6 +1353,92 @@ def _analyze_5m_micro_traps(data_5m, ticker: str) -> dict:
     }
 
 
+def extract_forensic_feature_vector(velocity: dict, math_block: dict) -> list[float]:
+    """Four-layer snapshot vector for spatial cross-correlation against layout library."""
+    return [
+        float(velocity.get("session_velocity_pct", 0.0)),
+        float(velocity.get("peak_bar_velocity_pct", 0.0)),
+        float(velocity.get("mean_bar_velocity_pct", 0.0)),
+        float(velocity.get("window_amplitude_pct", 0.0)),
+        float(math_block.get("pearson_r", 0.0)),
+        float(math_block.get("wave_amplitude_pct", 0.0)),
+        min(float(math_block.get("bar_count", 0)) / 100.0, 10.0),
+    ]
+
+
+def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return 0.0
+    dot = sum(a * b for a, b in zip(vec_a, vec_b))
+    norm_a = sum(a * a for a in vec_a) ** 0.5
+    norm_b = sum(b * b for b in vec_b) ** 0.5
+    if norm_a <= 0 or norm_b <= 0:
+        return 0.0
+    return max(0.0, min(1.0, dot / (norm_a * norm_b)))
+
+
+def _euclidean_distance(vec_a: list[float], vec_b: list[float]) -> float:
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return 999.0
+    return sum((a - b) ** 2 for a, b in zip(vec_a, vec_b)) ** 0.5
+
+
+def compute_spatial_layout_match(
+    snapshot_vec: list[float],
+    library: list[dict] | None = None,
+) -> dict:
+    """Cosine/Euclidean spatial clustering vs compressed master matrix index."""
+    library = library or list(st.session_state.get("layout_master_matrix_index", []))
+    best_cosine = 0.0
+    best_euclidean = 999.0
+    nearest_layout = "NEW_LAYOUT"
+    for entry in library:
+        stored = entry.get("vector") or []
+        cos = _cosine_similarity(snapshot_vec, stored)
+        euc = _euclidean_distance(snapshot_vec, stored)
+        if cos > best_cosine:
+            best_cosine = cos
+            best_euclidean = euc
+            nearest_layout = str(entry.get("layout_id") or "LAYOUT")
+    spatial_pct = int(round(best_cosine * 100))
+    return {
+        "spatial_match_pct": spatial_pct,
+        "cosine_similarity": round(best_cosine, 4),
+        "euclidean_distance": round(best_euclidean, 4),
+        "nearest_layout_id": nearest_layout,
+    }
+
+
+def register_layout_vector_in_master_index(
+    *,
+    layout_id: str,
+    vector: list[float],
+    ticker: str,
+    timeframe_resolution: str,
+) -> None:
+    """Ultra-compressed master matrix index — prevents layout token amnesia."""
+    index = list(st.session_state.get("layout_master_matrix_index", []))
+    index.insert(
+        0,
+        {
+            "layout_id": layout_id,
+            "vector": vector,
+            "ticker": str(ticker).upper(),
+            "timeframe_resolution": timeframe_resolution,
+        },
+    )
+    st.session_state.layout_master_matrix_index = index[:48]
+
+
+def _geometric_delta_sign(delta: float) -> str:
+    """Pure geometric sign — no human trend vocabulary."""
+    if delta > 0:
+        return "GEOM+"
+    if delta < 0:
+        return "GEOM-"
+    return "GEOM0"
+
+
 def _local_pattern_math(
     data_stream,
     pattern_category,
@@ -1370,7 +1456,7 @@ def _local_pattern_math(
     amplitude = 0.0
     pearson_r = 0.0
     bar_count = 0
-    trend_bias = "NEUTRAL"
+    trend_bias = "GEOM0"
 
     if series is not None:
         if pd is not None and isinstance(series, pd.Series):
@@ -1383,38 +1469,25 @@ def _local_pattern_math(
                 if len(aligned) >= 3 and aligned.std() > 0 and benchmark.std() > 0:
                     pearson_r = float(aligned.corr(benchmark))
             delta = float(series.iloc[-1] - series.iloc[0])
-            if delta > 0:
-                trend_bias = "BULLISH"
-            elif delta < 0:
-                trend_bias = "BEARISH"
+            trend_bias = _geometric_delta_sign(delta)
         elif isinstance(series, list):
             bar_count = len(series)
             if bar_count >= 2:
                 amplitude = _wave_amplitude_pct(series)
                 delta = series[-1] - series[0]
-                trend_bias = "BULLISH" if delta > 0 else "BEARISH" if delta < 0 else "NEUTRAL"
+                trend_bias = _geometric_delta_sign(delta)
 
     category = (pattern_category or "UNCLASSIFIED").strip().upper()
-    category_weights = {
-        "BREAKOUT": 1.08,
-        "REVERSAL": 1.04,
-        "CONTINUATION": 1.06,
-        "DISTRIBUTION": 0.98,
-        "ACCUMULATION": 1.02,
-    }
-    category_factor = category_weights.get(category, 1.0)
+    category_factor = 1.0
     structural_score = min(
         99,
         max(
             52,
             int(
-                (
-                    62
-                    + (abs(pearson_r) * 18)
-                    + min(amplitude, 12)
-                    + (6 if trend_bias != "NEUTRAL" else 0)
-                )
-                * category_factor
+                62
+                + (abs(pearson_r) * 18)
+                + min(amplitude, 12)
+                + (6 if trend_bias != "GEOM0" else 0)
             ),
         ),
     )
@@ -1425,9 +1498,9 @@ def _local_pattern_math(
         realized_move = None
 
     quantum_report = (
-        f"MacBook Quant Chip | Category: {category} | Bars: {bar_count} | "
+        f"Quant Matrix | Layout-Class: {category} | Bars: {bar_count} | "
         f"Wave Amplitude: {amplitude:.2f}% | Pearson r: {pearson_r:.3f} | "
-        f"Trend Bias: {trend_bias} | Structural Match: {structural_score}% | "
+        f"Geometric Delta: {trend_bias} | Structural Match: {structural_score}% | "
         f"Polygon Calls Remaining: {_polygon_calls_remaining()}/{POLYGON_CALLS_PER_MINUTE}"
     )
     if realized_move is not None:
@@ -1586,8 +1659,9 @@ def _build_matrix_execution_readout(
         "║  STRUCTURAL QUANT CORE                   ║",
         _matrix_row("BARS", str(math_block.get("bar_count", 0))),
         _matrix_row("PEARSON r", f"{math_block.get('pearson_r', 0):.4f}"),
-        _matrix_row("TREND BIAS", str(math_block.get("trend_bias", "NEUTRAL"))),
+        _matrix_row("GEOM DELTA", str(math_block.get("trend_bias", "GEOM0"))),
         _matrix_row("STRUCT MATCH", f"{math_block.get('match_probability', 0)}%"),
+        _matrix_row("COSINE SIM", f"{math_block.get('cosine_similarity', 0):.3f}"),
         _matrix_row(
             "POLYGON SHIELD",
             f"{_polygon_calls_remaining()}/{POLYGON_CALLS_PER_MINUTE} CALLS",
@@ -1693,6 +1767,7 @@ def calculate_quantum_frequencies(
     end_date=None,
     end_time="",
     operator_context="",
+    layout_block_id="",
 ):
     """
     Runs permanent pattern categorization math locally on Mac silicon with adaptive
@@ -1795,6 +1870,25 @@ def calculate_quantum_frequencies(
         form4_block=form4_block,
     )
     st.session_state.room2_last_math_block = math_block
+
+    snapshot_vec = extract_forensic_feature_vector(velocity, math_block)
+    spatial = compute_spatial_layout_match(snapshot_vec)
+    blended_match = max(int(math_block.get("match_probability") or 0), spatial["spatial_match_pct"])
+    math_block["match_probability"] = blended_match
+    math_block["spatial_match_pct"] = spatial["spatial_match_pct"]
+    math_block["cosine_similarity"] = spatial["cosine_similarity"]
+    math_block["euclidean_distance"] = spatial["euclidean_distance"]
+    math_block["nearest_layout_id"] = spatial["nearest_layout_id"]
+    st.session_state.room2_spatial_cluster = spatial
+    st.session_state.room2_last_math_block = math_block
+
+    if layout_block_id or resolved_ticker:
+        register_layout_vector_in_master_index(
+            layout_id=str(layout_block_id or spatial["nearest_layout_id"]),
+            vector=snapshot_vec,
+            ticker=resolved_ticker or "UNKNOWN",
+            timeframe_resolution=str(st.session_state.get("r2_timeframe_mode", "15-Minute")),
+        )
 
     return _build_matrix_execution_readout(
         ticker=resolved_ticker or "UNKNOWN",
