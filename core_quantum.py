@@ -31,6 +31,9 @@ LOOKBACK_DELTAS = {
     "5-Minute": datetime.timedelta(hours=6),
     "15-Minute": datetime.timedelta(hours=1),
 }
+ROOT_CAUSE_FRICTION = "execution_friction_slippage"
+ROOT_CAUSE_STRUCTURAL_DECAY = "structural_alpha_decay"
+EXECUTION_HALTED_STATE = "execution_halted"
 VAULT_STATE_INCUBATION = "incubation"
 DATA_FEED_POLYGON_1M = "polygon_rest_1m"
 DATA_FEED_YFINANCE_1M = "yfinance_1m"
@@ -410,8 +413,10 @@ def record_strategy_execution(
     timeframe_resolution: str,
     margin_pct: float,
     pattern_category: str = "VALIDATED",
+    layout_match_pct: int = 0,
+    structural_move_pct: float = 0.0,
 ) -> tuple[bool, str]:
-    """Append one deploy to the alpha-decay ledger (rolling last 15 per timeline)."""
+    """Append one deploy to the winning-DNA execution ledger (rolling last 15 per timeline)."""
     try:
         supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
         supabase_key = st.secrets["SUPABASE_KEY"]
@@ -430,6 +435,8 @@ def record_strategy_execution(
             timeframe_resolution=timeframe_resolution,
         ),
         "margin_pct": round(float(margin_pct), 4),
+        "layout_match_pct": int(layout_match_pct),
+        "structural_move_pct": round(float(structural_move_pct), 4),
         "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     table = _strategy_executions_table()
@@ -450,16 +457,163 @@ def record_strategy_execution(
         return False, str(exc)[:120]
 
 
-def _append_local_alpha_decay_sample(timeline_key: str, margin_pct: float) -> None:
+def _append_local_alpha_decay_sample(
+    timeline_key: str,
+    margin_pct: float,
+    *,
+    layout_match_pct: int = 0,
+    structural_move_pct: float = 0.0,
+) -> None:
     session_key = f"alpha_decay_local::{timeline_key}"
     bucket = list(st.session_state.get(session_key, []))
-    bucket.insert(0, abs(float(margin_pct)))
+    bucket.insert(
+        0,
+        {
+            "margin_pct": abs(float(margin_pct)),
+            "layout_match_pct": int(layout_match_pct),
+            "structural_move_pct": float(structural_move_pct),
+        },
+    )
     st.session_state[session_key] = bucket[:ALPHA_DECAY_ROLLING_N]
+
+
+def _fetch_execution_samples(
+    *,
+    macro_weather_layout: str,
+    execution_strategy: str,
+    timeframe_resolution: str,
+) -> list[dict]:
+    """Pull rolling execution samples for post-mortem retro-analysis."""
+    timeline_key = _strategy_timeline_key(
+        macro_weather_layout=macro_weather_layout,
+        execution_strategy=execution_strategy,
+        timeframe_resolution=timeframe_resolution,
+    )
+    samples: list[dict] = []
+    try:
+        supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+        supabase_key = st.secrets["SUPABASE_KEY"]
+        table = _strategy_executions_table()
+        resp = requests.get(
+            f"{supabase_url}/rest/v1/{table}"
+            f"?timeline_key=eq.{urllib.parse.quote(timeline_key, safe='')}"
+            f"&select=margin_pct,layout_match_pct,structural_move_pct"
+            f"&order=recorded_at.desc&limit={ALPHA_DECAY_ROLLING_N}",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+            },
+            timeout=12,
+        )
+        if resp.ok:
+            for row in resp.json():
+                try:
+                    samples.append(
+                        {
+                            "margin_pct": abs(float(row.get("margin_pct", 0))),
+                            "layout_match_pct": int(row.get("layout_match_pct") or 0),
+                            "structural_move_pct": float(row.get("structural_move_pct") or 0),
+                        }
+                    )
+                except (TypeError, ValueError):
+                    pass
+    except Exception:
+        pass
+    if not samples:
+        session_key = f"alpha_decay_local::{timeline_key}"
+        raw = st.session_state.get(session_key, [])
+        for item in raw:
+            if isinstance(item, dict):
+                samples.append(item)
+            else:
+                samples.append({"margin_pct": abs(float(item)), "layout_match_pct": 0, "structural_move_pct": 0})
+    return samples
+
+
+def diagnose_post_mortem_retro_analysis(
+    *,
+    macro_weather_layout: str,
+    execution_strategy: str,
+    timeframe_resolution: str,
+) -> dict:
+    """
+    Rolling 15-trade post-mortem: halt live execution when below floor and
+    separate execution friction from structural alpha decay.
+    """
+    floor_pct = timeframe_margin_floor(timeframe_resolution)
+    samples = _fetch_execution_samples(
+        macro_weather_layout=macro_weather_layout,
+        execution_strategy=execution_strategy,
+        timeframe_resolution=timeframe_resolution,
+    )
+    margins = [s["margin_pct"] for s in samples]
+    count = len(margins)
+    avg_margin = round(sum(margins) / count, 4) if count else 0.0
+    halt_live = count >= ALPHA_DECAY_ROLLING_N and avg_margin < floor_pct
+
+    root_cause = None
+    diagnosis = ""
+    status = "STABLE"
+
+    if halt_live:
+        status = EXECUTION_HALTED_STATE
+        recent = margins[:5]
+        older = margins[5:ALPHA_DECAY_ROLLING_N]
+        avg_struct = (
+            sum(s.get("structural_move_pct", 0) for s in samples) / count if count else 0.0
+        )
+        avg_match = (
+            sum(s.get("layout_match_pct", 0) for s in samples) / count if count else 0.0
+        )
+        recent_avg = sum(recent) / len(recent) if recent else 0.0
+        older_avg = sum(older) / len(older) if older else avg_margin
+
+        if (
+            avg_struct >= floor_pct
+            and avg_match >= 70
+            and recent_avg < floor_pct
+            and older_avg >= floor_pct
+        ):
+            root_cause = ROOT_CAUSE_FRICTION
+            diagnosis = (
+                "Live execution HALTED — post-mortem: execution friction / slippage. "
+                "Core signature remains viable; adjust entry window positioning."
+            )
+        else:
+            root_cause = ROOT_CAUSE_STRUCTURAL_DECAY
+            diagnosis = (
+                "Live execution HALTED — post-mortem: structural alpha decay. "
+                "Pattern systematically broken; decommission parameters and mint Strategy v2."
+            )
+    elif count >= ALPHA_DECAY_ROLLING_N and avg_margin < floor_pct:
+        status = "EVOLVING"
+    elif count >= 5:
+        status = "WATCH"
+
+    timeline_key = _strategy_timeline_key(
+        macro_weather_layout=macro_weather_layout,
+        execution_strategy=execution_strategy,
+        timeframe_resolution=timeframe_resolution,
+    )
+    return {
+        "status": status,
+        "timeline_key": timeline_key,
+        "sample_count": count,
+        "avg_margin_pct": avg_margin,
+        "floor_pct": floor_pct,
+        "window": ALPHA_DECAY_ROLLING_N,
+        "evolving": status in (EXECUTION_HALTED_STATE, "EVOLVING"),
+        "halt_live_execution": halt_live,
+        "root_cause": root_cause,
+        "diagnosis": diagnosis,
+    }
 
 
 def log_strategy_execution_with_fallback(**kwargs) -> dict:
     """Record execution to Supabase; mirror into session if cloud table missing."""
     margin_pct = float(kwargs.get("margin_pct") or 0.0)
+    layout_match_pct = int(kwargs.get("layout_match_pct") or 0)
+    structural_move_pct = float(kwargs.get("structural_move_pct") or 0.0)
     timeline_key = _strategy_timeline_key(
         macro_weather_layout=kwargs.get("macro_weather_layout", ""),
         execution_strategy=kwargs.get("execution_strategy", ""),
@@ -467,14 +621,20 @@ def log_strategy_execution_with_fallback(**kwargs) -> dict:
     )
     ok, _detail = record_strategy_execution(**kwargs)
     if not ok:
-        _append_local_alpha_decay_sample(timeline_key, margin_pct)
-    decay = evaluate_alpha_decay(
+        _append_local_alpha_decay_sample(
+            timeline_key,
+            margin_pct,
+            layout_match_pct=layout_match_pct,
+            structural_move_pct=structural_move_pct,
+        )
+    retro = diagnose_post_mortem_retro_analysis(
         macro_weather_layout=kwargs.get("macro_weather_layout", ""),
         execution_strategy=kwargs.get("execution_strategy", ""),
         timeframe_resolution=kwargs.get("timeframe_resolution", ""),
     )
-    decay["logged_to_cloud"] = ok
-    return decay
+    retro["logged_to_cloud"] = ok
+    st.session_state.room2_live_execution_halted = retro.get("halt_live_execution", False)
+    return retro
 
 
 def evaluate_alpha_decay(

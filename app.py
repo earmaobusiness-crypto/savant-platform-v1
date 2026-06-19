@@ -1020,7 +1020,9 @@ Adaptive Playbook Floors (Timeframe-Calibrated Quality Barriers)
 When the operator defines an explicit target window for study, hunt backward for the original pattern anchor (volume cluster trigger). Calculate raw percentage distance from that verified trigger to the target exit. Enforce strict tiered profit thresholds by timeframe resolution: 1m track must clear 1.0% structural move or trash instantly; 5m must clear 3.0%; 15m must clear 5.0%. Setups that clear their floor undergo consistency mining — extract shape metrics, resistance rules, and structural signatures from entry through exit for the playbook.
 
 Dual-Track Anomaly Vault and Incubation Queue
-If incoming behavior fails the 85% signature match to an existing layout, split into two tracks. Track 1 — Good Alpha Anomalies: desirable setups that clear their timeframe floor but lack a layout group receive a Temporary Layout Node with a strict 30-day floating shelf-life. Exact anomaly repetition within 30 days resets the clock for another 30 days. Five total repetitions permanently mint an official active Layout block. Timer expiry with no repetitions triggers hard-delete to prevent clutter. Track 2 — Toxic Traps: high-friction chases, failed entries, and institutional traps bypass the 30-day clock entirely and mint permanently to the Blacklist Signature Index.
+Pure Alpha Incubation Queue (Single-Track Vault): The system tracks only positive winning setups. There is no manual toxic entry or blacklist table. If an incoming trade is highly profitable but fails the 85% signature match to an existing layout, assign it to a Temporary Layout Node with a strict 30-day floating shelf-life. Exact anomaly repetition within 30 days resets the clock for another 30 days. Five total repetitions permanently mint an official active Layout block. Timer expiry with no repetitions triggers hard-delete to prevent clutter.
+
+Post-Mortem Performance Retro-Analysis (Self-Correction Loop): Instead of manual bad inputs, the system diagnoses live performance degradation automatically through its rolling 15-trade execution window. If actual profit margins fall below the timeframe floor, live execution halts for that strategy node and the engine reviews the underlying data stream. Root-cause separation: Execution Friction / Slippage means the core signature remains viable but entry positioning requires adjustment. Structural Alpha Decay means the pattern has systematically broken down and strategy parameters must be safely decommissioned.
 
 Hindsight Blinding Protocol (Anti-Cheat Guardrails)
 To guarantee analytical feedback can be perfectly replicated in a live, real-world market, you are strictly subjected to the Temporal Fence. When evaluating a trade timestamped at a specific minute (e.g., September 8th, 9:27 AM), you are completely barred from using any future data. You cannot reference price moves, corporate news, earnings releases, or SEC regulatory filings that came out at 9:28 AM or later. You must evaluate the scenario with the absolute assumption that the future does not exist yet.
@@ -1032,9 +1034,8 @@ The High-Friction Profit Filter: If a trade trigger is a late, low-margin chase 
 
 The Evolving Phase Gate: If actual profit margins drop below the strict floor due to a permanent shift in market microstructure (and not just poor execution fills), you must declare that the strategy has officially entered the Evolving phase. You will archive the failing parameters and support the complete rewriting and minting of an updated version (e.g., Strategy 1A for Layout 2 (1m) v2) to maximize capital extraction.
 
-Dual-Track Vault Architecture
-Track 1 (Validated / Alpha Anomaly Incubation): Standard active archive or temporary 30-day incubation nodes for sub-85% layout matches that clear timeframe floors. Subject to Trash Vault retention for operator-initiated cleanup once permanently minted.
-Track 2 (Toxic Trap Preservation): Any setup officially validated as TOXIC — a trap, failed entry, or high-friction chase — bypasses all deletion clocks entirely. These are minted permanently to the Blacklist Signature Index. The system must never forget an institutional trap, even if it occurs only once per year. Toxic blacklist rows are immune to soft-delete, bulk purge, and retention expiry.
+Winning-DNA Vault Architecture
+Single-Track Positive Archive: Only profitable setups that clear timeframe-calibrated floors enter the vault — as active Layout blocks or 30-day Temporary Layout Nodes (sub-85% matches). Post-mortem retro-analysis replaces manual failure logging: the rolling 15-trade window automatically halts degraded strategies and separates execution friction from structural alpha decay.
 
 Operator Directive
 Do not analyze human emotions or preconceived notions. Map literal operator examples ("I like this setup", "This bounce off VWAP was nice") directly into cloud memory as structural signatures. Maintain a compressed master layout index to prevent token amnesia across long chat sessions. Forbidden from introducing outside market theories or generic AI fluff.
@@ -1048,9 +1049,9 @@ Absorb this complex matrix entirely into your active context. From this moment f
 
 FORENSIC_EXPERT_SYSTEM = (
     "You are the Forensic Pattern Research Expert — the dedicated Room 2 brain layer for "
-    "Savant Apprentice. Operate exclusively on validated good-file setups, toxic bad-file "
-    "anomalies, quantum matrix terminal output, operator coordinate matrices, and the live "
-    "cloud pattern archive injected into context. "
+    "Savant Apprentice. Operate exclusively on winning-DNA pattern setups, quantum matrix "
+    "terminal output, operator coordinate matrices, post-mortem retro-analysis telemetry, "
+    "and the live cloud pattern archive injected into context. "
     "Deliver institutional-grade forensic research: pattern classification rigor, failure-mode "
     "diagnostics, structural match interpretation, layout DNA mapping, and actionable lab notes. "
     "Zero greetings, zero filler, zero generic market commentary unrelated to the forensic payload.\n\n"
@@ -1161,25 +1162,13 @@ def _anomaly_incubation_signature(
 def _resolve_anomaly_incubation(
     *,
     ticker: str,
-    pattern_category: str,
-    deck: str,
     timeframe_resolution: str,
     macro_weather_layout: str,
     match_score: int,
 ) -> tuple[str, str, int, str, str]:
     """
-    Track 1 alpha anomaly incubation vs permanent layout mint.
-    Returns vault_track, vault_state, repeat_count, shelf_expires_at, status_message.
+    Pure alpha incubation — Temporary Layout Node shelf (30-day / 5-repeat permanent mint).
     """
-    if pattern_category == "TOXIC_ANOMALY" or deck != "good":
-        return (
-            VAULT_TRACK_TOXIC_BLACKLIST if pattern_category == "TOXIC_ANOMALY" else VAULT_TRACK_VALIDATED,
-            BLACKLIST_SIGNATURE_STATE if pattern_category == "TOXIC_ANOMALY" else "active",
-            0,
-            "",
-            "",
-        )
-
     signature = _anomaly_incubation_signature(ticker, timeframe_resolution, macro_weather_layout)
     registry = st.session_state.setdefault("anomaly_incubation_registry", {})
     entry = dict(registry.get(signature, {"count": 0}))
@@ -1204,7 +1193,7 @@ def _resolve_anomaly_incubation(
 
     if vault_state == "active" and repeat_count >= ANOMALY_PERMANENT_MINT_COUNT:
         message = (
-            f"✅ PERMANENT LAYOUT MINT — Good alpha anomaly reached "
+            f"✅ PERMANENT LAYOUT MINT — Winning alpha reached "
             f"{repeat_count}/{ANOMALY_PERMANENT_MINT_COUNT} repetitions. "
             "Promoted to official active Layout block."
         )
@@ -1478,7 +1467,6 @@ def _hydrate_matrix_memory_from_cloud() -> None:
 
     st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
-    st.session_state.matrix_blacklist_count = _count_blacklist_signature_rows()
 
 
 def _fetch_live_cloud_patterns() -> str:
@@ -1758,18 +1746,18 @@ def _build_room2_groq_messages(user_text: str) -> list[dict]:
     )
     if st.session_state.get("purgatory_shelf_active"):
         context_bits.append(
-            f"[PURGATORY]{st.session_state.get('purgatory_shelf_message', '')}[/PURGATORY]"
+            f"[INCUBATION]{st.session_state.get('purgatory_shelf_message', '')}[/INCUBATION]"
         )
     context_bits.append(
         f"[DATA_FEED]{st.session_state.get('r2_data_feed_mode', DATA_FEED_CAROUSEL)}[/DATA_FEED]"
     )
-    context_bits.append(
-        f"[BLACKLIST_INDEX]count={st.session_state.get('matrix_blacklist_count', 0)}[/BLACKLIST_INDEX]"
-    )
     if st.session_state.r2_good_ticker:
         context_bits.append(f"[GOOD_TICKER]{st.session_state.r2_good_ticker}[/GOOD_TICKER]")
-    if st.session_state.r2_bad_ticker:
-        context_bits.append(f"[BAD_TICKER]{st.session_state.r2_bad_ticker}[/BAD_TICKER]")
+    if st.session_state.get("room2_live_execution_halted"):
+        context_bits.append("[EXECUTION_HALTED]TRUE[/EXECUTION_HALTED]")
+    retro = st.session_state.get("room2_alpha_decay_status") or {}
+    if retro.get("root_cause"):
+        context_bits.append(f"[POST_MORTEM]{retro.get('root_cause')}[/POST_MORTEM]")
     groq_msgs = [
         {"role": "system", "content": f"{FORENSIC_EXPERT_SYSTEM}\n{TOKEN_GUARD}"},
     ]
@@ -2010,7 +1998,7 @@ def _evaluate_purgatory_cluster(
 
 def _render_purgatory_shelf() -> None:
     st.markdown(
-        '<div class="room2-terminal-header">▸ THE PURGATORY SHELF</div>',
+        '<div class="room2-terminal-header">▸ THE ALPHA INCUBATION SHELF</div>',
         unsafe_allow_html=True,
     )
     if st.session_state.get("purgatory_shelf_active"):
@@ -2019,8 +2007,8 @@ def _render_purgatory_shelf() -> None:
     else:
         shelf_class = "purgatory-shelf"
         body = (
-            "░ INCUBATION SHELF STANDBY — Sub-85% layout matches with cleared timeframe floors "
-            "mint to Temporary Layout Nodes (30-day shelf). Toxic traps bypass to blacklist."
+            "░ ALPHA INCUBATION STANDBY — Single-track winning-DNA vault. "
+            "Sub-85% profitable anomalies mint to 30-day Temporary Layout Nodes."
         )
     st.markdown(
         f'<div class="{shelf_class}">{escape(body)}</div>',
@@ -2399,11 +2387,9 @@ def _deploy_room2_deck(deck: str) -> bool:
     if deck == "good":
         pattern_category = "VALIDATED"
         notes = st.session_state.get("r2_single_notes_field", "")
-        deck_tag = "VALID_PATTERN"
+        deck_tag = "WINNING_DNA"
     else:
-        pattern_category = "TOXIC_ANOMALY"
-        notes = st.session_state.get("r2_bad_single_notes_field", "")
-        deck_tag = "TOXIC_ANOMALY"
+        return False
 
     feedback = notes.strip()
     if start_time or end_time:
@@ -2543,15 +2529,11 @@ def _deploy_room2_deck(deck: str) -> bool:
         vault_track, vault_state, repeat_count, shelf_expires, incubation_msg = (
             _resolve_anomaly_incubation(
                 ticker=ticker,
-                pattern_category=pattern_category,
-                deck=deck,
                 timeframe_resolution=timeframe_resolution,
                 macro_weather_layout=macro_weather_layout,
                 match_score=match_score,
             )
         )
-        if pattern_category == "TOXIC_ANOMALY":
-            vault_track, vault_state = _resolve_vault_track(pattern_category)
 
         in_purgatory, purgatory_message = _evaluate_purgatory_cluster(
             ticker=ticker,
@@ -2583,11 +2565,7 @@ def _deploy_room2_deck(deck: str) -> bool:
         )
 
         ok, vault_message = core_quantum.stream_payload_to_vault(payload)
-        if pattern_category == "TOXIC_ANOMALY" and ok:
-            vault_line = (
-                f"BLACKLIST SIGNATURE INDEX — permanent Track 2 anchor for {ticker}."
-            )
-        elif pattern_category == "VALIDATED" and ok:
+        if ok and pattern_category == "VALIDATED":
             margin_pct = structural_move or abs(
                 float(
                     (st.session_state.get("room2_last_velocity") or {}).get(
@@ -2595,23 +2573,23 @@ def _deploy_room2_deck(deck: str) -> bool:
                     )
                 )
             )
-            decay = core_quantum.log_strategy_execution_with_fallback(
+            retro = core_quantum.log_strategy_execution_with_fallback(
                 ticker=ticker,
                 macro_weather_layout=macro_weather_layout,
                 execution_strategy=execution_strategy,
                 timeframe_resolution=timeframe_resolution,
                 margin_pct=margin_pct,
                 pattern_category=pattern_category,
+                layout_match_pct=match_score,
+                structural_move_pct=structural_move,
             )
-            st.session_state.room2_alpha_decay_status = decay
-            if vault_state == VAULT_STATE_INCUBATION and incubation_msg:
+            st.session_state.room2_alpha_decay_status = retro
+            if retro.get("halt_live_execution") and retro.get("diagnosis"):
+                vault_line = f"{vault_message} · {retro['diagnosis']}"
+            elif vault_state == VAULT_STATE_INCUBATION and incubation_msg:
                 vault_line = f"{vault_message} · {incubation_msg}"
-            elif decay.get("evolving"):
-                vault_line = (
-                    f"{vault_message} · ⚠️ ALPHA DECAY EVOLVING — "
-                    f"avg margin {decay['avg_margin_pct']:.2f}% "
-                    f"({decay['sample_count']}/{decay['window']}) — mint Strategy v2."
-                )
+            elif retro.get("evolving") and retro.get("diagnosis"):
+                vault_line = f"{vault_message} · {retro['diagnosis']}"
             else:
                 vault_line = vault_message
         else:
@@ -2636,7 +2614,6 @@ def _deploy_room2_deck(deck: str) -> bool:
         st.session_state.room2_vault_flash = vault_line if ok else ""
         st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
         st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
-        st.session_state.matrix_blacklist_count = _count_blacklist_signature_rows()
         _sync_matrix_chat_to_cloud()
         return True
     except Exception as exc:
@@ -2679,33 +2656,38 @@ def render_room2_forensic_lab():
 
     active_count = st.session_state.get("matrix_active_pattern_count", 0)
     trash_count = st.session_state.get("matrix_trash_vault_count", 0)
-    blacklist_count = st.session_state.get("matrix_blacklist_count", 0)
     st.markdown(
         """
         <div class="room2-hud">
             <div class="room2-kicker">Institutional Forensic Suite</div>
-            <div class="room2-title">Forensic Pattern Lab HUD</div>
+            <div class="room2-title">Winning-DNA Accumulation Lab</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.caption(
-        f"☁️ **Matrix Memory (cloud-synced):** {active_count} active · "
-        f"{blacklist_count} permanent toxic blacklist (Track 2) · "
-        f"{trash_count} in {RESCUE_VAULT_RETENTION_DAYS}-day Trash Vault (validated only)."
+        f"☁️ **Winning-DNA Memory (cloud-synced):** {active_count} active layouts · "
+        f"{trash_count} in {RESCUE_VAULT_RETENTION_DAYS}-day Trash Vault."
     )
     decay_status = st.session_state.get("room2_alpha_decay_status")
     if decay_status:
-        if decay_status.get("evolving"):
+        if decay_status.get("halt_live_execution"):
+            st.error(
+                f"🛑 **Live Execution HALTED** — {decay_status.get('diagnosis', 'Post-mortem review required.')} "
+                f"({decay_status.get('sample_count', 0)}/{decay_status.get('window', 15)} samples · "
+                f"avg margin {decay_status.get('avg_margin_pct', 0):.2f}% vs "
+                f"{decay_status.get('floor_pct', 0):.2f}% floor)"
+            )
+        elif decay_status.get("evolving"):
             st.warning(
-                f"⚠️ **Alpha Decay — EVOLVING:** {decay_status.get('sample_count', 0)}/"
+                f"⚠️ **Performance Watch:** {decay_status.get('sample_count', 0)}/"
                 f"{decay_status.get('window', 15)} samples · avg margin "
                 f"{decay_status.get('avg_margin_pct', 0):.2f}% (floor "
-                f"{decay_status.get('floor_pct', 0):.2f}%). Consider minting Strategy v2."
+                f"{decay_status.get('floor_pct', 0):.2f}%)."
             )
         else:
             st.caption(
-                f"📉 Alpha Decay monitor: **{decay_status.get('status', 'STABLE')}** · "
+                f"📉 Post-mortem monitor: **{decay_status.get('status', 'STABLE')}** · "
                 f"{decay_status.get('sample_count', 0)}/{decay_status.get('window', 15)} "
                 f"rolling samples · avg margin {decay_status.get('avg_margin_pct', 0):.2f}%."
             )
@@ -2716,59 +2698,30 @@ def render_room2_forensic_lab():
     col_left, col_right = st.columns([1.0, 1.0])
 
     with col_left:
-        sub_col_good, sub_col_bad = st.columns([1.0, 1.0])
-
-        with sub_col_good:
-            with st.container(border=True):
-                st.markdown(
-                    '<span class="good-card"></span>'
-                    '<div class="deck-title">🟩 VALIDATED PATTERN TRACKING (GOOD FILES)</div>',
-                    unsafe_allow_html=True,
+        with st.container(border=True):
+            st.markdown(
+                '<span class="good-card"></span>'
+                '<div class="deck-title">🧬 WINNING-DNA ACCUMULATION CORE</div>',
+                unsafe_allow_html=True,
+            )
+            if st.session_state.get("r2_good_validation_error"):
+                st.error(ROOM2_INVALID_INPUT_MESSAGE)
+            _render_r2_adaptive_buffer_toggles("good")
+            _render_r2_macro_strategy_deck("r2_good")
+            with st.form("r2_good_form_chassis", clear_on_submit=False):
+                st.text_input("Pattern Ticker", key="r2_good_ticker")
+                _render_r2_datalink_group("r2_good")
+                st.text_input(
+                    "📝 Optional Technical Context:",
+                    placeholder="e.g., bounced off the VWAP breakout...",
+                    key="r2_single_notes_field",
                 )
-                if st.session_state.get("r2_good_validation_error"):
-                    st.error(ROOM2_INVALID_INPUT_MESSAGE)
-                _render_r2_adaptive_buffer_toggles("good")
-                _render_r2_macro_strategy_deck("r2_good")
-                with st.form("r2_good_form_chassis", clear_on_submit=False):
-                    st.text_input("Good File Ticker", key="r2_good_ticker")
-                    _render_r2_datalink_group("r2_good")
-                    st.text_input(
-                        "📝 Optional Technical Context:",
-                        placeholder="e.g., bounced off the VWAP breakout...",
-                        key="r2_single_notes_field",
-                    )
-                    good_deploy = st.form_submit_button(
-                        "🔥 COMMIT VALID PATTERN TO INTERNET",
-                        use_container_width=True,
-                    )
-                if good_deploy:
-                    _handle_room2_deck_submit("good")
-
-        with sub_col_bad:
-            with st.container(border=True):
-                st.markdown(
-                    '<span class="bad-card"></span>'
-                    '<div class="deck-title">🟥 TOXIC ANOMALY TRACKING (BAD FILES)</div>',
-                    unsafe_allow_html=True,
+                good_deploy = st.form_submit_button(
+                    "🔥 COMMIT WINNING PATTERN TO INTERNET",
+                    use_container_width=True,
                 )
-                if st.session_state.get("r2_bad_validation_error"):
-                    st.error(ROOM2_INVALID_INPUT_MESSAGE)
-                _render_r2_adaptive_buffer_toggles("bad")
-                _render_r2_macro_strategy_deck("r2_bad")
-                with st.form("r2_bad_form_chassis", clear_on_submit=False):
-                    st.text_input("Bad File Ticker", key="r2_bad_ticker")
-                    _render_r2_datalink_group("r2_bad")
-                    st.text_input(
-                        "📝 Optional Technical Context:",
-                        placeholder="e.g., bounced off the VWAP breakout...",
-                        key="r2_bad_single_notes_field",
-                    )
-                    bad_deploy = st.form_submit_button(
-                        "🚨 COMMIT TOXIC ANOMALY TO INTERNET",
-                        use_container_width=True,
-                    )
-                if bad_deploy:
-                    _handle_room2_deck_submit("bad")
+            if good_deploy:
+                _handle_room2_deck_submit("good")
 
     with col_right:
         _render_matrix_window1_panel()
