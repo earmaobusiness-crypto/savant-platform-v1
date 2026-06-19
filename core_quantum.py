@@ -18,6 +18,20 @@ except ImportError:
 POLYGON_CALLS_PER_MINUTE = 5
 ALPHA_DECAY_ROLLING_N = 15
 ALPHA_DECAY_MARGIN_FLOOR_PCT = 0.15
+LAYOUT_SIGNATURE_MATCH_THRESHOLD = 85
+ANOMALY_SHELF_DAYS = 30
+ANOMALY_PERMANENT_MINT_COUNT = 5
+TIMEFRAME_MARGIN_FLOORS = {
+    "1-Minute": 1.0,
+    "5-Minute": 3.0,
+    "15-Minute": 5.0,
+}
+LOOKBACK_DELTAS = {
+    "1-Minute": datetime.timedelta(minutes=5),
+    "5-Minute": datetime.timedelta(hours=6),
+    "15-Minute": datetime.timedelta(hours=1),
+}
+VAULT_STATE_INCUBATION = "incubation"
 DATA_FEED_POLYGON_1M = "polygon_rest_1m"
 DATA_FEED_YFINANCE_1M = "yfinance_1m"
 THROTTLE_MESSAGE = (
@@ -196,6 +210,160 @@ def _polygon_aggs_to_dataframe(results):
     return frame if not frame.empty else None
 
 
+def timeframe_margin_floor(timeframe_resolution: str) -> float:
+    return float(TIMEFRAME_MARGIN_FLOORS.get(timeframe_resolution, 1.0))
+
+
+def _ensure_dataframe(data_stream):
+    if pd is None:
+        return None
+    if isinstance(data_stream, pd.DataFrame) and not data_stream.empty:
+        return _flatten_yfinance_frame(data_stream)
+    return None
+
+
+def pad_datastream_gaps(data_stream):
+    """Forward-fill thin pre/post-market gaps so loops never hit empty holes."""
+    frame = _ensure_dataframe(data_stream)
+    if frame is None:
+        return data_stream
+    padded = frame.copy()
+    for col in ("Close", "Open", "High", "Low", "Volume"):
+        if col in padded.columns:
+            padded[col] = padded[col].ffill()
+            if col != "Volume":
+                padded[col] = padded[col].bfill()
+    return padded
+
+
+def _calibrated_lookback_start(end_dt: datetime.datetime, timeframe_resolution: str):
+    delta = LOOKBACK_DELTAS.get(timeframe_resolution, datetime.timedelta(hours=1))
+    return end_dt - delta
+
+
+def _price_at_datetime(data_stream, target_dt: datetime.datetime):
+    frame = _ensure_dataframe(data_stream)
+    if frame is None or target_dt is None:
+        return None
+    try:
+        subset = frame[frame.index <= target_dt]
+        if isinstance(subset, pd.DataFrame) and not subset.empty:
+            return float(subset["Close"].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def hunt_volume_anchor(data_stream, exit_dt: datetime.datetime, lookback_start_dt):
+    """Walk backward from exit to find the original volume-cluster trigger bar."""
+    frame = _ensure_dataframe(data_stream)
+    if frame is None or exit_dt is None or lookback_start_dt is None:
+        return None, None
+    try:
+        window = frame[(frame.index <= exit_dt) & (frame.index >= lookback_start_dt)]
+        if not isinstance(window, pd.DataFrame) or window.empty:
+            return None, None
+        if "Volume" in window.columns and window["Volume"].sum() > 0:
+            anchor_idx = window["Volume"].idxmax()
+        else:
+            anchor_idx = window.index[0]
+        anchor_price = float(window.loc[anchor_idx, "Close"])
+        return anchor_idx, anchor_price
+    except Exception:
+        return None, None
+
+
+def apply_temporal_fence_and_lookback(
+    data_stream,
+    *,
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+    timeframe_resolution: str,
+):
+    """
+    Hindsight blinding + calibrated lookback depths.
+    Bars after the exit timestamp are stripped; lookback window is timeframe-specific.
+    """
+    frame = pad_datastream_gaps(data_stream)
+    frame = _ensure_dataframe(frame)
+    if frame is None:
+        return data_stream, {}
+
+    end_dt = _parse_session_datetime(end_date, end_time)
+    if end_dt is None:
+        return frame, {}
+
+    lookback_start = _calibrated_lookback_start(end_dt, timeframe_resolution)
+    start_dt = _parse_session_datetime(start_date, start_time)
+    if start_dt is not None and start_dt < lookback_start:
+        lookback_start = start_dt
+
+    try:
+        fenced = frame[(frame.index <= end_dt) & (frame.index >= lookback_start)]
+        if isinstance(fenced, pd.DataFrame) and not fenced.empty:
+            frame = fenced
+    except Exception:
+        pass
+
+    meta = {
+        "temporal_fence_end": end_dt.isoformat(),
+        "lookback_start": lookback_start.isoformat(),
+        "timeframe_resolution": timeframe_resolution,
+    }
+    return frame, meta
+
+
+def evaluate_playbook_quality_barrier(
+    data_stream,
+    *,
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+    timeframe_resolution: str,
+) -> dict:
+    """
+    Pre-storage quality gate: anchor hunt + tiered structural move floors.
+    1m >= 1.0%, 5m >= 3.0%, 15m >= 5.0%.
+    """
+    floor_pct = timeframe_margin_floor(timeframe_resolution)
+    end_dt = _parse_session_datetime(end_date, end_time)
+    lookback_start = _calibrated_lookback_start(end_dt, timeframe_resolution) if end_dt else None
+    anchor_ts, anchor_price = hunt_volume_anchor(data_stream, end_dt, lookback_start)
+    exit_price = _price_at_datetime(data_stream, end_dt)
+
+    structural_move_pct = 0.0
+    if anchor_price and exit_price and anchor_price > 0:
+        structural_move_pct = abs((exit_price - anchor_price) / anchor_price * 100)
+
+    passed = structural_move_pct >= floor_pct
+    return {
+        "passed": passed,
+        "trashed": not passed,
+        "structural_move_pct": round(structural_move_pct, 4),
+        "floor_pct": floor_pct,
+        "anchor_timestamp": str(anchor_ts) if anchor_ts is not None else None,
+        "anchor_price": anchor_price,
+        "exit_price": exit_price,
+        "timeframe_resolution": timeframe_resolution,
+    }
+
+
+def resolve_anomaly_incubation_state(
+    *,
+    match_score: int,
+    repeat_count: int,
+) -> tuple[str, str]:
+    """Map layout match + repetitions to vault track/state."""
+    if match_score >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
+        return "track_1_validated", "active"
+    if repeat_count >= ANOMALY_PERMANENT_MINT_COUNT:
+        return "track_1_validated", "active"
+    return "track_1_anomaly_incubation", VAULT_STATE_INCUBATION
+
+
 def parse_matrix_meta_from_context(operator_context: str) -> dict:
     """Recover extended vault fields embedded via compact schema fallback."""
     ctx = str(operator_context or "")
@@ -319,6 +487,7 @@ def evaluate_alpha_decay(
     Rolling last-N margin monitor — returns EVOLVING when average edge drops below floor.
     Falls back to session ledger when Supabase executions table is unavailable.
     """
+    floor_pct = timeframe_margin_floor(timeframe_resolution)
     timeline_key = _strategy_timeline_key(
         macro_weather_layout=macro_weather_layout,
         execution_strategy=execution_strategy,
@@ -355,14 +524,14 @@ def evaluate_alpha_decay(
 
     count = len(margins)
     avg_margin = round(sum(margins) / count, 4) if count else 0.0
-    evolving = count >= ALPHA_DECAY_ROLLING_N and avg_margin < ALPHA_DECAY_MARGIN_FLOOR_PCT
+    evolving = count >= ALPHA_DECAY_ROLLING_N and avg_margin < floor_pct
     status = "EVOLVING" if evolving else ("WATCH" if count >= 5 else "STABLE")
     return {
         "status": status,
         "timeline_key": timeline_key,
         "sample_count": count,
         "avg_margin_pct": avg_margin,
-        "floor_pct": ALPHA_DECAY_MARGIN_FLOOR_PCT,
+        "floor_pct": floor_pct,
         "window": ALPHA_DECAY_ROLLING_N,
         "evolving": evolving,
     }
@@ -1225,6 +1394,10 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
         "data_feed_mode",
         "state",
         "deleted_at",
+        "layout_match_pct",
+        "anomaly_repeat_count",
+        "shelf_expires_at",
+        "structural_move_pct",
     )
 
     def _post(body: dict):
@@ -1335,6 +1508,18 @@ def calculate_quantum_frequencies(
     velocity = _compute_price_velocity_metrics(data_stream)
     st.session_state.room2_last_velocity = velocity
 
+    quality = evaluate_playbook_quality_barrier(
+        data_stream,
+        start_date=start_date,
+        start_time=start_time,
+        end_date=end_date,
+        end_time=end_time,
+        timeframe_resolution=str(
+            st.session_state.get("r2_timeframe_mode", "15-Minute")
+        ),
+    )
+    st.session_state.room2_playbook_quality = quality
+
     micro_block = None
     if _is_compressed_variance(data_stream) and resolved_ticker:
         data_5m = get_historical_5m_data(resolved_ticker)
@@ -1417,9 +1602,13 @@ def build_vault_payload(
     vault_track: str = "track_1_validated",
     vault_state: str = "active",
     data_feed_mode: str = "carousel_15s",
+    layout_match_pct: int = 0,
+    anomaly_repeat_count: int = 0,
+    shelf_expires_at: str = "",
+    structural_move_pct: float = 0.0,
 ) -> dict:
     """Package Room 2 deck parameters for Internet Vault streaming."""
-    return {
+    body = {
         "ticker": ticker.upper(),
         "pattern_category": (pattern_category or "UNCLASSIFIED").strip().upper(),
         "entry_coordinate": entry_coordinate,
@@ -1445,5 +1634,10 @@ def build_vault_payload(
         "source_room": "forensic_pattern_lab",
         "state": vault_state,
         "deleted_at": None,
+        "layout_match_pct": layout_match_pct,
+        "anomaly_repeat_count": anomaly_repeat_count,
+        "shelf_expires_at": shelf_expires_at or None,
+        "structural_move_pct": round(float(structural_move_pct), 4),
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+    return body

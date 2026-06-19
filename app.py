@@ -94,8 +94,10 @@ R2_EXECUTION_STRATEGIES = (
     "Strategy 1C: Staircase Dip-Buy",
     "Mints Evolved Version (v2)",
 )
-FUZZY_CLUSTER_MINT_THRESHOLD = 72
-PURGATORY_REPLICATION_TARGET = 5
+LAYOUT_SIGNATURE_MATCH_THRESHOLD = 85
+ANOMALY_SHELF_DAYS = 30
+ANOMALY_PERMANENT_MINT_COUNT = 5
+VAULT_STATE_INCUBATION = "incubation"
 
 st.set_page_config(
     page_title="Savant Apprentice",
@@ -783,7 +785,7 @@ def _compute_volatility_engine(
     institutional_accumulation_detected = False
     try:
         hist = yf.Ticker(ticker).history(period="1mo", interval="1d")
-        if hist is None or len(hist) < 10:
+        if hist is None or getattr(hist, "empty", True) or len(hist) < 10:
             return "VOL:INSUFFICIENT_HIST|VOLMOM:NORMAL|INST_ACCUM:FALSE", False
         closes = [float(x) for x in hist["Close"].dropna().tolist()]
         volumes = [float(x) for x in hist["Volume"].dropna().tolist()]
@@ -1014,6 +1016,12 @@ No Rule Mixing: A high-velocity strategy running on a 1-minute chart must never 
 
 Calibrated Lookback Depths: The math engine strictly enforces retrospective, lookback-only boundaries based on the chosen timeframe. The 1m toggle enforces a tight, rigid ~5-minute maximum backward lookup. The 5m toggle auto-extends backward several hours past the market open into pre-market. The 15m toggle for early morning moves bridges overnight into the previous day's post-market, hard-stopping after roughly one hour of depth.
 
+Adaptive Playbook Floors (Timeframe-Calibrated Quality Barriers)
+When the operator defines an explicit target window for study, hunt backward for the original pattern anchor (volume cluster trigger). Calculate raw percentage distance from that verified trigger to the target exit. Enforce strict tiered profit thresholds by timeframe resolution: 1m track must clear 1.0% structural move or trash instantly; 5m must clear 3.0%; 15m must clear 5.0%. Setups that clear their floor undergo consistency mining — extract shape metrics, resistance rules, and structural signatures from entry through exit for the playbook.
+
+Dual-Track Anomaly Vault and Incubation Queue
+If incoming behavior fails the 85% signature match to an existing layout, split into two tracks. Track 1 — Good Alpha Anomalies: desirable setups that clear their timeframe floor but lack a layout group receive a Temporary Layout Node with a strict 30-day floating shelf-life. Exact anomaly repetition within 30 days resets the clock for another 30 days. Five total repetitions permanently mint an official active Layout block. Timer expiry with no repetitions triggers hard-delete to prevent clutter. Track 2 — Toxic Traps: high-friction chases, failed entries, and institutional traps bypass the 30-day clock entirely and mint permanently to the Blacklist Signature Index.
+
 Hindsight Blinding Protocol (Anti-Cheat Guardrails)
 To guarantee analytical feedback can be perfectly replicated in a live, real-world market, you are strictly subjected to the Temporal Fence. When evaluating a trade timestamped at a specific minute (e.g., September 8th, 9:27 AM), you are completely barred from using any future data. You cannot reference price moves, corporate news, earnings releases, or SEC regulatory filings that came out at 9:28 AM or later. You must evaluate the scenario with the absolute assumption that the future does not exist yet.
 
@@ -1025,8 +1033,11 @@ The High-Friction Profit Filter: If a trade trigger is a late, low-margin chase 
 The Evolving Phase Gate: If actual profit margins drop below the strict floor due to a permanent shift in market microstructure (and not just poor execution fills), you must declare that the strategy has officially entered the Evolving phase. You will archive the failing parameters and support the complete rewriting and minting of an updated version (e.g., Strategy 1A for Layout 2 (1m) v2) to maximize capital extraction.
 
 Dual-Track Vault Architecture
-Track 1 (Validated): Standard active pattern archive subject to the floating Trash Vault retention window for operator-initiated cleanup.
+Track 1 (Validated / Alpha Anomaly Incubation): Standard active archive or temporary 30-day incubation nodes for sub-85% layout matches that clear timeframe floors. Subject to Trash Vault retention for operator-initiated cleanup once permanently minted.
 Track 2 (Toxic Trap Preservation): Any setup officially validated as TOXIC — a trap, failed entry, or high-friction chase — bypasses all deletion clocks entirely. These are minted permanently to the Blacklist Signature Index. The system must never forget an institutional trap, even if it occurs only once per year. Toxic blacklist rows are immune to soft-delete, bulk purge, and retention expiry.
+
+Operator Directive
+Do not analyze human emotions or preconceived notions. Map literal operator examples ("I like this setup", "This bounce off VWAP was nice") directly into cloud memory as structural signatures. Maintain a compressed master layout index to prevent token amnesia across long chat sessions. Forbidden from introducing outside market theories or generic AI fluff.
 
 Sub-Second Fast Track (1m Isolation)
 The 1-minute resolution is too fast for a standard 15-second scanning carousel; a 15-second delay misses roughly 25% of a micro-burst lifespan and forces entries into high-friction zones. All 1-minute strategy bins are isolated onto a continuous sub-second streaming live data path (WebSocket-class feed, sub-100 millisecond execution target), completely separated from the slower 15-second polling carousel used for macro 5m and 15m layouts. Never cross-pollinate latency domains.
@@ -1117,8 +1128,100 @@ def _pattern_archive_query_suffix(*, active_only: bool = True, trash_only: bool 
         parts.append("state=eq.soft_deleted")
         parts.append("pattern_category=neq.TOXIC_ANOMALY")
     elif active_only:
-        parts.append("or=(state.is.null,state.eq.active,state.eq.blacklist_signature)")
+        parts.append("or=(state.is.null,state.eq.active,state.eq.blacklist_signature,state.eq.incubation)")
     return "&" + "&".join(parts)
+
+
+def _purge_expired_anomaly_incubation() -> None:
+    """Hard-delete incubation nodes whose 30-day shelf expired without re-mint."""
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return
+    cutoff = datetime.now(timezone.utc).isoformat()
+    table = _forensic_patterns_table()
+    base = st.session_state.supabase_url
+    try:
+        requests.delete(
+            f"{base}/rest/v1/{table}?state=eq.{VAULT_STATE_INCUBATION}"
+            f"&shelf_expires_at=lt.{cutoff}"
+            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}",
+            headers=_supabase_rest_headers(),
+            timeout=12,
+        )
+    except Exception:
+        pass
+
+
+def _anomaly_incubation_signature(
+    ticker: str, timeframe_resolution: str, macro_weather_layout: str
+) -> str:
+    return f"{ticker.upper()}|{timeframe_resolution}|{macro_weather_layout}"
+
+
+def _resolve_anomaly_incubation(
+    *,
+    ticker: str,
+    pattern_category: str,
+    deck: str,
+    timeframe_resolution: str,
+    macro_weather_layout: str,
+    match_score: int,
+) -> tuple[str, str, int, str, str]:
+    """
+    Track 1 alpha anomaly incubation vs permanent layout mint.
+    Returns vault_track, vault_state, repeat_count, shelf_expires_at, status_message.
+    """
+    if pattern_category == "TOXIC_ANOMALY" or deck != "good":
+        return (
+            VAULT_TRACK_TOXIC_BLACKLIST if pattern_category == "TOXIC_ANOMALY" else VAULT_TRACK_VALIDATED,
+            BLACKLIST_SIGNATURE_STATE if pattern_category == "TOXIC_ANOMALY" else "active",
+            0,
+            "",
+            "",
+        )
+
+    signature = _anomaly_incubation_signature(ticker, timeframe_resolution, macro_weather_layout)
+    registry = st.session_state.setdefault("anomaly_incubation_registry", {})
+    entry = dict(registry.get(signature, {"count": 0}))
+
+    if match_score >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
+        registry.pop(signature, None)
+        st.session_state.anomaly_incubation_registry = registry
+        st.session_state.purgatory_shelf_active = False
+        return VAULT_TRACK_VALIDATED, "active", 0, "", ""
+
+    entry["count"] = int(entry.get("count", 0)) + 1
+    shelf_expires = (datetime.now(timezone.utc) + timedelta(days=ANOMALY_SHELF_DAYS)).isoformat()
+    entry["expires_at"] = shelf_expires
+    registry[signature] = entry
+    st.session_state.anomaly_incubation_registry = registry
+
+    repeat_count = entry["count"]
+    vault_track, vault_state = core_quantum.resolve_anomaly_incubation_state(
+        match_score=match_score,
+        repeat_count=repeat_count,
+    )
+
+    if vault_state == "active" and repeat_count >= ANOMALY_PERMANENT_MINT_COUNT:
+        message = (
+            f"✅ PERMANENT LAYOUT MINT — Good alpha anomaly reached "
+            f"{repeat_count}/{ANOMALY_PERMANENT_MINT_COUNT} repetitions. "
+            "Promoted to official active Layout block."
+        )
+        st.session_state.purgatory_shelf_active = False
+    elif vault_state == VAULT_STATE_INCUBATION:
+        message = (
+            f"⏳ TEMPORARY LAYOUT NODE — {repeat_count}/{ANOMALY_PERMANENT_MINT_COUNT} "
+            f"repetitions · 30-day shelf resets to {shelf_expires[:10]}. "
+            f"Layout match {match_score}% (<{LAYOUT_SIGNATURE_MATCH_THRESHOLD}% threshold)."
+        )
+        st.session_state.purgatory_shelf_active = True
+        st.session_state.purgatory_shelf_message = message
+    else:
+        message = ""
+        st.session_state.purgatory_shelf_active = False
+
+    return vault_track, vault_state, repeat_count, shelf_expires, message
 
 
 def _purge_expired_trash_vault() -> None:
@@ -1356,6 +1459,7 @@ def _hydrate_matrix_memory_from_cloud() -> None:
     st.session_state.matrix_cloud_hydrated = True
 
     _purge_expired_trash_vault()
+    _purge_expired_anomaly_incubation()
     _load_matrix_chat_from_cloud()
 
     latest = _fetch_latest_active_pattern_row()
@@ -1898,44 +2002,10 @@ def _evaluate_purgatory_cluster(
     pattern_category: str,
     deck: str,
 ) -> tuple[bool, str]:
-    """
-    Fuzzy clustering gate — only ambiguous non-toxic edge cases route to Purgatory Shelf.
-    Validated patterns always mint. Toxic traps always mint to permanent blacklist (Track 2).
-    """
-    if pattern_category in ("VALIDATED", "TOXIC_ANOMALY"):
-        st.session_state.purgatory_shelf_active = False
-        st.session_state.purgatory_repetition_count = 0
-        st.session_state.purgatory_signature = ""
+    """Legacy wrapper — incubation queue now handles sub-85% alpha anomalies."""
+    if not st.session_state.get("purgatory_shelf_active"):
         return False, ""
-
-    math_block = st.session_state.get("room2_last_math_block", {}) or {}
-    match_score = int(math_block.get("match_probability") or 0)
-    signature = f"{ticker}|{pattern_category}|{deck}|{match_score // 5}"
-
-    if match_score >= FUZZY_CLUSTER_MINT_THRESHOLD:
-        st.session_state.purgatory_shelf_active = False
-        st.session_state.purgatory_repetition_count = 0
-        st.session_state.purgatory_signature = ""
-        return False, ""
-
-    if st.session_state.get("purgatory_signature") == signature:
-        count = min(
-            PURGATORY_REPLICATION_TARGET,
-            int(st.session_state.get("purgatory_repetition_count", 0)) + 1,
-        )
-    else:
-        count = 1
-        st.session_state.purgatory_signature = signature
-
-    st.session_state.purgatory_repetition_count = count
-    st.session_state.purgatory_shelf_active = True
-    message = (
-        "⏳ [PURGATORY STATUS: HOLDING] Unclassified data anomaly locked. "
-        f"Pattern repetition count: [{count}/{PURGATORY_REPLICATION_TARGET}]. "
-        "Awaiting structural replication before minting new strategy execution files."
-    )
-    st.session_state.purgatory_shelf_message = message
-    return True, message
+    return True, st.session_state.get("purgatory_shelf_message", "")
 
 
 def _render_purgatory_shelf() -> None:
@@ -1949,8 +2019,8 @@ def _render_purgatory_shelf() -> None:
     else:
         shelf_class = "purgatory-shelf"
         body = (
-            "░ PURGATORY SHELF STANDBY — Classified patterns mint directly to the Internet Vault. "
-            "Unclassified fuzzy-cluster anomalies will hold here pending structural replication."
+            "░ INCUBATION SHELF STANDBY — Sub-85% layout matches with cleared timeframe floors "
+            "mint to Temporary Layout Nodes (30-day shelf). Toxic traps bypass to blacklist."
         )
     st.markdown(
         f'<div class="{shelf_class}">{escape(body)}</div>',
@@ -2400,6 +2470,49 @@ def _deploy_room2_deck(deck: str) -> bool:
             st.session_state.matrix_satellites_ready = True
             return False
 
+        data_stream = core_quantum.pad_datastream_gaps(data_stream)
+        data_stream, _fence_meta = core_quantum.apply_temporal_fence_and_lookback(
+            data_stream,
+            start_date=start_date,
+            start_time=start_time,
+            end_date=end_date,
+            end_time=end_time,
+            timeframe_resolution=timeframe_resolution,
+        )
+
+        if not core_quantum.is_usable_data_stream(data_stream):
+            no_data_text = (
+                f"⚠️ [DATALINK: FENCE_EMPTY] Temporal fence/lookback returned no bars for "
+                f"{ticker} ({timeframe_resolution}). Widen the date window or check session hours."
+            )
+            st.session_state.quantum_terminal_output = no_data_text
+            st.session_state.room2_quantum_report = no_data_text
+            st.session_state.matrix_satellites_ready = True
+            return False
+
+        quality = core_quantum.evaluate_playbook_quality_barrier(
+            data_stream,
+            start_date=start_date,
+            start_time=start_time,
+            end_date=end_date,
+            end_time=end_time,
+            timeframe_resolution=timeframe_resolution,
+        )
+        st.session_state.room2_playbook_quality = quality
+
+        if deck == "good" and not quality.get("passed"):
+            floor_pct = quality.get("floor_pct", 1.0)
+            move_pct = quality.get("structural_move_pct", 0.0)
+            trash_text = (
+                f"🗑️ PRE-STORAGE TRASH — Structural move {move_pct:.2f}% failed "
+                f"{floor_pct:.1f}% minimum floor for {timeframe_resolution}. "
+                "Pattern rejected before vault mint."
+            )
+            st.session_state.quantum_terminal_output = trash_text
+            st.session_state.room2_quantum_report = trash_text
+            st.session_state.matrix_satellites_ready = True
+            return False
+
         quantum_summary = core_quantum.calculate_quantum_frequencies(
             data_stream,
             pattern_category=pattern_category,
@@ -2421,6 +2534,24 @@ def _deploy_room2_deck(deck: str) -> bool:
         )
         st.session_state.room2_quantum_report = quantum_report
         st.session_state.room2_forensic_ticker = ticker
+
+        math_block = st.session_state.get("room2_last_math_block", {}) or {}
+        match_score = int(math_block.get("match_probability") or 0)
+        quality = st.session_state.get("room2_playbook_quality", {}) or {}
+        structural_move = float(quality.get("structural_move_pct") or 0.0)
+
+        vault_track, vault_state, repeat_count, shelf_expires, incubation_msg = (
+            _resolve_anomaly_incubation(
+                ticker=ticker,
+                pattern_category=pattern_category,
+                deck=deck,
+                timeframe_resolution=timeframe_resolution,
+                macro_weather_layout=macro_weather_layout,
+                match_score=match_score,
+            )
+        )
+        if pattern_category == "TOXIC_ANOMALY":
+            vault_track, vault_state = _resolve_vault_track(pattern_category)
 
         in_purgatory, purgatory_message = _evaluate_purgatory_cluster(
             ticker=ticker,
@@ -2445,41 +2576,53 @@ def _deploy_room2_deck(deck: str) -> bool:
             vault_track=vault_track,
             vault_state=vault_state,
             data_feed_mode=data_feed_mode,
+            layout_match_pct=match_score,
+            anomaly_repeat_count=repeat_count,
+            shelf_expires_at=shelf_expires,
+            structural_move_pct=structural_move,
         )
 
-        if in_purgatory:
-            vault_line = "PURGATORY HOLD — Vault mint deferred pending replication."
-            ok = False
-        else:
-            ok, vault_message = core_quantum.stream_payload_to_vault(payload)
-            if pattern_category == "TOXIC_ANOMALY" and ok:
-                vault_line = (
-                    f"BLACKLIST SIGNATURE INDEX — permanent Track 2 anchor for {ticker}."
-                )
-            elif pattern_category == "VALIDATED" and ok:
-                velocity = st.session_state.get("room2_last_velocity", {}) or {}
-                margin_pct = abs(float(velocity.get("session_velocity_pct") or 0.0))
-                decay = core_quantum.log_strategy_execution_with_fallback(
-                    ticker=ticker,
-                    macro_weather_layout=macro_weather_layout,
-                    execution_strategy=execution_strategy,
-                    timeframe_resolution=timeframe_resolution,
-                    margin_pct=margin_pct,
-                    pattern_category=pattern_category,
-                )
-                st.session_state.room2_alpha_decay_status = decay
-                if decay.get("evolving"):
-                    vault_line = (
-                        f"{vault_message} · ⚠️ ALPHA DECAY EVOLVING — "
-                        f"avg margin {decay['avg_margin_pct']:.2f}% "
-                        f"({decay['sample_count']}/{decay['window']}) — mint Strategy v2."
+        ok, vault_message = core_quantum.stream_payload_to_vault(payload)
+        if pattern_category == "TOXIC_ANOMALY" and ok:
+            vault_line = (
+                f"BLACKLIST SIGNATURE INDEX — permanent Track 2 anchor for {ticker}."
+            )
+        elif pattern_category == "VALIDATED" and ok:
+            margin_pct = structural_move or abs(
+                float(
+                    (st.session_state.get("room2_last_velocity") or {}).get(
+                        "session_velocity_pct", 0.0
                     )
-                else:
-                    vault_line = vault_message
+                )
+            )
+            decay = core_quantum.log_strategy_execution_with_fallback(
+                ticker=ticker,
+                macro_weather_layout=macro_weather_layout,
+                execution_strategy=execution_strategy,
+                timeframe_resolution=timeframe_resolution,
+                margin_pct=margin_pct,
+                pattern_category=pattern_category,
+            )
+            st.session_state.room2_alpha_decay_status = decay
+            if vault_state == VAULT_STATE_INCUBATION and incubation_msg:
+                vault_line = f"{vault_message} · {incubation_msg}"
+            elif decay.get("evolving"):
+                vault_line = (
+                    f"{vault_message} · ⚠️ ALPHA DECAY EVOLVING — "
+                    f"avg margin {decay['avg_margin_pct']:.2f}% "
+                    f"({decay['sample_count']}/{decay['window']}) — mint Strategy v2."
+                )
             else:
-                vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
+                vault_line = vault_message
+        else:
+            vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
 
-        if in_purgatory:
+        if incubation_msg and vault_state == VAULT_STATE_INCUBATION:
+            final_terminal = _assign_matrix_terminal_output(
+                f"{quantum_report}\n\n{incubation_msg}",
+                vault_line if ok else None,
+            )
+        elif in_purgatory:
             final_terminal = _assign_matrix_terminal_output(
                 f"{quantum_report}\n\n{purgatory_message}",
                 None,
