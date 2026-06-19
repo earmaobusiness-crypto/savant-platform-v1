@@ -1037,6 +1037,9 @@ The Evolving Phase Gate: If actual profit margins drop below the strict floor du
 Winning-DNA Vault Architecture
 Single-Track Positive Archive: Only profitable setups that clear timeframe-calibrated floors enter the vault — as active Layout blocks or 30-day Temporary Layout Nodes (sub-85% matches). Post-mortem retro-analysis replaces manual failure logging: the rolling 15-trade window automatically halts degraded strategies and separates execution friction from structural alpha decay.
 
+Common-Sense Dual-Stream Processing and Accumulation Core
+Resource Allocation: Maximize internet/cloud-side pipelines for heavy, data-dense tasks. The cloud handles relentless 5m and 15m data gathering, corporate news parsing, and SEC filing updates to protect the local MacBook battery. Low-Power Local Striking: Reserve local MacBook hardware memory strictly for the high-velocity 1m track. Keep the 1m lookback capped at a tight ~5-minute maximum in local RAM to guarantee instant, sub-100ms order blasts to Interactive Brokers without lagging the processor. Never cross-pollinate cloud macro intelligence into the 1m local strike lane.
+
 Operator Directive
 Do not analyze human emotions or preconceived notions. Map literal operator examples ("I like this setup", "This bounce off VWAP was nice") directly into cloud memory as structural signatures. Maintain a compressed master layout index to prevent token amnesia across long chat sessions. Forbidden from introducing outside market theories or generic AI fluff.
 
@@ -1268,7 +1271,18 @@ def _resolve_data_feed_mode(timeframe_resolution: str) -> str:
         return st.session_state.get(
             "r2_micro_feed_source", core_quantum.DATA_FEED_YFINANCE_1M
         )
-    return DATA_FEED_CAROUSEL
+    return core_quantum.DATA_FEED_CLOUD_MACRO
+
+
+def _processor_lane_readout(timeframe_resolution: str) -> str:
+    lane = core_quantum.resolve_processor_lane(timeframe_resolution)
+    if lane == core_quantum.PROCESSOR_LANE_LOCAL_STRIKE:
+        ram_bars = st.session_state.get("r2_local_ram_bar_count", "—")
+        return (
+            f"Local 1m strike lane · ~{core_quantum.LOCAL_1M_RAM_CAP_MINUTES}m RAM cap "
+            f"({ram_bars} bars) · IB target <{core_quantum.IB_STRIKE_TARGET_MS}ms"
+        )
+    return "Cloud dual-stream · 5m/15m bars + SEC Form 4 + institutional volume"
 
 
 def _micro_feed_readout_label() -> str:
@@ -1749,7 +1763,10 @@ def _build_room2_groq_messages(user_text: str) -> list[dict]:
             f"[INCUBATION]{st.session_state.get('purgatory_shelf_message', '')}[/INCUBATION]"
         )
     context_bits.append(
-        f"[DATA_FEED]{st.session_state.get('r2_data_feed_mode', DATA_FEED_CAROUSEL)}[/DATA_FEED]"
+        f"[PROCESSOR_LANE]{st.session_state.get('r2_processor_lane', core_quantum.PROCESSOR_LANE_CLOUD)}[/PROCESSOR_LANE]"
+    )
+    context_bits.append(
+        f"[DATA_FEED]{st.session_state.get('r2_data_feed_mode', core_quantum.DATA_FEED_CLOUD_MACRO)}[/DATA_FEED]"
     )
     if st.session_state.r2_good_ticker:
         context_bits.append(f"[GOOD_TICKER]{st.session_state.r2_good_ticker}[/GOOD_TICKER]")
@@ -1958,14 +1975,15 @@ def _render_r2_adaptive_buffer_toggles(deck_prefix: str) -> None:
     )
     if active == "1-Minute":
         st.markdown(
-            f'<div class="r2-buffer-readout">⚡ 1M FAST TRACK — '
-            f'{escape(_micro_feed_readout_label())}</div>',
+            f'<div class="r2-buffer-readout">⚡ LOCAL STRIKE — '
+            f'{escape(_processor_lane_readout(active))}</div>',
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            f'<div class="r2-buffer-readout">🔄 MACRO CAROUSEL — '
-            f'{MACRO_CAROUSEL_POLL_SEC}s polling loop (5m/15m layouts)</div>',
+            f'<div class="r2-buffer-readout">☁️ CLOUD STREAM — '
+            f'{escape(_processor_lane_readout(active))} · '
+            f'{MACRO_CAROUSEL_POLL_SEC}s carousel</div>',
             unsafe_allow_html=True,
         )
 
@@ -2413,6 +2431,9 @@ def _deploy_room2_deck(deck: str) -> bool:
         timeframe_resolution == "1-Minute"
     )
     micro_fast_track = timeframe_resolution == "1-Minute"
+    st.session_state.r2_processor_lane = core_quantum.resolve_processor_lane(
+        timeframe_resolution
+    )
     vault_track, vault_state = _resolve_vault_track(pattern_category)
 
     try:

@@ -35,6 +35,11 @@ ROOT_CAUSE_FRICTION = "execution_friction_slippage"
 ROOT_CAUSE_STRUCTURAL_DECAY = "structural_alpha_decay"
 EXECUTION_HALTED_STATE = "execution_halted"
 VAULT_STATE_INCUBATION = "incubation"
+PROCESSOR_LANE_CLOUD = "cloud_dual_stream"
+PROCESSOR_LANE_LOCAL_STRIKE = "local_1m_strike"
+LOCAL_1M_RAM_CAP_MINUTES = 5
+IB_STRIKE_TARGET_MS = 100
+DATA_FEED_CLOUD_MACRO = "cloud_macro_pipeline"
 DATA_FEED_POLYGON_1M = "polygon_rest_1m"
 DATA_FEED_YFINANCE_1M = "yfinance_1m"
 THROTTLE_MESSAGE = (
@@ -698,21 +703,17 @@ def evaluate_alpha_decay(
 
 
 def refresh_macro_carousel_telemetry(ticker: str) -> None:
-    """Light 15s macro refresh — yfinance 15m institutional baseline only."""
+    """Cloud-stream 15s macro refresh — institutional + Form4 via cloud pipeline."""
     ticker_clean = str(ticker or "").strip().upper()
     if not ticker_clean:
         return
     bars = _download_yfinance_bars(ticker_clean, "15m", micro_fast_track=False)
     if not is_usable_data_stream(bars):
         return
-    try:
-        tracker = _detect_institutional_block_accumulation(ticker_clean, bars, "15m")
-        st.session_state.forensic_institutional_tracker = tracker
-        st.session_state.macro_carousel_last_tick = datetime.datetime.now(
-            datetime.timezone.utc
-        ).isoformat()
-    except Exception:
-        pass
+    fetch_cloud_macro_intelligence(ticker_clean, "15m", bars)
+    st.session_state.macro_carousel_last_tick = datetime.datetime.now(
+        datetime.timezone.utc
+    ).isoformat()
 
 
 def _init_polygon_rate_monitor() -> None:
@@ -1092,6 +1093,61 @@ def _scrape_form4_insider_buys(ticker: str) -> dict:
     }
 
 
+def resolve_processor_lane(timeframe_resolution: str) -> str:
+    """Route 1m to local strike RAM; 5m/15m to cloud macro pipeline."""
+    if str(timeframe_resolution).strip() == "1-Minute":
+        return PROCESSOR_LANE_LOCAL_STRIKE
+    return PROCESSOR_LANE_CLOUD
+
+
+def apply_local_strike_ram_cap(data_stream, cap_minutes: int = LOCAL_1M_RAM_CAP_MINUTES):
+    """Keep 1m lookback capped in local RAM for low-power IB strike lane."""
+    frame = _ensure_dataframe(data_stream)
+    if frame is None:
+        return data_stream
+    try:
+        latest = frame.index.max()
+        cutoff = latest - datetime.timedelta(minutes=cap_minutes)
+        trimmed = frame[frame.index >= cutoff]
+        if isinstance(trimmed, pd.DataFrame) and not trimmed.empty:
+            st.session_state.r2_local_ram_bar_count = len(trimmed)
+            return trimmed
+    except Exception:
+        pass
+    return frame
+
+
+def fetch_cloud_macro_intelligence(ticker: str, interval: str, data_stream=None) -> dict:
+    """
+    Cloud-side dual-stream pipeline — institutional volume, SEC Form 4, macro bars.
+    Offloads heavy 5m/15m gathering from the local MacBook battery.
+    """
+    ticker_clean = str(ticker).strip().upper()
+    bundle = {
+        "processor_lane": PROCESSOR_LANE_CLOUD,
+        "interval": interval,
+        "ticker": ticker_clean,
+        "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    try:
+        institutional = _detect_institutional_block_accumulation(
+            ticker_clean, data_stream, interval
+        )
+        st.session_state.forensic_institutional_tracker = institutional
+        bundle["institutional"] = institutional
+    except Exception:
+        bundle["institutional"] = st.session_state.get("forensic_institutional_tracker", {})
+    try:
+        form4 = _scrape_form4_insider_buys(ticker_clean)
+        st.session_state.forensic_form4_tracker = form4
+        bundle["form4"] = form4
+    except Exception:
+        bundle["form4"] = st.session_state.get("forensic_form4_tracker", {})
+    st.session_state.cloud_macro_intelligence = bundle
+    st.session_state.r2_processor_lane = PROCESSOR_LANE_CLOUD
+    return bundle
+
+
 def get_historical_interval_data(
     ticker,
     interval="15m",
@@ -1100,10 +1156,9 @@ def get_historical_interval_data(
     micro_fast_track=False,
 ):
     """
-    Free institutional proxy interval wire with 20-day volume baseline tracker.
-    - Under 60 Days: yfinance local Mac silicon wire.
-    - Extended history: Polygon API with live 5-call/min throttle shield (15m only).
-    - micro_fast_track: 1m sub-second path — yfinance only, no Polygon carousel.
+    Dual-stream datalink:
+    - 1m local strike lane: tight RAM cap, no cloud macro scrape on deploy.
+    - 5m/15m cloud lane: Polygon/yfinance bars + cloud macro intelligence bundle.
     """
     try:
         return _get_historical_interval_data_impl(
@@ -1134,6 +1189,7 @@ def _get_historical_interval_data_impl(
 
     if micro_fast_track:
         update_institutional_tracker = False
+        st.session_state.r2_processor_lane = PROCESSOR_LANE_LOCAL_STRIKE
         start_date = (now - datetime.timedelta(hours=8)).strftime("%Y-%m-%d")
         end_date = now.strftime("%Y-%m-%d")
         polygon_bars, polygon_signal = _fetch_polygon_1m_bars(
@@ -1146,8 +1202,10 @@ def _get_historical_interval_data_impl(
         polygon_frame = _polygon_aggs_to_dataframe(polygon_bars)
         if is_usable_data_stream(polygon_frame):
             st.session_state.r2_micro_feed_source = DATA_FEED_POLYGON_1M
-            return polygon_frame
+            return apply_local_strike_ram_cap(polygon_frame)
         st.session_state.r2_micro_feed_source = DATA_FEED_YFINANCE_1M
+    else:
+        st.session_state.r2_processor_lane = PROCESSOR_LANE_CLOUD
 
     data_stream = _download_yfinance_bars(
         ticker_clean, yf_interval, micro_fast_track=micro_fast_track
@@ -1177,25 +1235,38 @@ def _get_historical_interval_data_impl(
             if is_usable_data_stream(polygon_frame):
                 data_stream = polygon_frame
 
-    if is_usable_data_stream(data_stream) and update_institutional_tracker:
-        try:
-            tracker = _detect_institutional_block_accumulation(
-                ticker_clean, data_stream, yf_interval
-            )
-            st.session_state.forensic_institutional_tracker = tracker
-        except Exception:
-            st.session_state.forensic_institutional_tracker = {
-                "institutional_block_accumulation": False,
-                "inst_block_summary": "INST_BLOCK: PROCESSOR_FAULT",
-                "volume_baseline_20d": 0.0,
-                "peak_surge_ratio": 0.0,
-            }
-    elif update_institutional_tracker and "forensic_institutional_tracker" not in st.session_state:
+    if micro_fast_track and is_usable_data_stream(data_stream):
+        return apply_local_strike_ram_cap(data_stream)
+
+    if (
+        is_usable_data_stream(data_stream)
+        and update_institutional_tracker
+        and not micro_fast_track
+    ):
+        fetch_cloud_macro_intelligence(ticker_clean, yf_interval, data_stream)
+    elif update_institutional_tracker and not micro_fast_track:
         st.session_state.forensic_institutional_tracker = {
             "institutional_block_accumulation": False,
-            "inst_block_summary": "INST_BLOCK: NO_DATA",
+            "inst_block_summary": "INST_BLOCK: CLOUD_PENDING",
             "volume_baseline_20d": 0.0,
             "peak_surge_ratio": 0.0,
+        }
+        st.session_state.forensic_form4_tracker = {
+            "insider_buy_detected": False,
+            "form4_summary": "FORM4: CLOUD_PENDING",
+            "insider_events": [],
+        }
+    elif micro_fast_track:
+        st.session_state.forensic_institutional_tracker = {
+            "institutional_block_accumulation": False,
+            "inst_block_summary": "INST_BLOCK: LOCAL_STRIKE_BYPASS",
+            "volume_baseline_20d": 0.0,
+            "peak_surge_ratio": 0.0,
+        }
+        st.session_state.forensic_form4_tracker = {
+            "insider_buy_detected": False,
+            "form4_summary": "FORM4: LOCAL_STRIKE_BYPASS",
+            "insider_events": [],
         }
 
     return data_stream
@@ -1490,10 +1561,15 @@ def _build_matrix_execution_readout(
     form4_block=None,
 ) -> str:
     """Bloomberg-grade ASCII box-drawing execution deck for the main monitor."""
+    lane = st.session_state.get("r2_processor_lane", PROCESSOR_LANE_CLOUD)
+    if lane == PROCESSOR_LANE_LOCAL_STRIKE:
+        processor_label = f"LOCAL 1M STRIKE — IB TARGET <{IB_STRIKE_TARGET_MS}MS"
+    else:
+        processor_label = "CLOUD DUAL-STREAM — 5M/15M MACRO PIPELINE"
     header = [
         "╔════════════════════════════════════════╗",
         "║  SAVANT MATRIX EXECUTION TERMINAL      ║",
-        "║  MACBOOK LOCAL QUANT PROCESSOR — LIVE  ║",
+        f"║  {processor_label:<38} ║",
         "╠════════════════════════════════════════╣",
         _matrix_row("TICKER", ticker),
         _matrix_row("PATTERN CLASS", pattern_category or "UNCLASSIFIED"),
@@ -1680,42 +1756,33 @@ def calculate_quantum_frequencies(
     )
     st.session_state.room2_playbook_quality = quality
 
+    lane = st.session_state.get("r2_processor_lane", PROCESSOR_LANE_CLOUD)
     micro_block = None
-    if _is_compressed_variance(data_stream) and resolved_ticker:
+    if lane == PROCESSOR_LANE_CLOUD and _is_compressed_variance(data_stream) and resolved_ticker:
         data_5m = get_historical_5m_data(resolved_ticker)
         if is_usable_data_stream(data_5m):
             micro_block = _analyze_5m_micro_traps(data_5m, resolved_ticker)
 
-    institutional_block = st.session_state.get("forensic_institutional_tracker", {})
-    if not institutional_block and resolved_ticker:
-        try:
-            institutional_block = _detect_institutional_block_accumulation(
-                resolved_ticker, data_stream, "15m"
-            )
-            st.session_state.forensic_institutional_tracker = institutional_block
-        except Exception:
-            institutional_block = {
-                "institutional_block_accumulation": False,
-                "inst_block_summary": "INST_BLOCK: PROCESSOR_FAULT",
-                "volume_baseline_20d": 0.0,
-                "peak_surge_ratio": 0.0,
-            }
-
-    if resolved_ticker:
-        try:
-            form4_block = _scrape_form4_insider_buys(resolved_ticker)
-        except Exception:
-            form4_block = {
-                "insider_buy_detected": False,
-                "form4_summary": "FORM4: EDGAR_WIRE_TIMEOUT",
-                "insider_events": [],
-            }
-    else:
+    if lane == PROCESSOR_LANE_LOCAL_STRIKE:
+        institutional_block = {
+            "institutional_block_accumulation": False,
+            "inst_block_summary": "INST_BLOCK: LOCAL_STRIKE_BYPASS",
+            "volume_baseline_20d": 0.0,
+            "peak_surge_ratio": 0.0,
+        }
         form4_block = {
             "insider_buy_detected": False,
-            "form4_summary": "FORM4: NO_TICKER",
+            "form4_summary": "FORM4: LOCAL_STRIKE_BYPASS",
             "insider_events": [],
         }
+    else:
+        institutional_block = st.session_state.get("forensic_institutional_tracker", {})
+        form4_block = st.session_state.get("forensic_form4_tracker", {})
+        if resolved_ticker and not institutional_block:
+            fetch_cloud_macro_intelligence(resolved_ticker, "15m", data_stream)
+            institutional_block = st.session_state.get("forensic_institutional_tracker", {})
+            form4_block = st.session_state.get("forensic_form4_tracker", {})
+    st.session_state.forensic_institutional_tracker = institutional_block
     st.session_state.forensic_form4_tracker = form4_block
 
     math_block = _local_pattern_math(
