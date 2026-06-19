@@ -24,8 +24,6 @@ except ImportError:
 
 if "r2_good_ticker" not in st.session_state:
     st.session_state.r2_good_ticker = "MLGO"
-if "r2_bad_ticker" not in st.session_state:
-    st.session_state.r2_bad_ticker = "AAPL"
 if "room2_chat_history" not in st.session_state:
     st.session_state.room2_chat_history = []
 elif not isinstance(st.session_state.room2_chat_history, list):
@@ -64,9 +62,7 @@ ROOM2_CLEAN_SLATE_MESSAGE = (
     "All prior records moved to the 15-day Trash Vault — say 'restore my patterns' to undo."
 )
 RESCUE_VAULT_RETENTION_DAYS = 15
-BLACKLIST_SIGNATURE_STATE = "blacklist_signature"
 VAULT_TRACK_VALIDATED = "track_1_validated"
-VAULT_TRACK_TOXIC_BLACKLIST = "track_2_blacklist"
 MACRO_CAROUSEL_POLL_SEC = 15
 MICRO_FAST_TRACK_TARGET_MS = 100
 DATA_FEED_WEBSOCKET = "websocket_subsecond"
@@ -515,14 +511,9 @@ if "room2_bar_count" not in st.session_state: st.session_state.room2_bar_count =
 if "room2_text_buffer" not in st.session_state: st.session_state.room2_text_buffer = ""
 if "r2_good_start_time" not in st.session_state: st.session_state.r2_good_start_time = "09:31 AM"
 if "r2_good_end_time" not in st.session_state: st.session_state.r2_good_end_time = "04:00 PM"
-if "r2_bad_start_time" not in st.session_state: st.session_state.r2_bad_start_time = "09:31 AM"
-if "r2_bad_end_time" not in st.session_state: st.session_state.r2_bad_end_time = "04:00 PM"
 if "r2_single_notes_field" not in st.session_state: st.session_state.r2_single_notes_field = ""
-if "r2_bad_single_notes_field" not in st.session_state: st.session_state.r2_bad_single_notes_field = ""
 if "r2_good_start_date" not in st.session_state: st.session_state.r2_good_start_date = date.today()
 if "r2_good_end_date" not in st.session_state: st.session_state.r2_good_end_date = date.today()
-if "r2_bad_start_date" not in st.session_state: st.session_state.r2_bad_start_date = date.today()
-if "r2_bad_end_date" not in st.session_state: st.session_state.r2_bad_end_date = date.today()
 if "room2_vault_flash" not in st.session_state: st.session_state.room2_vault_flash = ""
 if "room2_last_rescue_vault_id" not in st.session_state: st.session_state.room2_last_rescue_vault_id = None
 if "matrix_cloud_hydrated" not in st.session_state: st.session_state.matrix_cloud_hydrated = False
@@ -533,19 +524,14 @@ if "matrix_cascade_active" not in st.session_state: st.session_state.matrix_casc
 if "matrix_cascade_started_at" not in st.session_state: st.session_state.matrix_cascade_started_at = 0.0
 if "matrix_cascade_final_output" not in st.session_state: st.session_state.matrix_cascade_final_output = ""
 if "matrix_satellites_ready" not in st.session_state: st.session_state.matrix_satellites_ready = True
-if "matrix_blacklist_count" not in st.session_state: st.session_state.matrix_blacklist_count = 0
 if "r2_data_feed_mode" not in st.session_state: st.session_state.r2_data_feed_mode = DATA_FEED_CAROUSEL
 if "r2_timeframe_mode" not in st.session_state: st.session_state.r2_timeframe_mode = "15-Minute"
 if "r2_buffer_context_window" not in st.session_state:
     st.session_state.r2_buffer_context_window = R2_BUFFER_WINDOWS["15-Minute"]
 if "r2_good_macro_weather_layout" not in st.session_state:
     st.session_state.r2_good_macro_weather_layout = R2_MACRO_LAYOUTS[0]
-if "r2_bad_macro_weather_layout" not in st.session_state:
-    st.session_state.r2_bad_macro_weather_layout = R2_MACRO_LAYOUTS[0]
 if "r2_good_execution_strategy" not in st.session_state:
     st.session_state.r2_good_execution_strategy = R2_EXECUTION_STRATEGIES[0]
-if "r2_bad_execution_strategy" not in st.session_state:
-    st.session_state.r2_bad_execution_strategy = R2_EXECUTION_STRATEGIES[0]
 if "purgatory_shelf_active" not in st.session_state: st.session_state.purgatory_shelf_active = False
 if "purgatory_shelf_message" not in st.session_state: st.session_state.purgatory_shelf_message = ""
 if "purgatory_repetition_count" not in st.session_state: st.session_state.purgatory_repetition_count = 0
@@ -1026,11 +1012,12 @@ Inside every numbered Layout block, maintain completely separate, isolated strat
 Adaptive Playbook Floors (Pre-Storage Quality Barrier)
 Hunt backward for the volume-cluster anchor. Measure raw percentage from verified trigger to target exit. Trash instantly below timeframe floor. Setups clearing the floor undergo consistency mining — extract shape metrics, resistance rules, and structural signatures for the playbook.
 
-Pure Alpha Incubation Queue (Single-Track Vault)
-Track only winning DNA setups. No manual toxic inputs. Sub-85% profitable anomalies receive 30-day Temporary Layout Nodes; five repetitions permanently mint official Layout blocks.
+Pure Alpha Ingestion Only (Single-Track Protocol — OVERWRITES ALL PRIOR ANOMALY/TOXIC RULES)
+Single-Deck Ingestion: Track ONLY positive, user-approved winning setups. The manual toxic/blacklist table and input deck are completely removed from the architecture. Never reference Track 2, toxic traps, or blacklist indices.
 
-Post-Mortem Performance Retro-Analysis (Self-Correction Loop)
-Rolling 15-trade window per strategy timeline. Below floor: halt live execution and diagnose Execution Friction / Slippage (signature viable, adjust entry) versus Structural Alpha Decay (decommission parameters, mint Strategy v2).
+Incubation Queue: If a profitable trade fails the 85% signature match to an existing layout, assign it to a Temporary Layout Node with a strict 30-day floating shelf-life. Exact repetition within 30 days resets the clock for another 30 days. Five total repetitions permanently mint an active Layout folder. Timer expiry with no repetitions triggers hard-delete to save database space.
+
+Post-Mortem Diagnostics: The system learns from mistakes automatically through its rolling 15-trade live window. If performance falls below calibrated floors (1.0% for 1m, 3.0% for 5m, 5.0% for 15m), run retrospective analysis to determine whether the strategy requires entry-position adjustment due to market friction or complete decommissioning due to alpha decay.
 
 Hindsight Blinding Protocol (Temporal Fence)
 When evaluating a timestamped minute, you are barred from any future data — price, news, earnings, SEC filings after that exact minute.
@@ -1123,9 +1110,8 @@ def _pattern_archive_query_suffix(*, active_only: bool = True, trash_only: bool 
     parts = [f"pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"]
     if trash_only:
         parts.append("state=eq.soft_deleted")
-        parts.append("pattern_category=neq.TOXIC_ANOMALY")
     elif active_only:
-        parts.append("or=(state.is.null,state.eq.active,state.eq.blacklist_signature,state.eq.incubation)")
+        parts.append("or=(state.is.null,state.eq.active,state.eq.incubation)")
     return "&" + "&".join(parts)
 
 
@@ -1189,9 +1175,9 @@ def _resolve_anomaly_incubation(
 
     if vault_state == "active" and repeat_count >= ANOMALY_PERMANENT_MINT_COUNT:
         message = (
-            f"✅ PERMANENT LAYOUT MINT — Winning alpha reached "
+            f"✅ PERMANENT LAYOUT FOLDER — Winning alpha reached "
             f"{repeat_count}/{ANOMALY_PERMANENT_MINT_COUNT} repetitions. "
-            "Promoted to official active Layout block."
+            "Promoted to official active Layout folder."
         )
         st.session_state.purgatory_shelf_active = False
     elif vault_state == VAULT_STATE_INCUBATION:
@@ -1210,7 +1196,7 @@ def _resolve_anomaly_incubation(
 
 
 def _purge_expired_trash_vault() -> None:
-    """Permanently purge Trash Vault rows older than retention — never touches toxic blacklist."""
+    """Permanently purge Trash Vault rows older than retention window."""
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return
@@ -1223,40 +1209,12 @@ def _purge_expired_trash_vault() -> None:
         requests.delete(
             f"{base}/rest/v1/{table}?state=eq.soft_deleted"
             f"&deleted_at=lt.{cutoff}"
-            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"
-            f"&pattern_category=neq.TOXIC_ANOMALY",
+            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}",
             headers=_supabase_rest_headers(),
             timeout=12,
         )
     except Exception:
         pass
-
-
-def _count_blacklist_signature_rows() -> int:
-    _ensure_supabase_session()
-    if not st.session_state.get("supabase_ready"):
-        return 0
-    table = _forensic_patterns_table()
-    base = st.session_state.supabase_url
-    try:
-        resp = requests.get(
-            f"{base}/rest/v1/{table}?select=id"
-            f"&state=eq.{BLACKLIST_SIGNATURE_STATE}"
-            f"&pattern_category=eq.TOXIC_ANOMALY",
-            headers={**_supabase_rest_headers(), "Prefer": "count=exact"},
-            timeout=12,
-        )
-        if resp.ok:
-            content_range = resp.headers.get("Content-Range", "")
-            if "/" in content_range:
-                total = content_range.split("/")[-1]
-                if total.isdigit():
-                    return int(total)
-            rows = resp.json()
-            return len(rows) if isinstance(rows, list) else 0
-    except Exception:
-        pass
-    return 0
 
 
 def _resolve_data_feed_mode(timeframe_resolution: str) -> str:
@@ -1295,9 +1253,7 @@ def _pattern_row_effective_fields(row: dict) -> dict:
     return merged
 
 
-def _resolve_vault_track(pattern_category: str) -> tuple[str, str]:
-    if pattern_category == "TOXIC_ANOMALY":
-        return VAULT_TRACK_TOXIC_BLACKLIST, BLACKLIST_SIGNATURE_STATE
+def _resolve_vault_track(_pattern_category: str) -> tuple[str, str]:
     return VAULT_TRACK_VALIDATED, "active"
 
 
@@ -1356,14 +1312,10 @@ def _seed_room2_form_from_pattern_row(row: dict) -> None:
     ticker = str(row.get("ticker", "")).strip().upper()
     if not ticker:
         return
-    if cat == "VALIDATED":
-        prefix = "r2_good"
-        notes_key = "r2_single_notes_field"
-    elif cat == "TOXIC_ANOMALY":
-        prefix = "r2_bad"
-        notes_key = "r2_bad_single_notes_field"
-    else:
+    if cat != "VALIDATED":
         return
+    prefix = "r2_good"
+    notes_key = "r2_single_notes_field"
     st.session_state[f"{prefix}_ticker"] = ticker
     if row.get("entry_time"):
         st.session_state[f"{prefix}_start_time"] = str(row["entry_time"])
@@ -1599,12 +1551,6 @@ def _soft_delete_latest_pattern_to_vault() -> str:
             return "⚠️ No active patterns found to move to Trash Vault."
 
         row = rows[0]
-        if str(row.get("pattern_category", "")).upper() == "TOXIC_ANOMALY":
-            return (
-                "🛡️ BLACKLIST LOCK: Toxic trap signatures on Track 2 are permanent. "
-                "This record cannot enter the Trash Vault."
-            )
-
         row_id = row["id"]
         deleted_at = datetime.now(timezone.utc).isoformat()
         patch = requests.patch(
@@ -2009,7 +1955,6 @@ def _evaluate_purgatory_cluster(
     *,
     ticker: str,
     pattern_category: str,
-    deck: str,
 ) -> tuple[bool, str]:
     """Legacy wrapper — incubation queue now handles sub-85% alpha anomalies."""
     if not st.session_state.get("purgatory_shelf_active"):
@@ -2315,11 +2260,10 @@ def _validate_room2_timestamp(timestamp: str) -> bool:
     return _normalize_room2_timestamp(timestamp) is not None
 
 
-def _validate_room2_deck(deck: str) -> bool:
-    prefix = "r2_good" if deck == "good" else "r2_bad"
-    ticker = st.session_state.get(f"{prefix}_ticker", "")
-    start_time = st.session_state.get(f"{prefix}_start_time", "")
-    end_time = st.session_state.get(f"{prefix}_end_time", "")
+def _validate_room2_deck() -> bool:
+    ticker = st.session_state.get("r2_good_ticker", "")
+    start_time = st.session_state.get("r2_good_start_time", "")
+    end_time = st.session_state.get("r2_good_end_time", "")
     return (
         _validate_room2_ticker(ticker)
         and _validate_room2_timestamp(start_time)
@@ -2332,67 +2276,44 @@ def _ensure_room2_widget_defaults() -> None:
     today = date.today()
     bindings = {
         "r2_good_ticker": "MLGO",
-        "r2_bad_ticker": "AAPL",
         "r2_good_start_date": today,
         "r2_good_end_date": today,
-        "r2_bad_start_date": today,
-        "r2_bad_end_date": today,
         "r2_good_start_time": "09:31 AM",
         "r2_good_end_time": "04:00 PM",
-        "r2_bad_start_time": "09:31 AM",
-        "r2_bad_end_time": "04:00 PM",
         "r2_single_notes_field": "",
-        "r2_bad_single_notes_field": "",
     }
     for key, value in bindings.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 
-def _clear_room2_form_buffers(deck: str) -> None:
-    """Reset only the target form chassis keys after a validated deploy."""
-    if deck == "good":
-        keys = (
-            "r2_good_ticker",
-            "r2_good_start_date",
-            "r2_good_start_time",
-            "r2_good_end_date",
-            "r2_good_end_time",
-            "r2_single_notes_field",
-        )
-    else:
-        keys = (
-            "r2_bad_ticker",
-            "r2_bad_start_date",
-            "r2_bad_start_time",
-            "r2_bad_end_date",
-            "r2_bad_end_time",
-            "r2_bad_single_notes_field",
-        )
-    for key in keys:
+def _clear_room2_form_buffers() -> None:
+    """Reset winning-deck form keys after a validated deploy."""
+    for key in (
+        "r2_good_ticker",
+        "r2_good_start_date",
+        "r2_good_start_time",
+        "r2_good_end_date",
+        "r2_good_end_time",
+        "r2_single_notes_field",
+    ):
         st.session_state.pop(key, None)
 
 
-def _handle_room2_deck_submit(deck: str) -> None:
-    if not _validate_room2_deck(deck):
-        if deck == "good":
-            st.session_state.r2_good_validation_error = True
-        else:
-            st.session_state.r2_bad_validation_error = True
+def _handle_room2_deck_submit() -> None:
+    if not _validate_room2_deck():
+        st.session_state.r2_good_validation_error = True
         st.rerun()
         return
-    if deck == "good":
-        st.session_state.r2_good_validation_error = False
-    else:
-        st.session_state.r2_bad_validation_error = False
-    if _deploy_room2_deck(deck):
-        _clear_room2_form_buffers(deck)
+    st.session_state.r2_good_validation_error = False
+    if _deploy_room2_deck():
+        _clear_room2_form_buffers()
     st.rerun()
 
 
-def _deploy_room2_deck(deck: str) -> bool:
+def _deploy_room2_deck() -> bool:
     """Harvest quantum math, vault payload, and lock matrix terminal output."""
-    prefix = "r2_good" if deck == "good" else "r2_bad"
+    prefix = "r2_good"
     ticker = str(st.session_state.get(f"{prefix}_ticker", "")).strip().upper()
     start_date = st.session_state.get(f"{prefix}_start_date")
     start_time = _normalize_room2_timestamp(
@@ -2405,13 +2326,9 @@ def _deploy_room2_deck(deck: str) -> bool:
     entry_coord = _room2_coordinate_string(start_date, start_time) or None
     exit_coord = _room2_coordinate_string(end_date, end_time) or None
 
-    if deck == "good":
-        pattern_category = "VALIDATED"
-        notes = st.session_state.get("r2_single_notes_field", "")
-        deck_tag = "WINNING_DNA"
-    else:
-        return False
-
+    pattern_category = "VALIDATED"
+    notes = st.session_state.get("r2_single_notes_field", "")
+    deck_tag = "WINNING_DNA"
     feedback = notes.strip()
     if start_time or end_time:
         time_meta = f"START:{start_time} | END:{end_time} | DECK:{deck_tag}"
@@ -2529,7 +2446,7 @@ def _deploy_room2_deck(deck: str) -> bool:
         math_block = st.session_state.get("room2_last_math_block", {}) or {}
         match_score = int(math_block.get("match_probability") or 0)
 
-        if deck == "good" and not quality.get("passed"):
+        if not quality.get("passed"):
             floor_pct = quality.get("floor_pct", 1.0)
             move_pct = quality.get("structural_move_pct", 0.0)
             if match_score >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
@@ -2571,7 +2488,6 @@ def _deploy_room2_deck(deck: str) -> bool:
         in_purgatory, purgatory_message = _evaluate_purgatory_cluster(
             ticker=ticker,
             pattern_category=pattern_category,
-            deck=deck,
         )
 
         payload = core_quantum.build_vault_payload(
@@ -2665,20 +2581,13 @@ def _deploy_room2_deck(deck: str) -> bool:
 def _purge_room2_deck_inputs() -> None:
     """Drop widget-bound keys so defaults re-bind on next render — no manual assignment."""
     st.session_state.r2_good_validation_error = False
-    st.session_state.r2_bad_validation_error = False
     for key in (
         "r2_good_ticker",
-        "r2_bad_ticker",
         "r2_good_start_date",
         "r2_good_end_date",
-        "r2_bad_start_date",
-        "r2_bad_end_date",
         "r2_good_start_time",
         "r2_good_end_time",
-        "r2_bad_start_time",
-        "r2_bad_end_time",
         "r2_single_notes_field",
-        "r2_bad_single_notes_field",
     ):
         st.session_state.pop(key, None)
 
@@ -2754,7 +2663,7 @@ def render_room2_forensic_lab():
                     use_container_width=True,
                 )
             if good_deploy:
-                _handle_room2_deck_submit("good")
+                _handle_room2_deck_submit()
 
     with col_right:
         _render_matrix_window1_panel()
