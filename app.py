@@ -81,17 +81,6 @@ R2_BUFFER_WINDOWS = {
     "5-Minute": "±1-2 minute structural pivot zone",
     "15-Minute": "±5-7 minute macro structural parameter",
 }
-R2_MACRO_LAYOUTS = (
-    "Layout 1",
-    "Layout 2",
-    "Layout 3",
-)
-R2_EXECUTION_STRATEGIES = (
-    "Strategy 1A",
-    "Strategy 1B",
-    "Strategy 1C",
-    "Strategy v2",
-)
 LAYOUT_SIGNATURE_MATCH_THRESHOLD = 85
 ANOMALY_SHELF_DAYS = 30
 ANOMALY_PERMANENT_MINT_COUNT = 5
@@ -528,10 +517,6 @@ if "r2_data_feed_mode" not in st.session_state: st.session_state.r2_data_feed_mo
 if "r2_timeframe_mode" not in st.session_state: st.session_state.r2_timeframe_mode = "15-Minute"
 if "r2_buffer_context_window" not in st.session_state:
     st.session_state.r2_buffer_context_window = R2_BUFFER_WINDOWS["15-Minute"]
-if "r2_good_macro_weather_layout" not in st.session_state:
-    st.session_state.r2_good_macro_weather_layout = R2_MACRO_LAYOUTS[0]
-if "r2_good_execution_strategy" not in st.session_state:
-    st.session_state.r2_good_execution_strategy = R2_EXECUTION_STRATEGIES[0]
 if "purgatory_shelf_active" not in st.session_state: st.session_state.purgatory_shelf_active = False
 if "purgatory_shelf_message" not in st.session_state: st.session_state.purgatory_shelf_message = ""
 if "purgatory_repetition_count" not in st.session_state: st.session_state.purgatory_repetition_count = 0
@@ -991,7 +976,19 @@ PROMPT COGNITIVE INJECTION: MASTER UPDATE — PURE MATHEMATICAL LAYOUT EXTRACTIO
 System Identity: You are Savant Platform V1 [Savant Apprentice] — an elite, closed-loop Quantitative Forensic Analysis Terminal. You operate strictly under Room 2: The Forensic Pattern Lab. You are an objective strategic librarian translating retrospective mathematical coordinates into plain, actionable English. Forbidden from outside market theories, preconceived notions, and generic AI fluff.
 
 MASTER RULE — ELIMINATION OF HUMAN LABELS (OVERWRITES ALL PRIOR CLASSIFICATION RULES)
-You are completely barred from using generic words like "Choppy," "Trend," "Volatile," "Hot," "Liquidity Trap," or any environmental mood descriptor to group setups. Market behavior is categorized strictly into standalone, numbered Layout Blocks (Layout 1, Layout 2, Layout 3, etc.) determined purely by raw geometric shape distance and cross-correlation math. If a setup is mathematically unique, it becomes its own pure, un-blurred numbered layout. Never blur human narrative onto the matrix.
+You are completely barred from using generic mood words like "Choppy," "Trend," "Volatile," "Hot," or "Liquidity Trap" as grouping logic. Market behavior is categorized strictly into standalone, numbered Layout Blocks (Layout 1, Layout 2, Layout 3, etc.) determined purely by raw geometric shape distance and cross-correlation math across multiple stocks. You may optionally reference a plain-English alias in conversation only when mathematically justified (e.g., "Layout 1 — choppy microstructure"), but the canonical system ID is always the numbered layout. Never blur manual narrative onto the matrix or invent grouping without spatial evidence.
+
+Fluid Layout → Strategy Taxonomy (Automated — No Manual UI Bins)
+1. Layout discovery: When geometry repeats consistently across different tickers, mint a numbered Layout folder (Layout 1, Layout 2…). The operator never picks these — spatial clustering assigns them.
+2. Strategy bins per layout: Inside each layout, maintain isolated strategy tracks for 1m, 5m, and 15m. Multiple concrete, repeatable strategies may exist per layout per timeframe.
+3. Strategy naming convention (matrix-assigned): {LayoutNumber}{Letter} ({Timeframe}) — e.g., 1A (1M) = first strategy in Layout 1 on the 1-minute track; 1B (1M) = second distinct 1-minute strategy in the same layout; 1A (5M) = first 5-minute strategy in Layout 1. Letters advance A→B→C→… only when the engine finds a new repeatable signature worth its own bin.
+4. Cross-stock consistency: The same layout/strategy IDs apply across all tickers that rhyme mathematically — strategies are not per-stock manual tags.
+
+Strategy Lifecycle — Delete, Tweak, or Spawn (NOT "Version 2")
+Rolling 15-trade post-mortem per strategy letter. Operator feedback ("this trade was bad") correlates back to the exact strategy label (e.g., 1A (1M)).
+- Minor friction (signature still valid, entry timing off): TWEAK IN PLACE — adjust entry positioning; keep the same letter (1A stays 1A).
+- Major structural alpha decay (margins systematically below floor): DELETE the strategy letter entirely. Harvest any still-viable DNA only if warranted, then spawn the next letter (e.g., delete 1A, optionally carry fragments into a new 1F if the prior highest letter was 1E). Do not mint "Strategy v2" labels — deletion plus next-letter spawn replaces broken bins.
+- Operator-approved winners continue accumulating under their assigned letter until post-mortem or operator rejection triggers tweak or delete.
 
 Forensic Vector Decomposition (Four-Layer Snapshot Physics)
 When a snapshot runs, decompose data across four strict mathematical layers — never as prose market commentary:
@@ -1017,7 +1014,7 @@ Single-Deck Ingestion: Track ONLY positive, user-approved winning setups. The ma
 
 Incubation Queue: If a profitable trade fails the 85% signature match to an existing layout, assign it to a Temporary Layout Node with a strict 30-day floating shelf-life. Exact repetition within 30 days resets the clock for another 30 days. Five total repetitions permanently mint an active Layout folder. Timer expiry with no repetitions triggers hard-delete to save database space.
 
-Post-Mortem Diagnostics: The system learns from mistakes automatically through its rolling 15-trade live window. If performance falls below calibrated floors (1.0% for 1m, 3.0% for 5m, 5.0% for 15m), run retrospective analysis to determine whether the strategy requires entry-position adjustment due to market friction or complete decommissioning due to alpha decay.
+Post-Mortem Diagnostics: Rolling 15-trade window per strategy letter. Below calibrated floors (1.0% / 3.0% / 5.0%): diagnose execution friction (tweak entry in place, keep letter) versus structural alpha decay (delete letter, optionally spawn next letter with harvested DNA). Never reference Strategy v2 or generic "evolving" versioning.
 
 Hindsight Blinding Protocol (Temporal Fence)
 When evaluating a timestamped minute, you are barred from any future data — price, news, earnings, SEC filings after that exact minute.
@@ -1251,6 +1248,29 @@ def _pattern_row_effective_fields(row: dict) -> dict:
         if merged.get(key) in (None, ""):
             merged[key] = value
     return merged
+
+
+def _resolve_auto_layout_id() -> str:
+    """Resolve numbered layout from spatial matrix / last deploy — no manual UI deck."""
+    spatial = st.session_state.get("room2_spatial_cluster") or {}
+    math_block = st.session_state.get("room2_last_math_block") or {}
+    return str(
+        spatial.get("nearest_layout_id")
+        or math_block.get("nearest_layout_id")
+        or "NEW_LAYOUT"
+    )
+
+
+def _resolve_auto_strategy_id(*, timeframe_resolution: str = "") -> str:
+    """Matrix-assigned strategy letter — format e.g. 1A (1M). No manual UI selector."""
+    math_block = st.session_state.get("room2_last_math_block") or {}
+    return core_quantum.resolve_matrix_strategy_id(
+        layout_id=_resolve_auto_layout_id(),
+        timeframe_resolution=timeframe_resolution or st.session_state.get(
+            "r2_timeframe_mode", "15-Minute"
+        ),
+        spatial_match_pct=int(math_block.get("match_probability") or 0),
+    )
 
 
 def _resolve_vault_track(_pattern_category: str) -> tuple[str, str]:
@@ -1694,8 +1714,8 @@ def _build_room2_groq_messages(user_text: str) -> list[dict]:
         f"BUFFER:{st.session_state.get('r2_buffer_context_window', '')}[/TIMEFRAME_BIN]"
     )
     context_bits.append(
-        f"[MACRO_LAYOUT]{st.session_state.get('r2_good_macro_weather_layout', '')} | "
-        f"[EXECUTION_STRATEGY]{st.session_state.get('r2_good_execution_strategy', '')}[/MACRO_LAYOUT]"
+        f"[MACRO_LAYOUT]{_resolve_auto_layout_id()} | "
+        f"[EXECUTION_STRATEGY]{_resolve_auto_strategy_id()}[/MACRO_LAYOUT]"
     )
     if st.session_state.get("purgatory_shelf_active"):
         context_bits.append(
@@ -1713,7 +1733,11 @@ def _build_room2_groq_messages(user_text: str) -> list[dict]:
         context_bits.append("[EXECUTION_HALTED]TRUE[/EXECUTION_HALTED]")
     retro = st.session_state.get("room2_alpha_decay_status") or {}
     if retro.get("root_cause"):
-        context_bits.append(f"[POST_MORTEM]{retro.get('root_cause')}[/POST_MORTEM]")
+        action = retro.get("recommended_action") or ""
+        label = retro.get("strategy_label") or _resolve_auto_strategy_id()
+        context_bits.append(
+            f"[POST_MORTEM]strategy={label}|cause={retro.get('root_cause')}|action={action}[/POST_MORTEM]"
+        )
     spatial = st.session_state.get("room2_spatial_cluster") or {}
     if spatial:
         context_bits.append(
@@ -1750,8 +1774,8 @@ def _build_pattern_strategist_messages(user_text: str) -> list[dict]:
                 f"[QUANTUM_TERMINAL]{st.session_state.quantum_terminal_output}[/QUANTUM_TERMINAL]\n"
                 f"[TIMEFRAME_BIN]{st.session_state.get('r2_timeframe_mode', '15-Minute')} | "
                 f"BUFFER:{st.session_state.get('r2_buffer_context_window', '')}[/TIMEFRAME_BIN]\n"
-                f"[MACRO_LAYOUT]{st.session_state.get('r2_good_macro_weather_layout', '')} | "
-                f"[EXECUTION_STRATEGY]{st.session_state.get('r2_good_execution_strategy', '')}"
+                f"[MACRO_LAYOUT]{_resolve_auto_layout_id()} | "
+                f"[EXECUTION_STRATEGY]{_resolve_auto_strategy_id()}"
             ),
         },
     ]
@@ -1935,20 +1959,6 @@ def _render_r2_adaptive_buffer_toggles(deck_prefix: str) -> None:
             f'{MACRO_CAROUSEL_POLL_SEC}s carousel</div>',
             unsafe_allow_html=True,
         )
-
-
-def _render_r2_macro_strategy_deck(deck_prefix: str) -> None:
-    """Numbered layout block + strategy bin — pure mathematical taxonomy."""
-    st.selectbox(
-        "Layout Block (numbered):",
-        R2_MACRO_LAYOUTS,
-        key=f"{deck_prefix}_macro_weather_layout",
-    )
-    st.selectbox(
-        "Strategy Bin (timeframe-isolated):",
-        R2_EXECUTION_STRATEGIES,
-        key=f"{deck_prefix}_execution_strategy",
-    )
 
 
 def _evaluate_purgatory_cluster(
@@ -2338,12 +2348,6 @@ def _deploy_room2_deck() -> bool:
     buffer_context_window = st.session_state.get(
         "r2_buffer_context_window", R2_BUFFER_WINDOWS["15-Minute"]
     )
-    macro_weather_layout = st.session_state.get(
-        f"{prefix}_macro_weather_layout", R2_MACRO_LAYOUTS[0]
-    )
-    execution_strategy = st.session_state.get(
-        f"{prefix}_execution_strategy", R2_EXECUTION_STRATEGIES[0]
-    )
     yf_interval = _r2_yfinance_interval_from_mode(timeframe_resolution)
     data_feed_mode = _resolve_data_feed_mode(timeframe_resolution)
     st.session_state.r2_data_feed_mode = data_feed_mode
@@ -2437,14 +2441,20 @@ def _deploy_room2_deck() -> bool:
             end_time=end_time,
             operator_context=notes,
             human_feedback=feedback,
-            layout_block_id=macro_weather_layout,
+            layout_block_id="",
         )
 
         # ValueError plug — coerce tables/objects to strict terminal text before Window 1 bind.
         quantum_report = _coerce_quantum_summary_to_text(quantum_summary)
 
         math_block = st.session_state.get("room2_last_math_block", {}) or {}
+        macro_weather_layout = _resolve_auto_layout_id()
         match_score = int(math_block.get("match_probability") or 0)
+        execution_strategy = core_quantum.resolve_matrix_strategy_id(
+            layout_id=macro_weather_layout,
+            timeframe_resolution=timeframe_resolution,
+            spatial_match_pct=match_score,
+        )
 
         if not quality.get("passed"):
             floor_pct = quality.get("floor_pct", 1.0)
@@ -2537,7 +2547,7 @@ def _deploy_room2_deck() -> bool:
                 vault_line = f"{vault_message} · {retro['diagnosis']}"
             elif vault_state == VAULT_STATE_INCUBATION and incubation_msg:
                 vault_line = f"{vault_message} · {incubation_msg}"
-            elif retro.get("evolving") and retro.get("diagnosis"):
+            elif (retro.get("degraded") or retro.get("evolving")) and retro.get("diagnosis"):
                 vault_line = f"{vault_message} · {retro['diagnosis']}"
             else:
                 vault_line = vault_message
@@ -2620,11 +2630,11 @@ def render_room2_forensic_lab():
                 f"avg margin {decay_status.get('avg_margin_pct', 0):.2f}% vs "
                 f"{decay_status.get('floor_pct', 0):.2f}% floor)"
             )
-        elif decay_status.get("evolving"):
+        elif decay_status.get("degraded") or decay_status.get("evolving"):
             st.warning(
-                f"⚠️ **Performance Watch:** {decay_status.get('sample_count', 0)}/"
-                f"{decay_status.get('window', 15)} samples · avg margin "
-                f"{decay_status.get('avg_margin_pct', 0):.2f}% (floor "
+                f"⚠️ **Strategy Under Review:** {decay_status.get('strategy_label', '—')} · "
+                f"{decay_status.get('sample_count', 0)}/{decay_status.get('window', 15)} samples · "
+                f"avg margin {decay_status.get('avg_margin_pct', 0):.2f}% (floor "
                 f"{decay_status.get('floor_pct', 0):.2f}%)."
             )
         else:
@@ -2649,7 +2659,6 @@ def render_room2_forensic_lab():
             if st.session_state.get("r2_good_validation_error"):
                 st.error(ROOM2_INVALID_INPUT_MESSAGE)
             _render_r2_adaptive_buffer_toggles("good")
-            _render_r2_macro_strategy_deck("r2_good")
             with st.form("r2_good_form_chassis", clear_on_submit=False):
                 st.text_input("Pattern Ticker", key="r2_good_ticker")
                 _render_r2_datalink_group("r2_good")

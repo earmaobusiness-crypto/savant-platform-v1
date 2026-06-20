@@ -372,6 +372,49 @@ def resolve_anomaly_incubation_state(
     return "track_1_anomaly_incubation", VAULT_STATE_INCUBATION
 
 
+def _extract_layout_number(layout_id: str) -> str:
+    text = str(layout_id or "NEW")
+    match = re.search(r"(\d+)", text)
+    return match.group(1) if match else "NEW"
+
+
+def _timeframe_token(timeframe_resolution: str) -> str:
+    return {"1-Minute": "1M", "5-Minute": "5M", "15-Minute": "15M"}.get(
+        timeframe_resolution, "15M"
+    )
+
+
+def resolve_matrix_strategy_id(
+    *,
+    layout_id: str,
+    timeframe_resolution: str,
+    spatial_match_pct: int = 0,
+) -> str:
+    """
+    Fluid matrix strategy slot — no manual UI.
+    Format: {layoutNumber}{letter} ({timeframe}), e.g. 1A (1M), 1B (5M).
+    High spatial match maps to the primary letter in that layout/timeframe bin;
+    distinct sub-threshold rhymes mint the next letter (A→B→C…).
+    """
+    layout_num = _extract_layout_number(layout_id)
+    tf = _timeframe_token(timeframe_resolution)
+    registry_key = f"{layout_num}|{tf}"
+    registry = st.session_state.setdefault("matrix_strategy_letters", {})
+    used = list(registry.get(registry_key, []))
+
+    if spatial_match_pct >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
+        letter = used[0] if used else "A"
+    else:
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        letter = next((char for char in alphabet if char not in used), "A")
+        if letter not in used:
+            used.append(letter)
+            registry[registry_key] = used
+            st.session_state.matrix_strategy_letters = registry
+
+    return f"{layout_num}{letter} ({tf})"
+
+
 def parse_matrix_meta_from_context(operator_context: str) -> dict:
     """Recover extended vault fields embedded via compact schema fallback."""
     ctx = str(operator_context or "")
@@ -558,7 +601,12 @@ def diagnose_post_mortem_retro_analysis(
 
     root_cause = None
     diagnosis = ""
+    recommended_action = None
     status = "STABLE"
+    strategy_label = execution_strategy or resolve_matrix_strategy_id(
+        layout_id=macro_weather_layout,
+        timeframe_resolution=timeframe_resolution,
+    )
 
     if halt_live:
         status = EXECUTION_HALTED_STATE
@@ -580,18 +628,22 @@ def diagnose_post_mortem_retro_analysis(
             and older_avg >= floor_pct
         ):
             root_cause = ROOT_CAUSE_FRICTION
+            recommended_action = "TWEAK_IN_PLACE"
             diagnosis = (
-                "Live execution HALTED — post-mortem: execution friction / slippage. "
-                "Core signature remains viable; adjust entry window positioning."
+                f"Live execution HALTED — Strategy {strategy_label}: execution friction / "
+                "slippage. Core signature still viable; tweak entry positioning in place — "
+                "do not delete the strategy letter."
             )
         else:
             root_cause = ROOT_CAUSE_STRUCTURAL_DECAY
+            recommended_action = "DELETE_STRATEGY"
             diagnosis = (
-                "Live execution HALTED — post-mortem: structural alpha decay. "
-                "Pattern systematically broken; decommission parameters and mint Strategy v2."
+                f"Live execution HALTED — Strategy {strategy_label}: structural alpha decay. "
+                "Delete this strategy letter from the layout bin. Harvest any viable DNA into "
+                "the next letter slot only if warranted; spawn a new letter for major replacement."
             )
     elif count >= ALPHA_DECAY_ROLLING_N and avg_margin < floor_pct:
-        status = "EVOLVING"
+        status = "DEGRADED"
     elif count >= 5:
         status = "WATCH"
 
@@ -607,10 +659,13 @@ def diagnose_post_mortem_retro_analysis(
         "avg_margin_pct": avg_margin,
         "floor_pct": floor_pct,
         "window": ALPHA_DECAY_ROLLING_N,
-        "evolving": status in (EXECUTION_HALTED_STATE, "EVOLVING"),
+        "evolving": status in (EXECUTION_HALTED_STATE, "DEGRADED"),
+        "degraded": status in (EXECUTION_HALTED_STATE, "DEGRADED"),
         "halt_live_execution": halt_live,
         "root_cause": root_cause,
+        "recommended_action": recommended_action,
         "diagnosis": diagnosis,
+        "strategy_label": strategy_label,
     }
 
 
@@ -649,7 +704,7 @@ def evaluate_alpha_decay(
     timeframe_resolution: str,
 ) -> dict:
     """
-    Rolling last-N margin monitor — returns EVOLVING when average edge drops below floor.
+    Rolling last-N margin monitor — returns DEGRADED when average edge drops below floor.
     Falls back to session ledger when Supabase executions table is unavailable.
     """
     floor_pct = timeframe_margin_floor(timeframe_resolution)
@@ -689,8 +744,8 @@ def evaluate_alpha_decay(
 
     count = len(margins)
     avg_margin = round(sum(margins) / count, 4) if count else 0.0
-    evolving = count >= ALPHA_DECAY_ROLLING_N and avg_margin < floor_pct
-    status = "EVOLVING" if evolving else ("WATCH" if count >= 5 else "STABLE")
+    degraded = count >= ALPHA_DECAY_ROLLING_N and avg_margin < floor_pct
+    status = "DEGRADED" if degraded else ("WATCH" if count >= 5 else "STABLE")
     return {
         "status": status,
         "timeline_key": timeline_key,
@@ -698,7 +753,8 @@ def evaluate_alpha_decay(
         "avg_margin_pct": avg_margin,
         "floor_pct": floor_pct,
         "window": ALPHA_DECAY_ROLLING_N,
-        "evolving": evolving,
+        "evolving": degraded,
+        "degraded": degraded,
     }
 
 
