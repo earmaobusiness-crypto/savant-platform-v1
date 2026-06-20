@@ -521,6 +521,8 @@ if "purgatory_shelf_active" not in st.session_state: st.session_state.purgatory_
 if "purgatory_shelf_message" not in st.session_state: st.session_state.purgatory_shelf_message = ""
 if "purgatory_repetition_count" not in st.session_state: st.session_state.purgatory_repetition_count = 0
 if "purgatory_signature" not in st.session_state: st.session_state.purgatory_signature = ""
+if "room2_text_matrix_string" not in st.session_state: st.session_state.room2_text_matrix_string = ""
+if "room2_deep_research_audit" not in st.session_state: st.session_state.room2_deep_research_audit = {}
 if "supabase_ready" not in st.session_state:
     try:
         st.session_state.supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
@@ -1022,6 +1024,28 @@ When evaluating a timestamped minute, you are barred from any future data — pr
 Common-Sense Dual-Stream Processing
 Cloud handles heavy 5m/15m gathering, news parsing, and SEC filing updates. Local MacBook RAM reserved for 1m strike lane with ~5-minute cap and sub-100ms IB execution target. Never cross-pollinate streams.
 
+Deep-Thinking Internet Research Engine (Room 2 Manual Training Phase)
+Time-Unconstrained Research: During Room 2 manual training, time is not a limitation. Purposely slow down and run exhaustive cloud-side calculations across Polygon.io, yfinance, SEC EDGAR, and news APIs without draining local MacBook CPU or battery. Heavy threads execute on web-connected servers; local silicon runs only fenced geometry math.
+
+Multi-Layer Contextual Audit: For the exact trading day under study, cross-correlate three independent tracks to uncover the true institutional catalyst:
+- Price Action Mechanics: Multi-frame velocity, sub-candle spread expansion, VWAP structural baselines, and Pearson-style structural cleanliness scores.
+- Breaking Corporate News: Real-time keyword sentiment arrays and media flow tracking from yfinance + RSS headline wires.
+- Regulatory Filings: Live SEC Form 4 insider trading public release logs.
+
+Objective Anchor Extraction: Use this deep internet research to locate the exact, silent volume catalyst where the true move originally triggered. Flatten the multi-layer blueprint into a lightweight Text Matrix String (TEXT_MATRIX|...) and weld it permanently to the Supabase cloud vault so master memory survives browser refresh.
+
+SYSTEM RESET — SELF-CORRECTING MULTI-STRATEGY ENGINE (OVERWRITES ALL PRIOR ARCHITECTURE NOTES)
+
+UI Purge: No Market Weather headers, no manual Layout 1/2 tabs, no dropdown filters — the glass stays clean; only database-minted numbered Layout folders display dynamically.
+
+Timeframe-Isolated Total Forensic Fracture (Room 2 Training): Future-blind at Exit B. Lookbacks: 1m rigid ~5-minute max with 1–2 minute in-move clamp; 5m extends to 4:00 AM pre-market; 15m deepest overnight bridge. Bone-deep shatter: velocity/acceleration, volume std-dev, institutional blocks, Form 4, headline sentiment. Tiered floors: 1m 1.0%, 5m 3.0%, 15m 5.0% — trash instantly below. Pure profit exit anchoring: if exit minute is a spike, lock the nearest stable candle cluster at the same profit magnitude.
+
+Genetic Cross-Reference & Purgatory: High multi-layer overlap mints Layout groups with unified Master Signatures; discard non-matching noise. Pack multiple strategies (A, B, C…) per layout per timeframe bin as data accumulates. Sub-85% similarity → strict Purgatory isolation — forbidden from blending until a matching complex makeup arrives, then auto-spawn a new numbered Layout folder.
+
+Live Decommissioning Circuit: Rolling 15-trade monitor per strategy node. Below floor → halt live order tokens immediately. Friction/slippage → modify entry coordinates in place, retain DNA. Structural alpha decay → delete strategy letter, leave vacancy; multi-stock Room 2 validation required before hardened replacement mint.
+
+Data Durability: isinstance(df, pd.DataFrame) and not df.empty guards on all frame lookups; forward-fill padding on thin sessions; permanent Supabase vault_track/state/timeframe_resolution/strategy_executions persistence.
+
 Operator Directive
 Map literal operator examples ("I like this setup", "This bounce off VWAP was nice") directly into cloud memory as structural signature coordinates — never as mood labels. Maintain the compressed master layout index at all times.
 
@@ -1179,9 +1203,10 @@ def _resolve_anomaly_incubation(
         st.session_state.purgatory_shelf_active = False
     elif vault_state == VAULT_STATE_INCUBATION:
         message = (
-            f"⏳ TEMPORARY LAYOUT NODE — {repeat_count}/{ANOMALY_PERMANENT_MINT_COUNT} "
-            f"repetitions · 30-day shelf resets to {shelf_expires[:10]}. "
-            f"Layout match {match_score}% (<{LAYOUT_SIGNATURE_MATCH_THRESHOLD}% threshold)."
+            f"⏳ PURGATORY SHELF — {repeat_count}/{ANOMALY_PERMANENT_MINT_COUNT} "
+            f"repetitions · 30-day lock · geometric match {match_score}% "
+            f"(<{LAYOUT_SIGNATURE_MATCH_THRESHOLD}% — forbidden from blending). "
+            f"Timer resets to {shelf_expires[:10]}."
         )
         st.session_state.purgatory_shelf_active = True
         st.session_state.purgatory_shelf_message = message
@@ -1247,6 +1272,16 @@ def _pattern_row_effective_fields(row: dict) -> dict:
     for key, value in meta.items():
         if merged.get(key) in (None, ""):
             merged[key] = value
+    ctx = str(merged.get("operator_context") or "")
+    if not merged.get("text_matrix_string") and "TEXT_MATRIX|" in ctx:
+        for segment in ctx.split("|"):
+            if segment.strip().startswith("TEXT_MATRIX"):
+                merged["text_matrix_string"] = segment.strip()
+                break
+        if not merged.get("text_matrix_string"):
+            idx = ctx.find("TEXT_MATRIX|")
+            if idx >= 0:
+                merged["text_matrix_string"] = ctx[idx:].split(" | MATRIX_META")[0].strip()
     return merged
 
 
@@ -1440,6 +1475,9 @@ def _hydrate_matrix_memory_from_cloud() -> None:
                 st.session_state.quantum_terminal_output = report
         st.session_state.room2_forensic_ticker = str(latest.get("ticker") or "")
         st.session_state.room2_bar_count = int(latest.get("bar_count") or 0)
+        matrix_blob = str(latest.get("text_matrix_string") or "").strip()
+        if matrix_blob:
+            st.session_state.room2_text_matrix_string = matrix_blob
         if not st.session_state.get("matrix_form_seeded"):
             _seed_room2_form_from_pattern_row(latest)
             st.session_state.matrix_form_seeded = True
@@ -1748,6 +1786,9 @@ def _build_room2_groq_messages(user_text: str) -> list[dict]:
     matrix_index = st.session_state.get("layout_master_matrix_index") or []
     if matrix_index:
         context_bits.append(f"[LAYOUT_MATRIX_INDEX]count={len(matrix_index)}[/LAYOUT_MATRIX_INDEX]")
+    text_matrix = st.session_state.get("room2_text_matrix_string", "")
+    if text_matrix:
+        context_bits.append(f"[TEXT_MATRIX]{text_matrix}[/TEXT_MATRIX]")
     groq_msgs = [
         {"role": "system", "content": f"{FORENSIC_EXPERT_SYSTEM}\n{TOKEN_GUARD}"},
     ]
@@ -1974,7 +2015,7 @@ def _evaluate_purgatory_cluster(
 
 def _render_purgatory_shelf() -> None:
     st.markdown(
-        '<div class="room2-terminal-header">▸ THE ALPHA INCUBATION SHELF</div>',
+        '<div class="room2-terminal-header">▸ PURGATORY SHELF — ISOLATED SUB-85% SETUPS</div>',
         unsafe_allow_html=True,
     )
     if st.session_state.get("purgatory_shelf_active"):
@@ -1983,8 +2024,8 @@ def _render_purgatory_shelf() -> None:
     else:
         shelf_class = "purgatory-shelf"
         body = (
-            "░ ALPHA INCUBATION STANDBY — Single-track winning-DNA vault. "
-            "Sub-85% profitable anomalies mint to 30-day Temporary Layout Nodes."
+            "░ PURGATORY STANDBY — Setups below 85% geometric similarity are isolated here. "
+            "No blending with active Layout folders until a matching complex makeup repeats."
         )
     st.markdown(
         f'<div class="{shelf_class}">{escape(body)}</div>',
@@ -2431,6 +2472,18 @@ def _deploy_room2_deck() -> bool:
         )
         st.session_state.room2_playbook_quality = quality
 
+        research_audit = core_quantum.run_deep_internet_research_audit(
+            ticker=ticker,
+            data_stream=data_stream,
+            start_date=start_date,
+            start_time=start_time,
+            end_date=end_date,
+            end_time=end_time,
+            timeframe_resolution=timeframe_resolution,
+            quality=quality,
+        )
+        text_matrix_string = research_audit.get("text_matrix_string", "")
+
         quantum_summary = core_quantum.calculate_quantum_frequencies(
             data_stream,
             pattern_category=pattern_category,
@@ -2521,6 +2574,7 @@ def _deploy_room2_deck() -> bool:
             anomaly_repeat_count=repeat_count,
             shelf_expires_at=shelf_expires,
             structural_move_pct=structural_move,
+            text_matrix_string=text_matrix_string,
         )
 
         ok, vault_message = core_quantum.stream_payload_to_vault(payload)
@@ -2588,6 +2642,49 @@ def _deploy_room2_deck() -> bool:
         return False
 
 
+def _fetch_active_layout_folders() -> list[str]:
+    """Distinct numbered Layout folders minted in Supabase — read-only, no manual UI."""
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return []
+    table = _forensic_patterns_table()
+    base = st.session_state.supabase_url
+    try:
+        resp = requests.get(
+            f"{base}/rest/v1/{table}?select=macro_weather_layout"
+            f"{_pattern_archive_query_suffix(active_only=True)}"
+            f"&macro_weather_layout=not.is.null",
+            headers=_supabase_rest_headers(),
+            timeout=12,
+        )
+        if resp.ok and isinstance(resp.json(), list):
+            seen: set[str] = set()
+            folders: list[str] = []
+            for row in resp.json():
+                label = str(row.get("macro_weather_layout") or "").strip()
+                if label and label not in seen:
+                    seen.add(label)
+                    folders.append(label)
+            return sorted(folders)
+    except Exception:
+        pass
+    return []
+
+
+def _render_dynamic_layout_registry() -> None:
+    """Automated dynamic UI — cloud-minted Layout folders only, zero manual selectors."""
+    folders = _fetch_active_layout_folders()
+    if folders:
+        preview = " · ".join(folders[:16])
+        extra = f" · +{len(folders) - 16} more" if len(folders) > 16 else ""
+        st.caption(f"📂 **Active Layout Folders (database-minted):** {preview}{extra}")
+    else:
+        st.caption(
+            "📂 **Active Layout Folders:** awaiting first cloud mint — "
+            "the math core assigns numbered folders automatically."
+        )
+
+
 def _purge_room2_deck_inputs() -> None:
     """Drop widget-bound keys so defaults re-bind on next render — no manual assignment."""
     st.session_state.r2_good_validation_error = False
@@ -2621,6 +2718,7 @@ def render_room2_forensic_lab():
         f"☁️ **Winning-DNA Memory (cloud-synced):** {active_count} active layouts · "
         f"{trash_count} in {RESCUE_VAULT_RETENTION_DAYS}-day Trash Vault."
     )
+    _render_dynamic_layout_registry()
     decay_status = st.session_state.get("room2_alpha_decay_status")
     if decay_status:
         if decay_status.get("halt_live_execution"):

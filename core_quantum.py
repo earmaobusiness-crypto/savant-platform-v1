@@ -28,9 +28,10 @@ TIMEFRAME_MARGIN_FLOORS = {
 }
 LOOKBACK_DELTAS = {
     "1-Minute": datetime.timedelta(minutes=5),
-    "5-Minute": datetime.timedelta(hours=6),
-    "15-Minute": datetime.timedelta(hours=1),
+    "5-Minute": datetime.timedelta(hours=12),
+    "15-Minute": datetime.timedelta(hours=18),
 }
+INNER_MOVE_MAX_1M = datetime.timedelta(minutes=2)
 ROOT_CAUSE_FRICTION = "execution_friction_slippage"
 ROOT_CAUSE_STRUCTURAL_DECAY = "structural_alpha_decay"
 EXECUTION_HALTED_STATE = "execution_halted"
@@ -245,8 +246,39 @@ def pad_datastream_gaps(data_stream):
 
 
 def _calibrated_lookback_start(end_dt: datetime.datetime, timeframe_resolution: str):
+    """Timeframe-isolated forensic lookback — 1m tight, 5m to 4AM, 15m overnight bridge."""
+    if end_dt is None:
+        return None
+    if timeframe_resolution == "1-Minute":
+        return end_dt - LOOKBACK_DELTAS["1-Minute"]
+    if timeframe_resolution == "5-Minute":
+        premarket_open = end_dt.replace(hour=4, minute=0, second=0, microsecond=0)
+        if end_dt < premarket_open:
+            premarket_open = premarket_open - datetime.timedelta(days=1)
+        wide_back = end_dt - LOOKBACK_DELTAS["5-Minute"]
+        return premarket_open if premarket_open > wide_back else wide_back
+    if timeframe_resolution == "15-Minute":
+        return end_dt - LOOKBACK_DELTAS["15-Minute"]
     delta = LOOKBACK_DELTAS.get(timeframe_resolution, datetime.timedelta(hours=1))
     return end_dt - delta
+
+
+def _clamp_inner_move_window(
+    start_dt: datetime.datetime | None,
+    end_dt: datetime.datetime | None,
+    timeframe_resolution: str,
+) -> datetime.datetime | None:
+    """1m track: limit in-move look-in to 1–2 minutes to protect entry runway."""
+    if (
+        timeframe_resolution != "1-Minute"
+        or start_dt is None
+        or end_dt is None
+        or end_dt <= start_dt
+    ):
+        return start_dt
+    if end_dt - start_dt > INNER_MOVE_MAX_1M:
+        return end_dt - INNER_MOVE_MAX_1M
+    return start_dt
 
 
 def _price_at_datetime(data_stream, target_dt: datetime.datetime):
@@ -279,6 +311,98 @@ def hunt_volume_anchor(data_stream, exit_dt: datetime.datetime, lookback_start_d
         return anchor_idx, anchor_price
     except Exception:
         return None, None
+
+
+def resolve_stable_profit_exit_anchor(
+    data_stream,
+    *,
+    exit_dt: datetime.datetime | None,
+    anchor_price: float | None,
+    target_move_pct: float,
+    timeframe_resolution: str,
+) -> tuple[float | None, str | None]:
+    """
+    Pure profit-target exit anchoring — if the chosen exit minute is a spike,
+    scan adjacent candles for the most stable cluster capturing the same magnitude.
+    """
+    if exit_dt is None or not anchor_price or anchor_price <= 0:
+        return _price_at_datetime(data_stream, exit_dt), (
+            str(exit_dt) if exit_dt is not None else None
+        )
+    frame = _ensure_dataframe(data_stream)
+    if frame is None:
+        return _price_at_datetime(data_stream, exit_dt), str(exit_dt)
+
+    bar_minutes = {"1-Minute": 1, "5-Minute": 5, "15-Minute": 15}.get(timeframe_resolution, 5)
+    window = datetime.timedelta(minutes=bar_minutes * 4)
+    try:
+        subset = frame[
+            (frame.index >= exit_dt - window) & (frame.index <= exit_dt + window)
+        ]
+        if not isinstance(subset, pd.DataFrame) or subset.empty:
+            return _price_at_datetime(data_stream, exit_dt), str(exit_dt)
+
+        closes = subset["Close"].astype(float)
+        median_close = float(closes.median()) if len(closes) else 0.0
+        best_idx = subset.index[-1]
+        best_px = float(closes.iloc[-1])
+        best_score = 999.0
+        for idx, px in closes.items():
+            px_f = float(px)
+            move_pct = abs((px_f - anchor_price) / anchor_price * 100)
+            spike_penalty = (
+                abs(px_f - median_close) / median_close * 100 if median_close else 0.0
+            )
+            score = abs(move_pct - target_move_pct) + spike_penalty * 0.35
+            if score < best_score:
+                best_score = score
+                best_idx = idx
+                best_px = px_f
+        return best_px, str(best_idx)
+    except Exception:
+        return _price_at_datetime(data_stream, exit_dt), str(exit_dt)
+
+
+def extract_master_signature_vector(
+    snapshot_vec: list[float],
+    spatial_match_pct: int,
+    library: list[dict] | None = None,
+) -> dict:
+    """
+    Genetic cross-reference — high overlap merges into a unified Master Signature;
+    non-matching noise is discarded to keep the layout DNA pure.
+    """
+    library = library or list(st.session_state.get("layout_master_matrix_index", []))
+    spatial = compute_spatial_layout_match(snapshot_vec, library)
+    overlap = max(int(spatial_match_pct or 0), int(spatial.get("spatial_match_pct") or 0))
+    nearest = str(spatial.get("nearest_layout_id") or "NEW_LAYOUT")
+
+    if overlap >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
+        for entry in library:
+            if str(entry.get("layout_id")) != nearest:
+                continue
+            stored = entry.get("vector") or []
+            if len(stored) == len(snapshot_vec):
+                merged = [round((a + b) / 2.0, 6) for a, b in zip(snapshot_vec, stored)]
+                return {
+                    "master_signature": merged,
+                    "layout_id": nearest,
+                    "overlap_pct": overlap,
+                    "noise_discarded": True,
+                }
+        return {
+            "master_signature": snapshot_vec,
+            "layout_id": nearest,
+            "overlap_pct": overlap,
+            "noise_discarded": False,
+        }
+
+    return {
+        "master_signature": snapshot_vec,
+        "layout_id": "PURGATORY_PENDING",
+        "overlap_pct": overlap,
+        "noise_discarded": True,
+    }
 
 
 def apply_temporal_fence_and_lookback(
@@ -338,13 +462,32 @@ def evaluate_playbook_quality_barrier(
     """
     floor_pct = timeframe_margin_floor(timeframe_resolution)
     end_dt = _parse_session_datetime(end_date, end_time)
+    start_dt = _parse_session_datetime(start_date, start_time)
     lookback_start = _calibrated_lookback_start(end_dt, timeframe_resolution) if end_dt else None
-    anchor_ts, anchor_price = hunt_volume_anchor(data_stream, end_dt, lookback_start)
-    exit_price = _price_at_datetime(data_stream, end_dt)
+    inner_start = _clamp_inner_move_window(start_dt, end_dt, timeframe_resolution)
+    anchor_search_start = lookback_start
+    if inner_start is not None and lookback_start is not None:
+        anchor_search_start = max(inner_start, lookback_start)
+    elif inner_start is not None:
+        anchor_search_start = inner_start
+
+    anchor_ts, anchor_price = hunt_volume_anchor(data_stream, end_dt, anchor_search_start)
+    raw_exit_price = _price_at_datetime(data_stream, end_dt)
 
     structural_move_pct = 0.0
-    if anchor_price and exit_price and anchor_price > 0:
-        structural_move_pct = abs((exit_price - anchor_price) / anchor_price * 100)
+    exit_price = raw_exit_price
+    exit_anchor_ts = str(end_dt) if end_dt is not None else None
+    if anchor_price and raw_exit_price and anchor_price > 0:
+        structural_move_pct = abs((raw_exit_price - anchor_price) / anchor_price * 100)
+        exit_price, exit_anchor_ts = resolve_stable_profit_exit_anchor(
+            data_stream,
+            exit_dt=end_dt,
+            anchor_price=anchor_price,
+            target_move_pct=structural_move_pct,
+            timeframe_resolution=timeframe_resolution,
+        )
+        if exit_price and anchor_price:
+            structural_move_pct = abs((exit_price - anchor_price) / anchor_price * 100)
 
     passed = structural_move_pct >= floor_pct
     return {
@@ -355,7 +498,10 @@ def evaluate_playbook_quality_barrier(
         "anchor_timestamp": str(anchor_ts) if anchor_ts is not None else None,
         "anchor_price": anchor_price,
         "exit_price": exit_price,
+        "raw_exit_price": raw_exit_price,
+        "exit_anchor_timestamp": exit_anchor_ts,
         "timeframe_resolution": timeframe_resolution,
+        "lookback_start": str(lookback_start) if lookback_start else None,
     }
 
 
@@ -639,8 +785,8 @@ def diagnose_post_mortem_retro_analysis(
             recommended_action = "DELETE_STRATEGY"
             diagnosis = (
                 f"Live execution HALTED — Strategy {strategy_label}: structural alpha decay. "
-                "Delete this strategy letter from the layout bin. Harvest any viable DNA into "
-                "the next letter slot only if warranted; spawn a new letter for major replacement."
+                "Delete this strategy letter from the layout folder, leaving an open vacancy. "
+                "Multi-stock Room 2 validation required before minting a hardened replacement."
             )
     elif count >= ALPHA_DECAY_ROLLING_N and avg_margin < floor_pct:
         status = "DEGRADED"
@@ -666,6 +812,7 @@ def diagnose_post_mortem_retro_analysis(
         "recommended_action": recommended_action,
         "diagnosis": diagnosis,
         "strategy_label": strategy_label,
+        "multi_stock_validation_required": recommended_action == "DELETE_STRATEGY",
     }
 
 
@@ -1171,6 +1318,250 @@ def apply_local_strike_ram_cap(data_stream, cap_minutes: int = LOCAL_1M_RAM_CAP_
     except Exception:
         pass
     return frame
+
+
+def _fetch_research_news_headlines(ticker: str, *, limit: int = 8) -> list[str]:
+    """Cloud-side news wire for Room 2 deep research — keeps heavy I/O off local silicon."""
+    headlines: list[str] = []
+    ticker_clean = str(ticker).strip().upper()
+    try:
+        for item in (yf.Ticker(ticker_clean).news or [])[:limit]:
+            title = str(item.get("title", "")).strip()
+            if title:
+                headlines.append(title)
+    except Exception:
+        pass
+    try:
+        q = urllib.parse.quote(f"{ticker_clean} stock", safe="")
+        rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+        resp = requests.get(rss_url, timeout=12, headers=SEC_HEADERS)
+        if resp.ok:
+            root = ElementTree.fromstring(resp.content)
+            for node in root.findall(".//item/title")[:limit]:
+                if node.text:
+                    headlines.append(node.text.strip())
+    except Exception:
+        pass
+    seen: set[str] = set()
+    unique: list[str] = []
+    for headline in headlines:
+        key = headline.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(headline)
+        if len(unique) >= limit:
+            break
+    return unique
+
+
+def _score_news_sentiment(headlines: list[str]) -> dict:
+    """Lightweight keyword sentiment array — objective media-flow proxy."""
+    bullish = (
+        "surge", "beat", "upgrade", "buy", "breakout", "record", "partnership",
+        "approval", "contract", "growth", "profit", "raise", "strong",
+    )
+    bearish = (
+        "miss", "downgrade", "sell", "probe", "investigation", "cut", "loss",
+        "bankruptcy", "delay", "recall", "lawsuit", "weak", "decline",
+    )
+    bull_hits = bear_hits = 0
+    for headline in headlines:
+        low = headline.lower()
+        bull_hits += sum(1 for word in bullish if word in low)
+        bear_hits += sum(1 for word in bearish if word in low)
+    net = bull_hits - bear_hits
+    if net >= 2:
+        bias = "POSITIVE_FLOW"
+    elif net <= -2:
+        bias = "NEGATIVE_FLOW"
+    else:
+        bias = "NEUTRAL_FLOW"
+    return {
+        "bias": bias,
+        "bullish_hits": bull_hits,
+        "bearish_hits": bear_hits,
+        "headline_count": len(headlines),
+    }
+
+
+def _audit_price_action_mechanics(
+    data_stream,
+    end_dt: datetime.datetime | None,
+    lookback_start_dt: datetime.datetime | None,
+    quality: dict | None = None,
+) -> dict:
+    """Price-action track: velocity, spread expansion, VWAP baseline, Pearson cleanliness."""
+    frame = _ensure_dataframe(data_stream)
+    if frame is None or end_dt is None:
+        return {}
+    try:
+        if lookback_start_dt is not None:
+            window = frame[(frame.index <= end_dt) & (frame.index >= lookback_start_dt)]
+        else:
+            window = frame[frame.index <= end_dt]
+        if not isinstance(window, pd.DataFrame) or window.empty:
+            return {}
+
+        closes = window["Close"].astype(float)
+        open_px = float(closes.iloc[0])
+        close_px = float(closes.iloc[-1])
+        velocity_pct = ((close_px - open_px) / open_px * 100) if open_px else 0.0
+
+        spread_pct = ((window["High"] - window["Low"]) / window["Close"].replace(0, pd.NA) * 100).astype(float)
+        spread_pct = spread_pct.fillna(0.0)
+        if len(spread_pct) >= 6:
+            spread_expansion = float(spread_pct.iloc[-3:].mean() - spread_pct.iloc[:3].mean())
+        else:
+            spread_expansion = float(spread_pct.mean()) if len(spread_pct) else 0.0
+
+        vol_sum = float(window["Volume"].sum()) if "Volume" in window.columns else 0.0
+        if vol_sum > 0:
+            vwap = float((window["Close"] * window["Volume"]).sum() / vol_sum)
+        else:
+            vwap = close_px
+
+        pearson_r = 0.0
+        if len(closes) >= 4:
+            returns = closes.pct_change().dropna()
+            benchmark = returns.expanding().mean().dropna()
+            aligned = returns.loc[benchmark.index]
+            if len(aligned) >= 3 and aligned.std() > 0 and benchmark.std() > 0:
+                pearson_r = float(aligned.corr(benchmark))
+
+        anchor_ts = (quality or {}).get("anchor_timestamp")
+        anchor_price = (quality or {}).get("anchor_price")
+        return {
+            "session_velocity_pct": round(velocity_pct, 3),
+            "spread_expansion_pct": round(spread_expansion, 3),
+            "vwap_baseline": round(vwap, 4),
+            "pearson_cleanliness": round(pearson_r, 4),
+            "bar_count": len(window),
+            "anchor_timestamp": anchor_ts,
+            "anchor_price": anchor_price,
+        }
+    except Exception:
+        return {}
+
+
+def build_text_matrix_string(
+    *,
+    ticker: str,
+    trading_day,
+    anchor_timestamp,
+    structural_move_pct: float,
+    price_action: dict,
+    news_sentiment: dict,
+    news_headlines: list[str],
+    form4: dict,
+    institutional: dict,
+    timeframe_resolution: str,
+) -> str:
+    """Flatten multi-layer audit into a lightweight, vault-durable Text Matrix String."""
+    day_label = str(trading_day or "")[:10]
+    anchor_label = str(anchor_timestamp or "UNKNOWN")[:19]
+    headlines = " || ".join(news_headlines[:3])[:180] if news_headlines else "NONE"
+    form4_summary = str((form4 or {}).get("form4_summary", "FORM4:NA"))[:80]
+    inst_summary = str((institutional or {}).get("inst_block_summary", "INST:NA"))[:80]
+    return (
+        f"TEXT_MATRIX|TKR:{ticker}|DAY:{day_label}|TF:{timeframe_resolution}|"
+        f"ANCHOR:{anchor_label}|MOVE:{float(structural_move_pct or 0):.2f}%|"
+        f"PA:VEL={price_action.get('session_velocity_pct', 0)}|"
+        f"SPREAD={price_action.get('spread_expansion_pct', 0)}|"
+        f"VWAP={price_action.get('vwap_baseline', 0)}|"
+        f"PEARSON={price_action.get('pearson_cleanliness', 0)}|"
+        f"NEWS:{news_sentiment.get('bias', 'NEUTRAL_FLOW')}|"
+        f"HDLNS:{headlines}|FORM4:{form4_summary}|INST:{inst_summary}"
+    )
+
+
+def run_deep_internet_research_audit(
+    *,
+    ticker: str,
+    data_stream,
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+    timeframe_resolution: str,
+    quality: dict | None = None,
+) -> dict:
+    """
+    Room 2 manual training — time-unconstrained, cloud-side deep research engine.
+    Cross-correlates price mechanics, breaking news sentiment, and SEC Form 4 filings
+    to extract the objective volume anchor catalyst without draining local MacBook power.
+    """
+    ticker_clean = str(ticker).strip().upper()
+    end_dt = _parse_session_datetime(end_date, end_time)
+    lookback_start = _calibrated_lookback_start(end_dt, timeframe_resolution) if end_dt else None
+    start_dt = _parse_session_datetime(start_date, start_time)
+    if start_dt is not None and lookback_start is not None and start_dt < lookback_start:
+        lookback_start = start_dt
+
+    if quality is None and is_usable_data_stream(data_stream):
+        quality = evaluate_playbook_quality_barrier(
+            data_stream,
+            start_date=start_date,
+            start_time=start_time,
+            end_date=end_date,
+            end_time=end_time,
+            timeframe_resolution=timeframe_resolution,
+        )
+    quality = quality or {}
+
+    price_action = _audit_price_action_mechanics(
+        data_stream, end_dt, lookback_start, quality
+    )
+
+    yf_interval = {"1-Minute": "1m", "5-Minute": "5m", "15-Minute": "15m"}.get(
+        timeframe_resolution, "15m"
+    )
+    try:
+        institutional = _detect_institutional_block_accumulation(
+            ticker_clean, data_stream, yf_interval
+        )
+        st.session_state.forensic_institutional_tracker = institutional
+    except Exception:
+        institutional = st.session_state.get("forensic_institutional_tracker", {})
+
+    try:
+        form4 = _scrape_form4_insider_buys(ticker_clean)
+        st.session_state.forensic_form4_tracker = form4
+    except Exception:
+        form4 = st.session_state.get("forensic_form4_tracker", {})
+
+    news_headlines = _fetch_research_news_headlines(ticker_clean)
+    news_sentiment = _score_news_sentiment(news_headlines)
+
+    text_matrix_string = build_text_matrix_string(
+        ticker=ticker_clean,
+        trading_day=end_date,
+        anchor_timestamp=quality.get("anchor_timestamp"),
+        structural_move_pct=float(quality.get("structural_move_pct") or 0.0),
+        price_action=price_action,
+        news_sentiment=news_sentiment,
+        news_headlines=news_headlines,
+        form4=form4,
+        institutional=institutional,
+        timeframe_resolution=timeframe_resolution,
+    )
+
+    audit = {
+        "research_mode": "deep_training_cloud",
+        "processor_lane": PROCESSOR_LANE_CLOUD,
+        "text_matrix_string": text_matrix_string,
+        "price_action": price_action,
+        "news_sentiment": news_sentiment,
+        "news_headlines": news_headlines,
+        "form4": form4,
+        "institutional": institutional,
+        "anchor_timestamp": quality.get("anchor_timestamp"),
+        "anchor_price": quality.get("anchor_price"),
+        "structural_move_pct": quality.get("structural_move_pct"),
+    }
+    st.session_state.room2_deep_research_audit = audit
+    st.session_state.room2_text_matrix_string = text_matrix_string
+    return audit
 
 
 def fetch_cloud_macro_intelligence(ticker: str, interval: str, data_stream=None) -> dict:
@@ -1764,6 +2155,7 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
         "anomaly_repeat_count",
         "shelf_expires_at",
         "structural_move_pct",
+        "text_matrix_string",
     )
 
     def _post(body: dict):
@@ -1930,18 +2322,25 @@ def calculate_quantum_frequencies(
     snapshot_vec = extract_forensic_feature_vector(velocity, math_block)
     spatial = compute_spatial_layout_match(snapshot_vec)
     blended_match = max(int(math_block.get("match_probability") or 0), spatial["spatial_match_pct"])
+    genetic = extract_master_signature_vector(snapshot_vec, blended_match)
+    master_vec = genetic.get("master_signature") or snapshot_vec
+    st.session_state.room2_master_signature = genetic
     math_block["match_probability"] = blended_match
     math_block["spatial_match_pct"] = spatial["spatial_match_pct"]
     math_block["cosine_similarity"] = spatial["cosine_similarity"]
     math_block["euclidean_distance"] = spatial["euclidean_distance"]
-    math_block["nearest_layout_id"] = spatial["nearest_layout_id"]
+    math_block["nearest_layout_id"] = genetic.get("layout_id") or spatial["nearest_layout_id"]
+    math_block["master_overlap_pct"] = genetic.get("overlap_pct", 0)
     st.session_state.room2_spatial_cluster = spatial
     st.session_state.room2_last_math_block = math_block
 
-    if layout_block_id or resolved_ticker:
+    register_id = str(
+        layout_block_id or genetic.get("layout_id") or spatial["nearest_layout_id"]
+    )
+    if register_id != "PURGATORY_PENDING" and resolved_ticker:
         register_layout_vector_in_master_index(
-            layout_id=str(layout_block_id or spatial["nearest_layout_id"]),
-            vector=snapshot_vec,
+            layout_id=register_id,
+            vector=master_vec,
             ticker=resolved_ticker or "UNKNOWN",
             timeframe_resolution=str(st.session_state.get("r2_timeframe_mode", "15-Minute")),
         )
@@ -1983,8 +2382,13 @@ def build_vault_payload(
     anomaly_repeat_count: int = 0,
     shelf_expires_at: str = "",
     structural_move_pct: float = 0.0,
+    text_matrix_string: str = "",
 ) -> dict:
     """Package Room 2 deck parameters for Internet Vault streaming."""
+    notes = operator_notes.strip()
+    matrix_blob = str(text_matrix_string or st.session_state.get("room2_text_matrix_string", "")).strip()
+    if matrix_blob and "TEXT_MATRIX|" not in notes:
+        notes = f"{notes} | {matrix_blob}".strip(" |") if notes else matrix_blob
     body = {
         "ticker": ticker.upper(),
         "pattern_category": (pattern_category or "UNCLASSIFIED").strip().upper(),
@@ -1992,7 +2396,7 @@ def build_vault_payload(
         "exit_coordinate": exit_coordinate,
         "entry_time": entry_time,
         "exit_time": exit_time,
-        "operator_context": operator_notes.strip(),
+        "operator_context": notes,
         "quantum_report": quantum_report,
         "bar_count": bar_count,
         "timeframe_resolution": timeframe_resolution,
@@ -2015,6 +2419,7 @@ def build_vault_payload(
         "anomaly_repeat_count": anomaly_repeat_count,
         "shelf_expires_at": shelf_expires_at or None,
         "structural_move_pct": round(float(structural_move_pct), 4),
+        "text_matrix_string": matrix_blob,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     return body
