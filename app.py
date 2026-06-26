@@ -2044,10 +2044,6 @@ def _render_room1_forensic_front_desk():
 
     with col_chat_side:
         st.markdown("<div style='height: 1vh;'></div>", unsafe_allow_html=True)
-        st.caption(
-            "🔒 **Volatile local RAM** — conversation lives only in this session. "
-            "Refresh or reset wipes all chat text. Supabase is read-only for layout comparison."
-        )
         memory_cap = _room1_memory_capacity()
         memory_locked = bool(memory_cap.get("locked") or st.session_state.get("room1_memory_locked"))
         if memory_locked:
