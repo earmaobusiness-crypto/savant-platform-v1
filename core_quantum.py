@@ -1,5 +1,6 @@
 import datetime
 import json
+import math
 import re
 import statistics
 import time
@@ -32,10 +33,19 @@ LOOKBACK_DELTAS = {
     "15-Minute": datetime.timedelta(hours=18),
 }
 INNER_MOVE_MAX_1M = datetime.timedelta(minutes=2)
+NOISE_DIM_EPSILON = 0.18
+SEMANTIC_EMBED_DIMS = 32
+DRAGNET_TIMEFRAMES = frozenset({"5-Minute", "15-Minute"})
 ROOT_CAUSE_FRICTION = "execution_friction_slippage"
 ROOT_CAUSE_STRUCTURAL_DECAY = "structural_alpha_decay"
 EXECUTION_HALTED_STATE = "execution_halted"
 VAULT_STATE_INCUBATION = "incubation"
+VAULT_STATE_PURGATORY = "purgatory"
+FINBERT_MODEL_ID = "ProsusAI/finbert"
+ROOM1_TOKEN_BUDGET = 28000
+ROOM1_WARN_RATIO = 0.90
+ROOM1_WARN_MESSAGES_REMAINING = 5
+ROOM1_ASSISTANT_TOKEN_RESERVE = 1200
 PROCESSOR_LANE_CLOUD = "cloud_dual_stream"
 PROCESSOR_LANE_LOCAL_STRIKE = "local_1m_strike"
 LOCAL_1M_RAM_CAP_MINUTES = 5
@@ -281,6 +291,336 @@ def _clamp_inner_move_window(
     return start_dt
 
 
+def _research_dragnet_lookback_start(
+    end_dt: datetime.datetime | None, timeframe_resolution: str
+) -> datetime.datetime | None:
+    """
+    Unconstrained full-day dragnet (Room 2 research only) — no profit-floor walls.
+    5m: entire session back to 4:00 AM pre-market. 15m: bridges overnight into prior post-market.
+    Temporal fence at Exit B still applies separately; this only widens historical ingestion.
+    """
+    if end_dt is None:
+        return None
+    if timeframe_resolution == "5-Minute":
+        premarket = end_dt.replace(hour=4, minute=0, second=0, microsecond=0)
+        if end_dt < premarket:
+            premarket = premarket - datetime.timedelta(days=1)
+        return premarket
+    if timeframe_resolution == "15-Minute":
+        prior = end_dt - datetime.timedelta(days=1)
+        return prior.replace(hour=16, minute=0, second=0, microsecond=0)
+    return _calibrated_lookback_start(end_dt, timeframe_resolution)
+
+
+def compute_metric_envelopes(
+    data_stream,
+    end_dt: datetime.datetime | None,
+    lookback_start_dt: datetime.datetime | None,
+) -> dict:
+    """
+    Flexible std-dev envelopes for cold metrics — volume, velocity, spread.
+    Maps zones like 25M–35M volume instead of a single rigid threshold.
+    """
+    frame = _ensure_dataframe(data_stream)
+    if frame is None or end_dt is None:
+        return {}
+    try:
+        if lookback_start_dt is not None:
+            window = frame[(frame.index <= end_dt) & (frame.index >= lookback_start_dt)]
+        else:
+            window = frame[frame.index <= end_dt]
+        if not isinstance(window, pd.DataFrame) or window.empty:
+            return {}
+
+        envelopes: dict = {}
+        if "Volume" in window.columns:
+            vols = window["Volume"].astype(float).dropna()
+            if len(vols) >= 2:
+                mu = float(vols.mean())
+                sigma = float(vols.std(ddof=0))
+                envelopes["volume"] = {
+                    "low": round(max(0.0, mu - sigma), 0),
+                    "mid": round(mu, 0),
+                    "high": round(mu + sigma, 0),
+                    "sigma": round(sigma, 2),
+                }
+
+        closes = window["Close"].astype(float)
+        if len(closes) >= 3:
+            returns = closes.pct_change().dropna() * 100
+            if len(returns) >= 2:
+                mu = float(returns.mean())
+                sigma = float(returns.std(ddof=0))
+                envelopes["velocity_pct"] = {
+                    "low": round(mu - sigma, 4),
+                    "mid": round(mu, 4),
+                    "high": round(mu + sigma, 4),
+                    "sigma": round(sigma, 4),
+                }
+
+        spread = (
+            (window["High"] - window["Low"]) / window["Close"].replace(0, pd.NA) * 100
+        ).astype(float).dropna()
+        if len(spread) >= 2:
+            mu = float(spread.mean())
+            sigma = float(spread.std(ddof=0))
+            envelopes["spread_pct"] = {
+                "low": round(max(0.0, mu - sigma), 4),
+                "mid": round(mu, 4),
+                "high": round(mu + sigma, 4),
+                "sigma": round(sigma, 4),
+            }
+        return envelopes
+    except Exception:
+        return {}
+
+
+@st.cache_resource(show_spinner=False)
+def _get_finbert_pipeline():
+    """Local Hugging Face FinBERT — free SEC/headline sentiment, no paid API keys."""
+    try:
+        from transformers import pipeline
+
+        return pipeline(
+            "sentiment-analysis",
+            model=FINBERT_MODEL_ID,
+            tokenizer=FINBERT_MODEL_ID,
+            truncation=True,
+            max_length=512,
+        )
+    except Exception:
+        return None
+
+
+def finbert_sentiment_score(text: str) -> float:
+    """
+    Hard numeric sentiment: Positive probability minus Negative probability ∈ [-1, +1].
+    """
+    clean = str(text or "").strip()
+    if not clean:
+        return 0.0
+    pipe = _get_finbert_pipeline()
+    if pipe is None:
+        return 0.0
+    try:
+        raw = pipe(clean, top_k=None)
+        rows = raw[0] if raw and isinstance(raw[0], list) else raw
+        if not isinstance(rows, list):
+            rows = [rows]
+        pos = neg = 0.0
+        for row in rows:
+            label = str(row.get("label", "")).lower()
+            prob = float(row.get("score", 0.0))
+            if "positive" in label:
+                pos = prob
+            elif "negative" in label:
+                neg = prob
+        return round(max(-1.0, min(1.0, pos - neg)), 4)
+    except Exception:
+        return 0.0
+
+
+def score_semantic_catalyst_stream(
+    headlines: list[str],
+    filing_texts: list[str] | None = None,
+) -> dict:
+    """
+    Local FinBERT sentiment core — SEC EDGAR headers + public headline strings.
+    """
+    clean_headlines = [str(h).strip() for h in headlines if str(h).strip()]
+    clean_filings = [str(f).strip() for f in (filing_texts or []) if str(f).strip()]
+    all_texts = clean_headlines + clean_filings
+    if not all_texts:
+        return {
+            "finbert_sentiment_score": 0.0,
+            "message_velocity": 0.0,
+            "audience_scale": 0.0,
+            "impact_weight": 0.0,
+            "semantic_mode": "finbert_local",
+            "headline_count": 0,
+            "filing_count": 0,
+        }
+    scores = [finbert_sentiment_score(t) for t in all_texts]
+    aggregate = round(sum(scores) / len(scores), 4) if scores else 0.0
+    headline_scores = scores[: len(clean_headlines)]
+    filing_scores = scores[len(clean_headlines) :]
+    message_velocity = round(
+        len(all_texts) / max(1.0, math.log1p(sum(len(h) for h in all_texts) / 80)), 3
+    )
+    audience_scale = round(statistics.mean([len(h) for h in all_texts]), 2)
+    impact_weight = round(abs(aggregate) * (1.0 + math.log1p(message_velocity)), 4)
+    return {
+        "finbert_sentiment_score": aggregate,
+        "headline_sentiment_scores": headline_scores,
+        "filing_sentiment_scores": filing_scores,
+        "message_velocity": message_velocity,
+        "audience_scale": audience_scale,
+        "impact_weight": impact_weight,
+        "semantic_mode": "finbert_local",
+        "headline_count": len(clean_headlines),
+        "filing_count": len(clean_filings),
+    }
+
+
+def _purge_non_overlapping_dimensions(
+    new_vec: list[float],
+    reference_vec: list[float],
+    epsilon: float = NOISE_DIM_EPSILON,
+) -> tuple[list[float], int]:
+    """Digital genetics waste disposal — trash non-matching dimensions, keep pure overlap."""
+    if not reference_vec or len(new_vec) != len(reference_vec):
+        return new_vec, 0
+    pure: list[float] = []
+    discarded = 0
+    for fresh, ref in zip(new_vec, reference_vec):
+        if abs(fresh - ref) <= epsilon:
+            pure.append(round((fresh + ref) / 2.0, 6))
+        else:
+            pure.append(round(ref, 6))
+            discarded += 1
+    return pure, discarded
+
+
+def _scrape_sec_regulatory_dragnet(ticker: str, *, days: int = 30) -> dict:
+    """SEC dragnet — Form 4, 8-K, SC 13D filing index from EDGAR submissions wire."""
+    ticker_clean = str(ticker).strip().upper()
+    cik = _resolve_sec_cik(ticker_clean)
+    if not cik:
+        return {"status": "NO_CIK", "filings": []}
+    try:
+        sub = requests.get(
+            f"https://data.sec.gov/submissions/CIK{cik}.json",
+            headers=SEC_HEADERS,
+            timeout=12,
+        )
+        if not sub.ok:
+            return {"status": "SUBMISSIONS_FAIL", "filings": []}
+        recent = sub.json().get("filings", {}).get("recent", {})
+        forms = recent.get("form", [])
+        dates = recent.get("filingDate", [])
+        cutoff = datetime.datetime.now().date() - datetime.timedelta(days=days)
+        targets = {"4", "4/A", "8-K", "8-K/A", "SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A"}
+        filings: list[dict] = []
+        for i, form in enumerate(forms[:80]):
+            if form not in targets:
+                continue
+            try:
+                filing_date = datetime.datetime.strptime(dates[i], "%Y-%m-%d").date()
+            except (ValueError, IndexError):
+                continue
+            if filing_date < cutoff:
+                continue
+            filings.append({"form": form, "filing_date": dates[i]})
+        return {"status": "OK", "filings": filings[:25], "count": len(filings)}
+    except Exception as exc:
+        return {"status": f"ERR:{str(exc)[:40]}", "filings": []}
+
+
+def _options_sweep_proxy(ticker: str) -> dict:
+    """Options sweep proxy — nearest-expiry chain volume (cloud research fat layer)."""
+    try:
+        tk = yf.Ticker(str(ticker).strip().upper())
+        expirations = list(tk.options or [])[:1]
+        if not expirations:
+            return {"status": "NO_CHAIN"}
+        chain = tk.option_chain(expirations[0])
+        call_vol = int(chain.calls["volume"].fillna(0).sum()) if "volume" in chain.calls else 0
+        put_vol = int(chain.puts["volume"].fillna(0).sum()) if "volume" in chain.puts else 0
+        return {
+            "status": "OK",
+            "expiry": expirations[0],
+            "call_volume": call_vol,
+            "put_volume": put_vol,
+            "sweep_ratio": round(call_vol / max(put_vol, 1), 3),
+        }
+    except Exception:
+        return {"status": "UNAVAILABLE"}
+
+
+def run_full_day_forensic_dragnet(
+    *,
+    ticker: str,
+    end_date,
+    end_time: str,
+    timeframe_resolution: str,
+) -> dict:
+    """
+    Unconstrained full-day dragnet for 5m/15m Room 2 research.
+    Ingests unfiltered session fat (still future-blind at Exit B) for Supabase archival.
+    """
+    if timeframe_resolution not in DRAGNET_TIMEFRAMES:
+        return {}
+    ticker_clean = str(ticker).strip().upper()
+    end_dt = _parse_session_datetime(end_date, end_time)
+    if end_dt is None:
+        return {}
+    dragnet_start = _research_dragnet_lookback_start(end_dt, timeframe_resolution)
+    yf_interval = {"5-Minute": "5m", "15-Minute": "15m"}.get(timeframe_resolution, "15m")
+    raw = pad_datastream_gaps(_download_yfinance_bars(ticker_clean, yf_interval))
+    frame = _ensure_dataframe(raw)
+    dragnet_frame = None
+    if frame is not None and dragnet_start is not None:
+        try:
+            sliced = frame[(frame.index <= end_dt) & (frame.index >= dragnet_start)]
+            if isinstance(sliced, pd.DataFrame) and not sliced.empty:
+                dragnet_frame = sliced
+        except Exception:
+            dragnet_frame = None
+
+    envelopes = compute_metric_envelopes(dragnet_frame or raw, end_dt, dragnet_start)
+    headlines = _fetch_research_news_headlines(ticker_clean, limit=24)
+    semantic = score_semantic_catalyst_stream(headlines)
+    form4 = _scrape_form4_insider_buys(ticker_clean)
+    regulatory = _scrape_sec_regulatory_dragnet(ticker_clean)
+    institutional = _detect_institutional_block_accumulation(
+        ticker_clean, dragnet_frame or raw, yf_interval
+    )
+    options = _options_sweep_proxy(ticker_clean)
+
+    bar_count = 0
+    if isinstance(dragnet_frame, pd.DataFrame) and not dragnet_frame.empty:
+        bar_count = len(dragnet_frame)
+
+    return {
+        "dragnet_mode": "full_day_unfiltered_fat",
+        "timeframe_resolution": timeframe_resolution,
+        "dragnet_start": str(dragnet_start),
+        "temporal_fence_end": str(end_dt),
+        "bar_count": bar_count,
+        "metric_envelopes": envelopes,
+        "semantic_catalyst": semantic,
+        "news_headlines": headlines[:20],
+        "form4": form4,
+        "regulatory_filings": regulatory,
+        "institutional": institutional,
+        "options_sweep_proxy": options,
+        "dark_pool_proxy": {
+            "block_surge_ratio": institutional.get("peak_surge_ratio", 0.0),
+            "block_detected": institutional.get("institutional_block_accumulation", False),
+        },
+    }
+
+
+def enforce_permanent_library_profit_floor(quality: dict) -> dict:
+    """
+    Non-negotiable tiered quality gate before permanent library save.
+    1m >= 1.0%, 5m >= 3.0%, 15m >= 5.0% — trash instantly below floor.
+    """
+    out = dict(quality or {})
+    tf = str(out.get("timeframe_resolution") or "15-Minute")
+    floor_pct = float(out.get("floor_pct") or timeframe_margin_floor(tf))
+    move_pct = float(out.get("structural_move_pct") or 0.0)
+    passed = move_pct >= floor_pct
+    out["floor_pct"] = floor_pct
+    out["passed"] = passed
+    out["trashed"] = not passed
+    if not passed:
+        out["trash_reason"] = (
+            f"BELOW_TIERED_FLOOR|move={move_pct:.4f}%|required={floor_pct:.1f}%|tf={tf}"
+        )
+    return out
+
+
 def _price_at_datetime(data_stream, target_dt: datetime.datetime):
     frame = _ensure_dataframe(data_stream)
     if frame is None or target_dt is None:
@@ -347,6 +687,7 @@ def resolve_stable_profit_exit_anchor(
         best_idx = subset.index[-1]
         best_px = float(closes.iloc[-1])
         best_score = 999.0
+        cluster_count = 0
         for idx, px in closes.items():
             px_f = float(px)
             move_pct = abs((px_f - anchor_price) / anchor_price * 100)
@@ -354,10 +695,17 @@ def resolve_stable_profit_exit_anchor(
                 abs(px_f - median_close) / median_close * 100 if median_close else 0.0
             )
             score = abs(move_pct - target_move_pct) + spike_penalty * 0.35
+            if abs(move_pct - target_move_pct) <= max(0.15, target_move_pct * 0.08):
+                cluster_count += 1
             if score < best_score:
                 best_score = score
                 best_idx = idx
                 best_px = px_f
+        st.session_state.room2_exit_cluster_zone = {
+            "locked_price": best_px,
+            "cluster_bars": cluster_count,
+            "target_move_pct": round(target_move_pct, 4),
+        }
         return best_px, str(best_idx)
     except Exception:
         return _price_at_datetime(data_stream, exit_dt), str(exit_dt)
@@ -383,18 +731,22 @@ def extract_master_signature_vector(
                 continue
             stored = entry.get("vector") or []
             if len(stored) == len(snapshot_vec):
-                merged = [round((a + b) / 2.0, 6) for a, b in zip(snapshot_vec, stored)]
+                merged, discarded = _purge_non_overlapping_dimensions(snapshot_vec, stored)
                 return {
                     "master_signature": merged,
                     "layout_id": nearest,
                     "overlap_pct": overlap,
                     "noise_discarded": True,
+                    "dimensions_trashed": discarded,
+                    "pure_overlap_dims": len(stored) - discarded,
                 }
         return {
             "master_signature": snapshot_vec,
             "layout_id": nearest,
             "overlap_pct": overlap,
             "noise_discarded": False,
+            "dimensions_trashed": 0,
+            "pure_overlap_dims": len(snapshot_vec),
         }
 
     return {
@@ -402,6 +754,8 @@ def extract_master_signature_vector(
         "layout_id": "PURGATORY_PENDING",
         "overlap_pct": overlap,
         "noise_discarded": True,
+        "dimensions_trashed": len(snapshot_vec),
+        "pure_overlap_dims": 0,
     }
 
 
@@ -490,7 +844,7 @@ def evaluate_playbook_quality_barrier(
             structural_move_pct = abs((exit_price - anchor_price) / anchor_price * 100)
 
     passed = structural_move_pct >= floor_pct
-    return {
+    quality = {
         "passed": passed,
         "trashed": not passed,
         "structural_move_pct": round(structural_move_pct, 4),
@@ -502,7 +856,9 @@ def evaluate_playbook_quality_barrier(
         "exit_anchor_timestamp": exit_anchor_ts,
         "timeframe_resolution": timeframe_resolution,
         "lookback_start": str(lookback_start) if lookback_start else None,
+        "exit_cluster_zone": st.session_state.get("room2_exit_cluster_zone", {}),
     }
+    return enforce_permanent_library_profit_floor(quality)
 
 
 def resolve_anomaly_incubation_state(
@@ -841,6 +1197,35 @@ def log_strategy_execution_with_fallback(**kwargs) -> dict:
     )
     retro["logged_to_cloud"] = ok
     st.session_state.room2_live_execution_halted = retro.get("halt_live_execution", False)
+    if retro.get("halt_live_execution"):
+        try:
+            import self_surgery
+
+            surgery = execute_autonomous_post_mortem_surgery(
+                retro,
+                macro_weather_layout=str(kwargs.get("macro_weather_layout") or ""),
+                execution_strategy=str(
+                    retro.get("strategy_label") or kwargs.get("execution_strategy") or ""
+                ),
+                timeframe_resolution=str(kwargs.get("timeframe_resolution") or ""),
+                entry_coordinate=str(kwargs.get("entry_coordinate") or ""),
+                exit_coordinate=str(kwargs.get("exit_coordinate") or ""),
+            )
+            retro["autonomous_surgery"] = surgery
+            demoted = self_surgery.process_post_mortem_demotion(
+                retro,
+                parent_layout_id=str(kwargs.get("macro_weather_layout") or ""),
+                strategy_label=str(
+                    retro.get("strategy_label") or kwargs.get("execution_strategy") or ""
+                ),
+                timeframe_resolution=str(kwargs.get("timeframe_resolution") or ""),
+            )
+            if demoted:
+                retro["repair_bay_demoted"] = True
+                retro["repair_bay_profile"] = demoted
+                self_surgery.sync_repair_bay_profile_to_cloud(demoted)
+        except Exception:
+            pass
     return retro
 
 
@@ -1456,6 +1841,8 @@ def build_text_matrix_string(
     form4: dict,
     institutional: dict,
     timeframe_resolution: str,
+    metric_envelopes: dict | None = None,
+    semantic_catalyst: dict | None = None,
 ) -> str:
     """Flatten multi-layer audit into a lightweight, vault-durable Text Matrix String."""
     day_label = str(trading_day or "")[:10]
@@ -1463,6 +1850,15 @@ def build_text_matrix_string(
     headlines = " || ".join(news_headlines[:3])[:180] if news_headlines else "NONE"
     form4_summary = str((form4 or {}).get("form4_summary", "FORM4:NA"))[:80]
     inst_summary = str((institutional or {}).get("inst_block_summary", "INST:NA"))[:80]
+    env = metric_envelopes or {}
+    vol_env = env.get("volume", {})
+    vol_band = (
+        f"{vol_env.get('low', 0)}-{vol_env.get('high', 0)}"
+        if vol_env
+        else "NA"
+    )
+    sem = semantic_catalyst or news_sentiment or {}
+    sem_impact = sem.get("impact_weight", sem.get("bias", "NEUTRAL"))
     return (
         f"TEXT_MATRIX|TKR:{ticker}|DAY:{day_label}|TF:{timeframe_resolution}|"
         f"ANCHOR:{anchor_label}|MOVE:{float(structural_move_pct or 0):.2f}%|"
@@ -1470,7 +1866,7 @@ def build_text_matrix_string(
         f"SPREAD={price_action.get('spread_expansion_pct', 0)}|"
         f"VWAP={price_action.get('vwap_baseline', 0)}|"
         f"PEARSON={price_action.get('pearson_cleanliness', 0)}|"
-        f"NEWS:{news_sentiment.get('bias', 'NEUTRAL_FLOW')}|"
+        f"VOL_ENV:{vol_band}|SEM_IMPACT:{sem_impact}|"
         f"HDLNS:{headlines}|FORM4:{form4_summary}|INST:{inst_summary}"
     )
 
@@ -1509,29 +1905,86 @@ def run_deep_internet_research_audit(
         )
     quality = quality or {}
 
+    dragnet_blob: dict = {}
+    dragnet_start = lookback_start
+    audit_frame = data_stream
+    if timeframe_resolution in DRAGNET_TIMEFRAMES:
+        dragnet_blob = run_full_day_forensic_dragnet(
+            ticker=ticker_clean,
+            end_date=end_date,
+            end_time=end_time,
+            timeframe_resolution=timeframe_resolution,
+        )
+        dragnet_start = _research_dragnet_lookback_start(end_dt, timeframe_resolution)
+        raw_drag = pad_datastream_gaps(
+            _download_yfinance_bars(
+                ticker_clean,
+                {"5-Minute": "5m", "15-Minute": "15m"}.get(timeframe_resolution, "15m"),
+            )
+        )
+        dragnet_df = _ensure_dataframe(raw_drag)
+        if dragnet_df is not None and dragnet_start is not None and end_dt is not None:
+            try:
+                sliced = dragnet_df[
+                    (dragnet_df.index <= end_dt) & (dragnet_df.index >= dragnet_start)
+                ]
+                if isinstance(sliced, pd.DataFrame) and not sliced.empty:
+                    audit_frame = sliced
+            except Exception:
+                pass
+
+    metric_envelopes = compute_metric_envelopes(audit_frame, end_dt, dragnet_start)
+    if dragnet_blob.get("metric_envelopes"):
+        metric_envelopes = dragnet_blob["metric_envelopes"]
+
     price_action = _audit_price_action_mechanics(
-        data_stream, end_dt, lookback_start, quality
+        audit_frame, end_dt, dragnet_start, quality
     )
+    if metric_envelopes:
+        price_action["metric_envelopes"] = metric_envelopes
 
     yf_interval = {"1-Minute": "1m", "5-Minute": "5m", "15-Minute": "15m"}.get(
         timeframe_resolution, "15m"
     )
     try:
-        institutional = _detect_institutional_block_accumulation(
-            ticker_clean, data_stream, yf_interval
+        institutional = dragnet_blob.get("institutional") or _detect_institutional_block_accumulation(
+            ticker_clean, audit_frame, yf_interval
         )
         st.session_state.forensic_institutional_tracker = institutional
     except Exception:
         institutional = st.session_state.get("forensic_institutional_tracker", {})
 
     try:
-        form4 = _scrape_form4_insider_buys(ticker_clean)
+        form4 = dragnet_blob.get("form4") or _scrape_form4_insider_buys(ticker_clean)
         st.session_state.forensic_form4_tracker = form4
     except Exception:
         form4 = st.session_state.get("forensic_form4_tracker", {})
 
-    news_headlines = _fetch_research_news_headlines(ticker_clean)
-    news_sentiment = _score_news_sentiment(news_headlines)
+    news_headlines = dragnet_blob.get("news_headlines") or _fetch_research_news_headlines(
+        ticker_clean
+    )
+    sec_dragnet = _scrape_sec_regulatory_dragnet(ticker_clean)
+    filing_texts = [
+        f"SEC {f.get('form', 'FILING')} filed {f.get('filing_date', '')}"
+        for f in (sec_dragnet.get("filings") or [])
+    ]
+    semantic_catalyst = dragnet_blob.get("semantic_catalyst") or score_semantic_catalyst_stream(
+        news_headlines,
+        filing_texts=filing_texts,
+    )
+    news_sentiment = semantic_catalyst
+
+    master_sig = st.session_state.get("room2_master_signature") or {}
+    genetic_json = json.dumps(
+        {
+            "master_signature": master_sig.get("master_signature") or [],
+            "overlap_pct": master_sig.get("overlap_pct", 0),
+            "dimensions_trashed": master_sig.get("dimensions_trashed", 0),
+            "pure_overlap_dims": master_sig.get("pure_overlap_dims", 0),
+            "finbert_sentiment_score": semantic_catalyst.get("finbert_sentiment_score", 0.0),
+        },
+        default=str,
+    )
 
     text_matrix_string = build_text_matrix_string(
         ticker=ticker_clean,
@@ -1544,12 +1997,20 @@ def run_deep_internet_research_audit(
         form4=form4,
         institutional=institutional,
         timeframe_resolution=timeframe_resolution,
+        metric_envelopes=metric_envelopes,
+        semantic_catalyst=semantic_catalyst,
     )
+
+    forensic_dragnet_json = json.dumps(dragnet_blob, default=str) if dragnet_blob else ""
 
     audit = {
         "research_mode": "deep_training_cloud",
         "processor_lane": PROCESSOR_LANE_CLOUD,
         "text_matrix_string": text_matrix_string,
+        "forensic_dragnet_blob": forensic_dragnet_json,
+        "metric_envelopes": metric_envelopes,
+        "semantic_catalyst": semantic_catalyst,
+        "master_signature_json": genetic_json,
         "price_action": price_action,
         "news_sentiment": news_sentiment,
         "news_headlines": news_headlines,
@@ -1800,8 +2261,12 @@ def _analyze_5m_micro_traps(data_5m, ticker: str) -> dict:
     }
 
 
-def extract_forensic_feature_vector(velocity: dict, math_block: dict) -> list[float]:
-    """Four-layer snapshot vector for spatial cross-correlation against layout library."""
+def extract_forensic_feature_vector(
+    velocity: dict,
+    math_block: dict,
+    finbert_sentiment: float = 0.0,
+) -> list[float]:
+    """Snapshot vector for spatial cross-correlation — includes FinBERT sentiment axis."""
     return [
         float(velocity.get("session_velocity_pct", 0.0)),
         float(velocity.get("peak_bar_velocity_pct", 0.0)),
@@ -1810,6 +2275,7 @@ def extract_forensic_feature_vector(velocity: dict, math_block: dict) -> list[fl
         float(math_block.get("pearson_r", 0.0)),
         float(math_block.get("wave_amplitude_pct", 0.0)),
         min(float(math_block.get("bar_count", 0)) / 100.0, 10.0),
+        float(finbert_sentiment),
     ]
 
 
@@ -1874,7 +2340,461 @@ def register_layout_vector_in_master_index(
             "timeframe_resolution": timeframe_resolution,
         },
     )
-    st.session_state.layout_master_matrix_index = index[:48]
+    st.session_state.layout_master_matrix_index = index[:256]
+
+
+def _supabase_rest_headers() -> dict:
+    try:
+        key = st.secrets["SUPABASE_KEY"]
+    except Exception:
+        return {}
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+
+
+def _parse_master_signature_from_row(row: dict) -> list[float]:
+    """Decode stored master_signature_json into a numeric feature vector."""
+    raw = row.get("master_signature_json") or ""
+    if not raw:
+        return []
+    try:
+        blob = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(blob, dict):
+        return []
+    vec = blob.get("master_signature") or blob.get("master_signature_preview") or []
+    if isinstance(vec, list) and vec:
+        return [float(x) for x in vec]
+    return []
+
+
+def hydrate_layout_library_from_vault() -> int:
+    """
+    Startup memory hydration — pull permanent layout vectors from Supabase vault_track
+    so spatial matching survives browser refresh.
+    """
+    if st.session_state.get("layout_library_hydrated"):
+        return len(st.session_state.get("layout_master_matrix_index", []))
+
+    st.session_state.layout_library_hydrated = True
+    headers = _supabase_rest_headers()
+    if not headers:
+        st.session_state.setdefault("layout_master_matrix_index", [])
+        return 0
+
+    table = _supabase_table_name()
+    try:
+        supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+        resp = requests.get(
+            f"{supabase_url}/rest/v1/{table}"
+            "?select=macro_weather_layout,ticker,timeframe_resolution,master_signature_json,"
+            "structural_move_pct,vault_track,state"
+            "&vault_track=eq.track_1_validated"
+            "&or=(state.is.null,state.eq.active)"
+            "&order=timestamp.desc&limit=500",
+            headers=headers,
+            timeout=20,
+        )
+        if not resp.ok:
+            st.session_state.setdefault("layout_master_matrix_index", [])
+            return 0
+        rows = resp.json() if isinstance(resp.json(), list) else []
+    except Exception:
+        st.session_state.setdefault("layout_master_matrix_index", [])
+        return 0
+
+    index: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        layout_id = str(row.get("macro_weather_layout") or "").strip()
+        vector = _parse_master_signature_from_row(row)
+        if not layout_id or not vector:
+            continue
+        dedupe = f"{layout_id}|{row.get('timeframe_resolution')}|{row.get('ticker')}"
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        index.append(
+            {
+                "layout_id": layout_id,
+                "vector": vector,
+                "ticker": str(row.get("ticker") or "").upper(),
+                "timeframe_resolution": str(row.get("timeframe_resolution") or ""),
+                "structural_move_pct": float(row.get("structural_move_pct") or 0.0),
+            }
+        )
+
+    st.session_state.layout_master_matrix_index = index[:256]
+    return len(index)
+
+
+def estimate_room1_message_tokens(messages: list | None) -> int:
+    """Rough token estimate for volatile Room 1 thread capacity monitoring."""
+    total = 0
+    for msg in messages or []:
+        total += max(1, len(str(msg.get("content", ""))) // 4)
+    return total
+
+
+def room1_memory_capacity_status(
+    messages: list | None,
+    *,
+    pending_user_text: str = "",
+    pending_assistant_reserve: int = ROOM1_ASSISTANT_TOKEN_RESERVE,
+) -> dict:
+    """
+    Volatile RAM capacity gates for Room 1 — warn at 90%, hard-lock input at 100%.
+    """
+    msgs = list(messages or [])
+    if pending_user_text:
+        msgs.append({"role": "user", "content": pending_user_text})
+    used = estimate_room1_message_tokens(msgs)
+    if pending_user_text:
+        used += pending_assistant_reserve
+    budget = ROOM1_TOKEN_BUDGET
+    ratio = used / budget if budget else 0.0
+    locked = ratio >= 1.0
+    warn_active = ratio >= ROOM1_WARN_RATIO and not locked
+    dialog_count = sum(1 for m in msgs if m.get("role") in ("user", "assistant"))
+    avg_turn = max(400, used // max(1, dialog_count))
+    remaining_msgs = min(
+        ROOM1_WARN_MESSAGES_REMAINING,
+        max(0, int((budget - used) / avg_turn)),
+    )
+    return {
+        "used_tokens": used,
+        "budget_tokens": budget,
+        "fill_ratio": round(ratio, 4),
+        "warn_active": warn_active,
+        "locked": locked,
+        "messages_remaining": remaining_msgs,
+    }
+
+
+def room1_forbid_cloud_write(operation: str) -> None:
+    """Room 1 is read-only — block any accidental vault mutation from the front desk."""
+    raise RuntimeError(
+        f"Room 1 forbids Supabase {operation} on strategy vaults and layout tables."
+    )
+
+
+def _room1_supabase_get(table: str, *, params: dict | None = None) -> list[dict]:
+    """Read-only GET plumbing for Room 1 cross-reference — no insert/update/delete."""
+    headers = _supabase_rest_headers()
+    if not headers:
+        return []
+    try:
+        supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+        resp = requests.get(
+            f"{supabase_url}/rest/v1/{table}",
+            headers=headers,
+            params=params or {},
+            timeout=20,
+        )
+        if resp.ok and isinstance(resp.json(), list):
+            return resp.json()
+    except Exception:
+        pass
+    return []
+
+
+def fetch_readonly_vault_reference_map() -> dict:
+    """
+    Pull permanent layout/strategy feature vectors into temporary RAM for Room 1 audits.
+    Supabase access is GET-only — zero writes.
+    """
+    hydrate_layout_library_from_vault()
+    layout_vectors = list(st.session_state.get("layout_master_matrix_index") or [])
+    table = _supabase_table_name()
+    try:
+        supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+        resp = requests.get(
+            f"{supabase_url}/rest/v1/{table}"
+            "?select=macro_weather_layout,execution_strategy,timeframe_resolution,"
+            "structural_move_pct,vault_track,state,ticker"
+            "&vault_track=eq.track_1_validated"
+            "&or=(state.is.null,state.eq.active)"
+            "&order=timestamp.desc&limit=120",
+            headers=headers,
+            timeout=20,
+        )
+        strategy_rows = resp.json() if resp.ok and isinstance(resp.json(), list) else []
+    except Exception:
+        strategy_rows = []
+    profiles: list[dict] = []
+    seen: set[str] = set()
+    for row in strategy_rows:
+        layout_id = str(row.get("macro_weather_layout") or "").strip()
+        strategy = str(row.get("execution_strategy") or "").strip()
+        timeframe = str(row.get("timeframe_resolution") or "").strip()
+        if not layout_id or not strategy:
+            continue
+        key = f"{layout_id}|{strategy}|{timeframe}"
+        if key in seen:
+            continue
+        seen.add(key)
+        profiles.append(
+            {
+                "layout_id": layout_id,
+                "strategy_label": strategy,
+                "timeframe_resolution": timeframe,
+                "structural_move_pct": float(row.get("structural_move_pct") or 0.0),
+                "reference_ticker": str(row.get("ticker") or "").upper(),
+            }
+        )
+    return {
+        "readonly": True,
+        "layout_vector_count": len(layout_vectors),
+        "layout_vectors": layout_vectors[:48],
+        "strategy_profiles": profiles[:48],
+    }
+
+
+def is_room1_strategic_audit_query(user_text: str, ticker: str | None) -> bool:
+    """Detect strategic stock audit requests — ticker required."""
+    if not ticker:
+        return False
+    low = str(user_text or "").lower()
+    audit_terms = (
+        "audit",
+        "analyze",
+        "analysis",
+        "report",
+        "playbook",
+        "layout",
+        "strategy",
+        "match",
+        "breakdown",
+        "deep dive",
+        "correlate",
+        "setup",
+        "scan",
+        "rhyme",
+        "compare",
+    )
+    if any(term in low for term in audit_terms):
+        return True
+    return len(low.split()) <= 8
+
+
+def _room1_quick_math_block(data_stream) -> dict:
+    """Lightweight live physics block for Room 1 cross-reference — no cloud writes."""
+    series = _series_from_data_stream(data_stream)
+    pearson_r = 0.0
+    wave_amp = 0.0
+    bar_count = 0
+    if series is not None:
+        bar_count = len(series) if hasattr(series, "__len__") else 0
+        wave_amp = _wave_amplitude_pct(series)
+        if pd is not None and isinstance(series, pd.Series) and len(series) >= 3:
+            try:
+                ys = [float(v) for v in series.tolist()]
+                n = len(ys)
+                xs = list(range(n))
+                mean_x = sum(xs) / n
+                mean_y = sum(ys) / n
+                num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+                den_x = math.sqrt(sum((x - mean_x) ** 2 for x in xs))
+                den_y = math.sqrt(sum((y - mean_y) ** 2 for y in ys))
+                if den_x > 0 and den_y > 0:
+                    pearson_r = num / (den_x * den_y)
+            except Exception:
+                pearson_r = 0.0
+    return {
+        "pearson_r": round(pearson_r, 4),
+        "wave_amplitude_pct": round(wave_amp, 4),
+        "bar_count": bar_count,
+        "match_probability": 0,
+    }
+
+
+def run_room1_strategic_audit_dragnet(ticker: str, user_query: str = "") -> dict:
+    """
+    Deep external internet reporting + read-only vault cross-reference on local RAM.
+    Combines live headlines, SEC timelines, and layout signature matching.
+    """
+    ticker_clean = str(ticker).strip().upper()
+    vault_map = fetch_readonly_vault_reference_map()
+    library = vault_map.get("layout_vectors") or []
+
+    data_stream = get_historical_interval_data(
+        ticker_clean,
+        interval="15m",
+        update_institutional_tracker=False,
+    )
+    velocity = _compute_price_velocity_metrics(data_stream)
+    math_block = _room1_quick_math_block(data_stream)
+
+    headlines = _fetch_research_news_headlines(ticker_clean, limit=8)
+    sec_dragnet = _scrape_sec_regulatory_dragnet(ticker_clean)
+    form4 = _scrape_form4_insider_buys(ticker_clean)
+    filing_texts = [
+        f"SEC {f.get('form', 'FILING')} filed {f.get('filing_date', '')}"
+        for f in (sec_dragnet.get("filings") or [])
+    ]
+    semantic = score_semantic_catalyst_stream(headlines, filing_texts=filing_texts)
+    finbert_score = float(semantic.get("finbert_sentiment_score") or 0.0)
+
+    live_vec = extract_forensic_feature_vector(velocity, math_block, finbert_score)
+    spatial = compute_spatial_layout_match(live_vec, library)
+
+    alignments: list[dict] = []
+    for entry in library[:32]:
+        stored = entry.get("vector") or []
+        if not stored or len(stored) != len(live_vec):
+            continue
+        cos = _cosine_similarity(live_vec, stored)
+        alignments.append(
+            {
+                "layout_id": entry.get("layout_id"),
+                "timeframe_resolution": entry.get("timeframe_resolution"),
+                "reference_ticker": entry.get("ticker"),
+                "cosine_similarity": round(cos, 4),
+                "spatial_match_pct": int(round(cos * 100)),
+            }
+        )
+    alignments.sort(key=lambda row: row.get("cosine_similarity", 0), reverse=True)
+    top_alignments = alignments[:5]
+
+    nearest_profile = None
+    for profile in vault_map.get("strategy_profiles") or []:
+        if str(profile.get("layout_id")) == str(spatial.get("nearest_layout_id")):
+            nearest_profile = profile
+            break
+
+    headline_preview = " | ".join(headlines[:4]) if headlines else "NONE"
+    sec_preview = ", ".join(
+        f"{f.get('form')}@{f.get('filing_date')}" for f in (sec_dragnet.get("filings") or [])[:4]
+    ) or "NONE"
+
+    report_lines = [
+        f"ROOM1_STRATEGIC_AUDIT|TK:{ticker_clean}",
+        f"VAULT_REF_VECTORS:{vault_map.get('layout_vector_count', 0)}",
+        f"NEAREST_LAYOUT:{spatial.get('nearest_layout_id')}",
+        f"SPATIAL_MATCH:{spatial.get('spatial_match_pct')}%",
+        f"SESSION_VELOCITY:{velocity.get('session_velocity_pct')}%",
+        f"FINBERT_SENTIMENT:{finbert_score}",
+        f"LIVE_HEADLINES:{headline_preview}",
+        f"SEC_TIMELINE:{sec_preview}",
+        f"FORM4:{form4.get('form4_summary', 'N/A')}",
+    ]
+    if nearest_profile:
+        report_lines.append(
+            f"PLAYBOOK_REF:{nearest_profile.get('strategy_label')}@"
+            f"{nearest_profile.get('layout_id')}@"
+            f"{nearest_profile.get('timeframe_resolution')}"
+        )
+    if top_alignments:
+        rhyme = " · ".join(
+            f"{a['layout_id']}({a['spatial_match_pct']}%)" for a in top_alignments[:3]
+        )
+        report_lines.append(f"MATHEMATICAL_RHYMES:{rhyme}")
+
+    report_lines.append(
+        "READONLY_CROSSREF: Live internet physics cross-correlated against permanent "
+        "Room 2 vault signatures in local RAM — no database writes executed."
+    )
+    if user_query.strip():
+        report_lines.append(f"OPERATOR_QUERY:{user_query.strip()[:240]}")
+
+    report_block = " | ".join(report_lines)
+    st.session_state.room1_last_strategic_audit = {
+        "ticker": ticker_clean,
+        "spatial": spatial,
+        "vault_map": {
+            "layout_vector_count": vault_map.get("layout_vector_count", 0),
+            "strategy_profile_count": len(vault_map.get("strategy_profiles") or []),
+        },
+        "semantic": semantic,
+        "top_alignments": top_alignments,
+        "report_block": report_block,
+    }
+    return st.session_state.room1_last_strategic_audit
+
+
+def execute_autonomous_post_mortem_surgery(
+    retro: dict,
+    *,
+    macro_weather_layout: str,
+    execution_strategy: str,
+    timeframe_resolution: str,
+    entry_coordinate: str = "",
+    exit_coordinate: str = "",
+) -> dict:
+    """
+    Hands-free database surgery on 15-trade floor breach.
+    Alpha decay → delete active strategy row + PURGATORY state.
+    Execution friction → update entry trigger coordinates in cloud.
+    """
+    if not retro.get("halt_live_execution"):
+        return {"surgery": "skipped"}
+
+    headers = _supabase_rest_headers()
+    if not headers:
+        return {"surgery": "offline"}
+
+    table = _supabase_table_name()
+    supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+    layout = str(macro_weather_layout or "").strip()
+    strategy = str(execution_strategy or retro.get("strategy_label") or "").strip()
+    timeframe = str(timeframe_resolution or "").strip()
+    action = retro.get("recommended_action") or ""
+    result: dict = {"surgery": action or "halt", "layout": layout, "strategy": strategy}
+
+    try:
+        if action == "DELETE_STRATEGY":
+            requests.delete(
+                f"{supabase_url}/rest/v1/{table}",
+                headers=headers,
+                params={
+                    "macro_weather_layout": f"eq.{layout}",
+                    "execution_strategy": f"eq.{strategy}",
+                    "timeframe_resolution": f"eq.{timeframe}",
+                    "state": "eq.active",
+                },
+                timeout=12,
+            )
+            requests.patch(
+                f"{supabase_url}/rest/v1/{table}",
+                headers=headers,
+                params={
+                    "macro_weather_layout": f"eq.{layout}",
+                    "execution_strategy": f"eq.{strategy}",
+                    "timeframe_resolution": f"eq.{timeframe}",
+                },
+                json={"state": VAULT_STATE_PURGATORY},
+                timeout=12,
+            )
+            result["database_action"] = "delete_and_purgatory"
+        elif action == "TWEAK_IN_PLACE" and entry_coordinate:
+            patch = {"entry_coordinate": entry_coordinate}
+            if exit_coordinate:
+                patch["exit_coordinate"] = exit_coordinate
+            requests.patch(
+                f"{supabase_url}/rest/v1/{table}",
+                headers=headers,
+                params={
+                    "macro_weather_layout": f"eq.{layout}",
+                    "execution_strategy": f"eq.{strategy}",
+                    "timeframe_resolution": f"eq.{timeframe}",
+                    "state": "eq.active",
+                },
+                json=patch,
+                timeout=12,
+            )
+            result["database_action"] = "entry_tweak_update"
+        else:
+            result["database_action"] = "diagnosis_only"
+    except Exception as exc:
+        result["database_action"] = "error"
+        result["detail"] = str(exc)[:120]
+
+    return result
 
 
 def _geometric_delta_sign(delta: float) -> str:
@@ -2156,6 +3076,10 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
         "shelf_expires_at",
         "structural_move_pct",
         "text_matrix_string",
+        "forensic_dragnet_blob",
+        "master_signature_json",
+        "metric_envelopes_json",
+        "semantic_catalyst_json",
     )
 
     def _post(body: dict):
@@ -2319,9 +3243,24 @@ def calculate_quantum_frequencies(
     )
     st.session_state.room2_last_math_block = math_block
 
-    snapshot_vec = extract_forensic_feature_vector(velocity, math_block)
+    snapshot_vec = extract_forensic_feature_vector(
+        velocity,
+        math_block,
+        float(
+            (st.session_state.get("room2_deep_research_audit") or {})
+            .get("semantic_catalyst", {})
+            .get("finbert_sentiment_score", 0.0)
+        ),
+    )
     spatial = compute_spatial_layout_match(snapshot_vec)
     blended_match = max(int(math_block.get("match_probability") or 0), spatial["spatial_match_pct"])
+    finbert_score = float(
+        (st.session_state.get("room2_deep_research_audit") or {})
+        .get("semantic_catalyst", {})
+        .get("finbert_sentiment_score", 0.0)
+    )
+    if finbert_score < -0.25 and blended_match >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
+        blended_match = LAYOUT_SIGNATURE_MATCH_THRESHOLD - 1
     genetic = extract_master_signature_vector(snapshot_vec, blended_match)
     master_vec = genetic.get("master_signature") or snapshot_vec
     st.session_state.room2_master_signature = genetic
@@ -2383,12 +3322,26 @@ def build_vault_payload(
     shelf_expires_at: str = "",
     structural_move_pct: float = 0.0,
     text_matrix_string: str = "",
+    forensic_dragnet_blob: str = "",
+    master_signature_json: str = "",
+    metric_envelopes_json: str = "",
+    semantic_catalyst_json: str = "",
 ) -> dict:
     """Package Room 2 deck parameters for Internet Vault streaming."""
     notes = operator_notes.strip()
     matrix_blob = str(text_matrix_string or st.session_state.get("room2_text_matrix_string", "")).strip()
     if matrix_blob and "TEXT_MATRIX|" not in notes:
         notes = f"{notes} | {matrix_blob}".strip(" |") if notes else matrix_blob
+
+    audit = st.session_state.get("room2_deep_research_audit") or {}
+    dragnet_blob = forensic_dragnet_blob or audit.get("forensic_dragnet_blob", "")
+    master_sig = master_signature_json or audit.get("master_signature_json", "")
+    env_json = metric_envelopes_json or json.dumps(
+        audit.get("metric_envelopes", {}), default=str
+    )
+    sem_json = semantic_catalyst_json or json.dumps(
+        audit.get("semantic_catalyst", {}), default=str
+    )
     body = {
         "ticker": ticker.upper(),
         "pattern_category": (pattern_category or "UNCLASSIFIED").strip().upper(),
@@ -2420,6 +3373,10 @@ def build_vault_payload(
         "shelf_expires_at": shelf_expires_at or None,
         "structural_move_pct": round(float(structural_move_pct), 4),
         "text_matrix_string": matrix_blob,
+        "forensic_dragnet_blob": dragnet_blob,
+        "master_signature_json": master_sig,
+        "metric_envelopes_json": env_json,
+        "semantic_catalyst_json": sem_json,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     return body

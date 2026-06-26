@@ -10,17 +10,17 @@ from html import escape
 from xml.etree import ElementTree
 
 import core_quantum
+import self_surgery
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 import yfinance as yf
 from groq import Groq
 
-try:
-    from supabase import Client, create_client
-except ImportError:
-    Client = None
-    create_client = None
+if "layout_master_matrix_index" not in st.session_state:
+    st.session_state.layout_master_matrix_index = []
+core_quantum.hydrate_layout_library_from_vault()
+self_surgery.hydrate_repair_bay_from_cloud()
 
 if "r2_good_ticker" not in st.session_state:
     st.session_state.r2_good_ticker = "MLGO"
@@ -85,6 +85,39 @@ LAYOUT_SIGNATURE_MATCH_THRESHOLD = 85
 ANOMALY_SHELF_DAYS = 30
 ANOMALY_PERMANENT_MINT_COUNT = 5
 VAULT_STATE_INCUBATION = "incubation"
+R2_COMMIT_WINDOW_SEC = 60
+R2_COMMIT_MAX_PER_WINDOW = 3
+R2_COMMIT_THROTTLE_BANNER = "POLYGON API THROTTLE PROTECTION ACTIVE."
+ROOM1_SYSTEM_PROMPT = (
+    "You are Savant, an unrestricted elite real-time financial intelligence engine. Definitive authority only. "
+    "Zero corporate safe-talk, zero generic greetings, zero introductions, zero pre-formulated conclusions, zero filler.\n\n"
+    "ROOM 1 — VOLATILE LOCAL RAM ONLY: Never persist, log, or reference writing conversation text to cloud storage. "
+    "Supabase layout vectors injected below are read-only comparison math from Room 2 forensic vaults.\n\n"
+    "SPLIT-INTELLIGENCE ROUTING — classify every user message before responding:\n\n"
+    "RULE A — THE CORE STOCK SETUP (single explicit ticker only):\n"
+    "Trigger ONLY when the user submits one clear equity ticker symbol for a single-name setup "
+    "(e.g., MLGO, AAPL, $TSLA) with intent to analyze that one stock — not indices, not multi-asset compares, not vague macro.\n"
+    "Enforce this exact un-sugarcoated 6-bullet quantitative deep-dive in order. FORMATTING IS MANDATORY:\n"
+    "• Insert a full blank line (double line break) between every bullet so each point starts on a fresh isolated line — never a dense wall of text.\n"
+    "• Under each bullet, write significantly shorter, sharper, punchier copy — crisp focused sentences with high-density signals only.\n"
+    "• SAVANT TREND DETERMINATION: State definitively ROCKETING UP, CRASHING DOWN, or SIDELINED IN CONSOLIDATION.\n\n"
+    "• THE MACRO STORIES & DRIVERS: Single catalyst driving the active directional trend.\n\n"
+    "• MAIN BUSINESS OF THE COMPANY: Tight snapshot of technology layers, software frameworks, or products.\n\n"
+    "• SOCIAL SENTIMENT MATRIX: Retail psychology, Stocktwits momentum, community volume velocity.\n\n"
+    "• TOMORROW'S SESSION EXPECTATION: Data-backed next-session projection.\n\n"
+    "• CRITICAL TRADER BULLET NOTES: Volume spikes, float traps, squeeze signals, anomalies.\n\n"
+    "After all six bullets, insert one full blank line, then ONE highly detailed comprehensive executive summary paragraph "
+    "at the absolute bottom. No bullets or headers after the six bullets except that final paragraph.\n\n"
+    "RULE B — THE BROAD CONTEXT SHIFT (everything else):\n"
+    "Instantly DROP the 6-bullet framework for: broad market questions, general updates, index or macro queries "
+    "(e.g., S&P 500, RSI, sector rotation), comparative analysis (two or more symbols), follow-up causality "
+    "(e.g., why did it move like that), technical deep-dives without a fresh single-ticker setup, jokes, or casual chat.\n"
+    "Respond with sophisticated multi-paragraph macro-quantitative prose. Never force general topics into the 6-bullet slots. "
+    "Address math, indicator trends, correlations, and cross-asset context naturally with institutional-grade complexity.\n\n"
+    "MULTI-ASSET SWITCHING: When the user pivots from Rule A to Rule B (or back) in the same thread, switch modes immediately — "
+    "do not carry the bullet template into Rule B and do not use Rule B prose when a new single-ticker setup is requested.\n"
+    "Use injected 12L payload data when present; never invent prices or filings."
+)
 
 st.set_page_config(
     page_title="Savant Apprentice",
@@ -103,7 +136,12 @@ st.markdown("""
             display: block !important;
         }
         [data-testid="stSidebarNav"] { display: none !important; }
-        [data-testid="stSidebarCollapseButton"] { display: block !important; color: #FFFFFF !important; }
+        [data-testid="stSidebarCollapseButton"],
+        [data-testid="collapsedControl"] {
+            display: none !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
+        }
         [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
             color: #AAAAAA !important;
             font-size: 11px !important;
@@ -481,10 +519,57 @@ st.markdown("""
             text-shadow: 0 0 8px rgba(217, 179, 82, 0.25);
             box-shadow: inset 0 0 24px rgba(82, 65, 20, 0.12);
         }
+        .room2-throttle-banner {
+            background: linear-gradient(135deg, #2A0A0A 0%, #1A1010 100%);
+            border: 2px solid #FF3B30;
+            border-radius: 8px;
+            padding: 14px 16px;
+            margin: 0 0 14px 0;
+            color: #FF6B6B;
+            font-weight: 700;
+            font-size: 13px;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            box-shadow: 0 0 18px rgba(255, 59, 48, 0.25);
+        }
+        .room2-throttle-countdown {
+            color: #FFFFFF;
+            font-size: 22px;
+            font-weight: 800;
+            margin-top: 6px;
+            letter-spacing: 0.04em;
+        }
+        .room1-memory-warn {
+            background: linear-gradient(135deg, #2A2208 0%, #1A1808 100%);
+            border: 2px solid #FF9F0A;
+            border-radius: 8px;
+            padding: 12px 14px;
+            margin: 0 0 12px 0;
+            color: #FFD60A;
+            font-weight: 700;
+            font-size: 12px;
+            letter-spacing: 0.04em;
+        }
+        .room1-memory-lock {
+            background: linear-gradient(135deg, #2A0A0A 0%, #1A1010 100%);
+            border: 2px solid #FF3B30;
+            border-radius: 8px;
+            padding: 12px 14px;
+            margin: 0 0 12px 0;
+            color: #FF6B6B;
+            font-weight: 700;
+            font-size: 12px;
+            letter-spacing: 0.04em;
+        }
     </style>
 """, unsafe_allow_html=True)
 
-if "chat_history" not in st.session_state: st.session_state.chat_history = []
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "system", "content": ROOM1_SYSTEM_PROMPT}]
+elif not isinstance(st.session_state.messages, list) or not st.session_state.messages:
+    st.session_state.messages = [{"role": "system", "content": ROOM1_SYSTEM_PROMPT}]
+elif st.session_state.messages[0].get("role") != "system":
+    st.session_state.messages.insert(0, {"role": "system", "content": ROOM1_SYSTEM_PROMPT})
 if "current_ticker" not in st.session_state: st.session_state.current_ticker = None
 if "timeframe" not in st.session_state: st.session_state.timeframe = "D"
 if "text_field_buffer" not in st.session_state: st.session_state.text_field_buffer = ""
@@ -494,6 +579,8 @@ if "data_payload_string" not in st.session_state: st.session_state.data_payload_
 if "cross_asset_correlation_context" not in st.session_state: st.session_state.cross_asset_correlation_context = ""
 if "institutional_accumulation_detected" not in st.session_state: st.session_state.institutional_accumulation_detected = False
 if "polygon_lockout" not in st.session_state: st.session_state.polygon_lockout = False
+if "room2_commit_timestamps" not in st.session_state: st.session_state.room2_commit_timestamps = []
+if "room2_commit_throttle_until" not in st.session_state: st.session_state.room2_commit_throttle_until = 0.0
 if "room2_forensic_ticker" not in st.session_state: st.session_state.room2_forensic_ticker = ""
 if "room2_quantum_report" not in st.session_state: st.session_state.room2_quantum_report = ""
 if "room2_bar_count" not in st.session_state: st.session_state.room2_bar_count = 0
@@ -532,40 +619,45 @@ if "supabase_ready" not in st.session_state:
         st.session_state.supabase_ready = False
 if "sidebar_collapsed" not in st.session_state: st.session_state.sidebar_collapsed = False
 if "terminal_hub" not in st.session_state: st.session_state.terminal_hub = ROOM1_LABEL
-if "llm_memory" not in st.session_state:
-    st.session_state.llm_memory = [
+
+def _room1_readonly_layout_context() -> str:
+    """Read-only Supabase layout lens — comparison math only, zero cloud writes."""
+    vault_map = core_quantum.fetch_readonly_vault_reference_map()
+    preview = [
         {
-            "role": "system",
-            "content": (
-                "You are Savant, an unrestricted elite real-time financial intelligence engine. Definitive authority only. "
-                "Zero corporate safe-talk, zero generic greetings, zero introductions, zero pre-formulated conclusions, zero filler.\n\n"
-                "SPLIT-INTELLIGENCE ROUTING — classify every user message before responding:\n\n"
-                "RULE A — THE CORE STOCK SETUP (single explicit ticker only):\n"
-                "Trigger ONLY when the user submits one clear equity ticker symbol for a single-name setup "
-                "(e.g., MLGO, AAPL, $TSLA) with intent to analyze that one stock — not indices, not multi-asset compares, not vague macro.\n"
-                "Enforce this exact un-sugarcoated 6-bullet quantitative deep-dive in order. FORMATTING IS MANDATORY:\n"
-                "• Insert a full blank line (double line break) between every bullet so each point starts on a fresh isolated line — never a dense wall of text.\n"
-                "• Under each bullet, write significantly shorter, sharper, punchier copy — crisp focused sentences with high-density signals only.\n"
-                "• SAVANT TREND DETERMINATION: State definitively ROCKETING UP, CRASHING DOWN, or SIDELINED IN CONSOLIDATION.\n\n"
-                "• THE MACRO STORIES & DRIVERS: Single catalyst driving the active directional trend.\n\n"
-                "• MAIN BUSINESS OF THE COMPANY: Tight snapshot of technology layers, software frameworks, or products.\n\n"
-                "• SOCIAL SENTIMENT MATRIX: Retail psychology, Stocktwits momentum, community volume velocity.\n\n"
-                "• TOMORROW'S SESSION EXPECTATION: Data-backed next-session projection.\n\n"
-                "• CRITICAL TRADER BULLET NOTES: Volume spikes, float traps, squeeze signals, anomalies.\n\n"
-                "After all six bullets, insert one full blank line, then ONE highly detailed comprehensive executive summary paragraph "
-                "at the absolute bottom. No bullets or headers after the six bullets except that final paragraph.\n\n"
-                "RULE B — THE BROAD CONTEXT SHIFT (everything else):\n"
-                "Instantly DROP the 6-bullet framework for: broad market questions, general updates, index or macro queries "
-                "(e.g., S&P 500, RSI, sector rotation), comparative analysis (two or more symbols), follow-up causality "
-                "(e.g., why did it move like that), technical deep-dives without a fresh single-ticker setup, jokes, or casual chat.\n"
-                "Respond with sophisticated multi-paragraph macro-quantitative prose. Never force general topics into the 6-bullet slots. "
-                "Address math, indicator trends, correlations, and cross-asset context naturally with institutional-grade complexity.\n\n"
-                "MULTI-ASSET SWITCHING: When the user pivots from Rule A to Rule B (or back) in the same thread, switch modes immediately — "
-                "do not carry the bullet template into Rule B and do not use Rule B prose when a new single-ticker setup is requested.\n"
-                "Use injected 12L payload data when present; never invent prices or filings."
-            ),
+            "layout_id": entry.get("layout_id"),
+            "timeframe_resolution": entry.get("timeframe_resolution"),
+            "ticker": entry.get("ticker"),
+            "vector_dims": len(entry.get("vector") or []),
         }
+        for entry in (vault_map.get("layout_vectors") or [])[:32]
     ]
+    return (
+        f"[READONLY_LAYOUT_LIBRARY]{json.dumps(preview, default=str)}"
+        f"|STRATEGY_PROFILES:{len(vault_map.get('strategy_profiles') or [])}[/READONLY_LAYOUT_LIBRARY]"
+    )
+
+
+def _room1_memory_capacity() -> dict:
+    return core_quantum.room1_memory_capacity_status(st.session_state.get("messages") or [])
+
+
+def _is_room1_strategic_audit_query(user_text: str, ticker: str | None) -> bool:
+    return core_quantum.is_room1_strategic_audit_query(user_text, ticker)
+
+
+def _room1_reset_volatile_memory() -> None:
+    """Wipe Room 1 volatile RAM — no cloud persistence."""
+    st.session_state.messages = [{"role": "system", "content": ROOM1_SYSTEM_PROMPT}]
+    st.session_state.current_ticker = None
+    st.session_state.text_field_buffer = ""
+    st.session_state.active_news_wire = []
+    st.session_state.sector_rotation_context = ""
+    st.session_state.cross_asset_correlation_context = ""
+    st.session_state.institutional_accumulation_detected = False
+    st.session_state.data_payload_string = ""
+    st.session_state.pop("room1_last_strategic_audit", None)
+    st.session_state.pop("room1_memory_locked", None)
 
 
 def extract_ticker(text):
@@ -932,44 +1024,72 @@ def run_groq(messages):
         return f"Core System Interruption: {exc}"
 
 
-def _build_groq_message_stack(user_text: str, payload: str) -> list[dict]:
-    system_msg = st.session_state.llm_memory[0]
-    dialog = [m for m in st.session_state.llm_memory[1:] if m["role"] in ("user", "assistant")]
-    recent = dialog[-3:] if len(dialog) > 3 else dialog
+def _build_groq_message_stack(live_payload: str = "") -> list[dict]:
+    """Full volatile thread context — entire Room 1 messages array, read-only layout lens."""
+    msgs = list(st.session_state.get("messages") or [])
+    system_msg = msgs[0] if msgs and msgs[0].get("role") == "system" else {
+        "role": "system",
+        "content": ROOM1_SYSTEM_PROMPT,
+    }
+    dialog = [m for m in msgs[1:] if m.get("role") in ("user", "assistant")]
+    layout_ctx = _room1_readonly_layout_context()
     groq_msgs = [
-        {"role": "system", "content": f"{system_msg['content']}\n{TOKEN_GUARD}"},
-        *[{"role": m["role"], "content": m["content"]} for m in recent[:-1]],
+        {
+            "role": "system",
+            "content": f"{system_msg['content']}\n{TOKEN_GUARD}\n{layout_ctx}",
+        }
     ]
-    latest = user_text
-    if payload:
-        latest = f"{user_text}\n[12L_DATA_PAYLOAD]{payload}[/12L_DATA_PAYLOAD]"
-    groq_msgs.append({"role": "user", "content": latest})
+    for i, turn in enumerate(dialog):
+        content = str(turn.get("content") or "")
+        if (
+            i == len(dialog) - 1
+            and turn.get("role") == "user"
+            and live_payload
+        ):
+            content = f"{content}\n[12L_DATA_PAYLOAD]{live_payload}[/12L_DATA_PAYLOAD]"
+        groq_msgs.append({"role": turn["role"], "content": content})
     return groq_msgs
 
 
 def process_chat_submission():
+    """Room 1 chat — volatile st.session_state.messages only; never writes to Supabase."""
     user_text = st.session_state.text_field_buffer.strip()
     if not user_text:
+        return
+
+    cap = core_quantum.room1_memory_capacity_status(
+        st.session_state.get("messages") or [],
+        pending_user_text=user_text,
+    )
+    if cap.get("locked"):
+        st.session_state.room1_memory_locked = True
         return
 
     new_ticker = extract_ticker(user_text)
     if new_ticker and new_ticker != st.session_state.current_ticker:
         st.session_state.current_ticker = new_ticker
-        st.session_state.llm_memory = st.session_state.llm_memory[:1]
 
-    st.session_state.chat_history.append({"speaker": "You", "text": user_text})
-    st.session_state.llm_memory.append({"role": "user", "content": user_text})
+    st.session_state.messages.append({"role": "user", "content": user_text})
 
     payload = ""
-    if st.session_state.current_ticker:
-        get_live_tape_data(st.session_state.current_ticker)
+    audit_ticker = new_ticker or st.session_state.current_ticker
+    if audit_ticker:
+        get_live_tape_data(audit_ticker)
         payload = st.session_state.data_payload_string
+        if _is_room1_strategic_audit_query(user_text, audit_ticker):
+            audit = core_quantum.run_room1_strategic_audit_dragnet(audit_ticker, user_text)
+            report_block = str(audit.get("report_block") or "").strip()
+            if report_block:
+                payload = f"{payload}\n[ROOM1_STRATEGIC_AUDIT]{report_block}[/ROOM1_STRATEGIC_AUDIT]"
 
-    groq_msgs = _build_groq_message_stack(user_text, payload)
+    groq_msgs = _build_groq_message_stack(payload)
     ai_text = run_groq(groq_msgs)
-    st.session_state.llm_memory.append({"role": "assistant", "content": ai_text})
-    st.session_state.chat_history.append({"speaker": "Savant", "text": ai_text})
+    st.session_state.messages.append({"role": "assistant", "content": ai_text})
     st.session_state.text_field_buffer = ""
+
+    post_cap = core_quantum.room1_memory_capacity_status(st.session_state.get("messages") or [])
+    if post_cap.get("locked"):
+        st.session_state.room1_memory_locked = True
 
 
 SAVANT_COGNITIVE_INJECTION = """
@@ -1045,6 +1165,9 @@ Genetic Cross-Reference & Purgatory: High multi-layer overlap mints Layout group
 Live Decommissioning Circuit: Rolling 15-trade monitor per strategy node. Below floor → halt live order tokens immediately. Friction/slippage → modify entry coordinates in place, retain DNA. Structural alpha decay → delete strategy letter, leave vacancy; multi-stock Room 2 validation required before hardened replacement mint.
 
 Data Durability: isinstance(df, pd.DataFrame) and not df.empty guards on all frame lookups; forward-fill padding on thin sessions; permanent Supabase vault_track/state/timeframe_resolution/strategy_executions persistence.
+
+Forensic Data Shattering & Digital Genetics (Additive — Non-Destructive to Blinding/Cache)
+Tiered profit floors (1m/5m/15m: 1.0%/3.0%/5.0%) gate permanent library saves. Full-day dragnet on 5m/15m dumps unfiltered session fat to forensic_dragnet_blob while Exit B temporal fence remains intact. Genetic Master Signatures purge non-overlapping noise dimensions. Semantic hash embeddings replace rigid keyword/name traps for catalyst scoring. Volume/velocity/spread use std-dev envelopes. Profit-anchored exit cluster zones lock repeatable cash targets adjacent to spike exits.
 
 Operator Directive
 Map literal operator examples ("I like this setup", "This bounce off VWAP was nice") directly into cloud memory as structural signature coordinates — never as mood labels. Maintain the compressed master layout index at all times.
@@ -1463,6 +1586,10 @@ def _hydrate_matrix_memory_from_cloud() -> None:
 
     _purge_expired_trash_vault()
     _purge_expired_anomaly_incubation()
+    core_quantum.hydrate_layout_library_from_vault()
+    self_surgery.ensure_purgatory_hub_session()
+    self_surgery.hydrate_repair_bay_from_cloud()
+    self_surgery.purge_expired_repair_bay_profiles()
     _load_matrix_chat_from_cloud()
 
     latest = _fetch_latest_active_pattern_row()
@@ -1869,42 +1996,138 @@ def purge_room2_conversation_and_cloud() -> None:
     _sync_matrix_chat_to_cloud()
 
 
-@st.cache_resource
-def init_supabase():
-    if create_client is None:
-        return None
-    try:
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
-        return create_client(url, key)
-    except Exception:
-        return None
+def _render_room1_forensic_front_desk():
+    """Room 1 — zero-waste read-only lens; volatile local messages RAM only."""
+    core_quantum.hydrate_layout_library_from_vault()
+    col_chart_side, col_chat_side = st.columns([1.1, 0.9])
 
+    with col_chart_side:
+        st.markdown(
+            '<div style="position: fixed; width: 45%; max-width: 750px; z-index: 99;">',
+            unsafe_allow_html=True,
+        )
+        st.markdown("<div style='height: 2vh;'></div>", unsafe_allow_html=True)
+        if st.session_state.current_ticker:
+            active_tk = st.session_state.current_ticker
 
-def _supabase_pattern_table() -> str:
-    try:
-        return st.secrets["SUPABASE_PATTERN_TABLE"]
-    except (KeyError, FileNotFoundError, AttributeError):
-        return "pattern_context_anchor"
+            tf_cols = st.columns(6)
+            tfs = ["5m", "15m", "1H", "1D", "1W", "1M"]
+            tf_map = {"5m": "5", "15m": "15", "1H": "60", "1D": "D", "1W": "W", "1M": "M"}
+            for i, t_label in enumerate(tfs):
+                with tf_cols[i]:
+                    if st.button(t_label, key=f"panel_tf_{t_label}"):
+                        st.session_state.timeframe = tf_map[t_label]
+                        st.rerun()
 
+            active_tf = st.session_state.timeframe
+            symbol = urllib.parse.quote(f"NASDAQ:{active_tk.upper()}", safe="")
+            pure_chart_url = (
+                f"https://s.tradingview.com/widgetembed/?symbol={symbol}&interval={active_tf}"
+                f"&theme=dark&style=1&timezone=Etc%2FUTC&locale=en&allow_symbol_change=0"
+            )
 
-def _route_pattern_context_to_supabase(ticker: str, operator_context: str, quantum_report: str) -> tuple[bool, str]:
-    client = init_supabase()
-    if client is None:
-        return False, "Supabase offline. Add SUPABASE_URL and SUPABASE_KEY to `.streamlit/secrets.toml`."
-    payload = {
-        "ticker": ticker.upper(),
-        "operator_context": operator_context.strip(),
-        "quantum_report": quantum_report,
-        "bar_count": st.session_state.room2_bar_count,
-        "source_room": "forensic_pattern_lab",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    try:
-        client.table(_supabase_pattern_table()).insert(payload).execute()
-        return True, f"Pattern context routed to `{_supabase_pattern_table()}`."
-    except Exception as exc:
-        return False, f"Supabase routing failed: {exc}"
+            components.html(f"""
+                <div style="height:620px; width:100%; border-radius:8px; overflow:hidden; border:1px solid #1F1F1F;">
+                    <iframe src="{pure_chart_url}" width="100%" height="620" frameborder="0"
+                        allowtransparency="true" allowfullscreen="true" webkitallowfullscreen="true"
+                        scrolling="no"></iframe>
+                </div>
+            """, height=630)
+        else:
+            st.markdown("<div style='height: 25vh;'></div>", unsafe_allow_html=True)
+            st.markdown(
+                "<div style='text-align:center; color:#333; font-size:15px; font-weight:300;'>"
+                "Chart display queued. Enter an UPPERCASE stock setup query inside the terminal.</div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_chat_side:
+        st.markdown("<div style='height: 1vh;'></div>", unsafe_allow_html=True)
+        st.caption(
+            "🔒 **Volatile local RAM** — conversation lives only in this session. "
+            "Refresh or reset wipes all chat text. Supabase is read-only for layout comparison."
+        )
+        memory_cap = _room1_memory_capacity()
+        memory_locked = bool(memory_cap.get("locked") or st.session_state.get("room1_memory_locked"))
+        if memory_locked:
+            st.markdown(
+                '<div class="room1-memory-lock">Peak memory threshold reached. '
+                "Refresh the page to preserve maximum up-to-date search speeds.</div>",
+                unsafe_allow_html=True,
+            )
+        elif memory_cap.get("warn_active"):
+            st.markdown(
+                '<div class="room1-memory-warn">WARNING: Approaching memory limit. '
+                "5 messages remaining before a refresh is recommended.</div>",
+                unsafe_allow_html=True,
+            )
+        col_empty, col_btn_anchor = st.columns([0.7, 0.3])
+        with col_btn_anchor:
+            if st.button("RESET MEMORY", key="clean_memory_cta", use_container_width=True):
+                _room1_reset_volatile_memory()
+                st.rerun()
+
+        if st.session_state.current_ticker:
+            p, pct, v, vw, name = _fetch_tape_metrics(st.session_state.current_ticker)
+            color_choice = "#34C759" if pct >= 0 else "#FF3B30"
+            st.markdown(
+                f"""
+                <div style="background:#111;padding:12px;border-radius:6px;border:1px solid #1F1F1F;margin-bottom:15px;">
+                    <div class="metric-label" style="font-size:10px;color:#555;font-weight:700;">
+                        Exchange Tape Metrics — {name} ({st.session_state.current_ticker})
+                    </div>
+                    <div class="metric-grid">
+                        <div class="metric-card"><div class="metric-label">Price</div>
+                            <div class="metric-value">${p:,.2f}</div></div>
+                        <div class="metric-card"><div class="metric-label">Change</div>
+                            <div class="metric-value" style="color:{color_choice}">{pct:+.2f}%</div></div>
+                        <div class="metric-card"><div class="metric-label">Volume</div>
+                            <div class="metric-value">{v}</div></div>
+                        <div class="metric-card"><div class="metric-label">Sess. VWAP</div>
+                            <div class="metric-value">{vw}</div></div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        dialog = [
+            m for m in st.session_state.get("messages", [])[1:]
+            if m.get("role") in ("user", "assistant")
+        ]
+        if not dialog:
+            st.markdown("<div style='height: 18vh;'></div>", unsafe_allow_html=True)
+            st.markdown(
+                "<div style='text-align:center;color:#222;font-size:24px;font-weight:300;"
+                "letter-spacing:0.04em;'>Savant Apprentice</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            for msg in dialog:
+                speaker = "You" if msg.get("role") == "user" else "Savant"
+                label_class = "speaker-you" if speaker == "You" else "speaker-savant"
+                st.markdown(
+                    f'<div class="chat-row"><div class="speaker-label {label_class}">{speaker}</div>'
+                    f'<div class="data-content">{escape(str(msg.get("content", "")))}</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+        with st.form("chat_form", clear_on_submit=False):
+            st.text_input(
+                "Input",
+                key="text_field_buffer",
+                placeholder="Ask Savant anything... No filters active.",
+                label_visibility="collapsed",
+                disabled=memory_locked,
+            )
+            if (
+                st.form_submit_button("Send", disabled=memory_locked)
+                and st.session_state.text_field_buffer.strip()
+                and not memory_locked
+            ):
+                st.session_state._pending_chat_submit = True
+                st.rerun()
 
 
 def _room2_coordinate_string(date_val, time_val: str) -> str:
@@ -2014,23 +2237,31 @@ def _evaluate_purgatory_cluster(
 
 
 def _render_purgatory_shelf() -> None:
+    self_surgery.ensure_purgatory_hub_session()
+    self_surgery.purge_expired_repair_bay_profiles()
+    hub_message = self_surgery.build_hub_display_message()
     st.markdown(
-        '<div class="room2-terminal-header">▸ PURGATORY SHELF — ISOLATED SUB-85% SETUPS</div>',
+        '<div class="room2-terminal-header">▸ TWO-WAY PURGATORY HUB — INCUBATION & REPAIR BAY</div>',
         unsafe_allow_html=True,
     )
     if st.session_state.get("purgatory_shelf_active"):
         shelf_class = "purgatory-shelf purgatory-shelf-active"
-        body = st.session_state.get("purgatory_shelf_message", "")
+        body = st.session_state.get("purgatory_shelf_message") or hub_message
     else:
         shelf_class = "purgatory-shelf"
-        body = (
-            "░ PURGATORY STANDBY — Setups below 85% geometric similarity are isolated here. "
-            "No blending with active Layout folders until a matching complex makeup repeats."
-        )
+        body = hub_message
     st.markdown(
         f'<div class="{shelf_class}">{escape(body)}</div>',
         unsafe_allow_html=True,
     )
+    bay = st.session_state.get("purgatory_repair_bay") or {}
+    benched = [p for p in bay.values() if not p.get("reminted")]
+    if benched:
+        preview = " · ".join(
+            f"{p.get('strategy_label')}@{p.get('parent_layout_id')}" for p in benched[:6]
+        )
+        extra = f" · +{len(benched) - 6} more" if len(benched) > 6 else ""
+        st.caption(f"🔧 **Repair Bay (Track B):** {preview}{extra}")
 
 
 def _render_r2_datalink_group(deck_prefix: str) -> None:
@@ -2338,6 +2569,72 @@ def _ensure_room2_widget_defaults() -> None:
             st.session_state[key] = value
 
 
+def _prune_room2_commit_timestamps(now: float | None = None) -> list[float]:
+    """Rolling 60-second window of successful Commit timestamps."""
+    now = now or time.time()
+    window_start = now - R2_COMMIT_WINDOW_SEC
+    pruned = [ts for ts in (st.session_state.get("room2_commit_timestamps") or []) if ts > window_start]
+    st.session_state.room2_commit_timestamps = pruned
+    return pruned
+
+
+def _room2_commit_throttle_seconds_remaining(now: float | None = None) -> int:
+    now = now or time.time()
+    stamps = _prune_room2_commit_timestamps(now)
+    if len(stamps) >= R2_COMMIT_MAX_PER_WINDOW:
+        reset_at = min(stamps) + R2_COMMIT_WINDOW_SEC
+        return max(0, int(reset_at - now + 0.999))
+    throttle_until = float(st.session_state.get("room2_commit_throttle_until") or 0.0)
+    if throttle_until > now:
+        return max(0, int(throttle_until - now + 0.999))
+    st.session_state.room2_commit_throttle_until = 0.0
+    return 0
+
+
+def _room2_commit_throttle_active() -> bool:
+    return _room2_commit_throttle_seconds_remaining() > 0
+
+
+def _activate_room2_commit_throttle() -> None:
+    stamps = _prune_room2_commit_timestamps()
+    if stamps:
+        st.session_state.room2_commit_throttle_until = min(stamps) + R2_COMMIT_WINDOW_SEC
+    else:
+        st.session_state.room2_commit_throttle_until = time.time() + R2_COMMIT_WINDOW_SEC
+
+
+def _room2_commit_would_throttle() -> bool:
+    """True when a 4th deploy would breach the rolling 60-second limit."""
+    return len(_prune_room2_commit_timestamps()) >= R2_COMMIT_MAX_PER_WINDOW
+
+
+def _record_room2_successful_commit() -> None:
+    now = time.time()
+    stamps = _prune_room2_commit_timestamps(now)
+    stamps.append(now)
+    st.session_state.room2_commit_timestamps = stamps
+
+
+@st.fragment(run_every=timedelta(seconds=1))
+def _render_room2_commit_throttle_banner() -> bool:
+    """Persistent throttle banner with live countdown until the window resets."""
+    remaining = _room2_commit_throttle_seconds_remaining()
+    if remaining <= 0:
+        return False
+    st.markdown(
+        f'<div class="room2-throttle-banner">'
+        f"🛑 {escape(R2_COMMIT_THROTTLE_BANNER)}"
+        f'<div class="room2-throttle-countdown">{remaining}s until reset</div>'
+        f'<div style="font-size:11px;font-weight:500;margin-top:6px;color:#FFAAAA;'
+        f'text-transform:none;letter-spacing:0.02em;">'
+        f"Max {R2_COMMIT_MAX_PER_WINDOW} submissions per {R2_COMMIT_WINDOW_SEC}s — "
+        f"your inputs are held safely on screen."
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+    return True
+
+
 def _clear_room2_form_buffers() -> None:
     """Reset winning-deck form keys after a validated deploy."""
     for key in (
@@ -2357,7 +2654,12 @@ def _handle_room2_deck_submit() -> None:
         st.rerun()
         return
     st.session_state.r2_good_validation_error = False
+    if _room2_commit_would_throttle():
+        _activate_room2_commit_throttle()
+        st.rerun()
+        return
     if _deploy_room2_deck():
+        _record_room2_successful_commit()
         _clear_room2_form_buffers()
     st.rerun()
 
@@ -2483,6 +2785,14 @@ def _deploy_room2_deck() -> bool:
             quality=quality,
         )
         text_matrix_string = research_audit.get("text_matrix_string", "")
+        forensic_dragnet_blob = research_audit.get("forensic_dragnet_blob", "")
+        master_signature_json = research_audit.get("master_signature_json", "")
+        metric_envelopes_json = json.dumps(
+            research_audit.get("metric_envelopes", {}), default=str
+        )
+        semantic_catalyst_json = json.dumps(
+            research_audit.get("semantic_catalyst", {}), default=str
+        )
 
         quantum_summary = core_quantum.calculate_quantum_frequencies(
             data_stream,
@@ -2497,10 +2807,24 @@ def _deploy_room2_deck() -> bool:
             layout_block_id="",
         )
 
-        # ValueError plug — coerce tables/objects to strict terminal text before Window 1 bind.
         quantum_report = _coerce_quantum_summary_to_text(quantum_summary)
 
         math_block = st.session_state.get("room2_last_math_block", {}) or {}
+        genetic = st.session_state.get("room2_master_signature") or {}
+        master_signature_json = json.dumps(
+            {
+                "master_signature": genetic.get("master_signature") or [],
+                "overlap_pct": genetic.get("overlap_pct", 0),
+                "dimensions_trashed": genetic.get("dimensions_trashed", 0),
+                "pure_overlap_dims": genetic.get("pure_overlap_dims", 0),
+                "finbert_sentiment_score": (
+                    (st.session_state.get("room2_deep_research_audit") or {})
+                    .get("semantic_catalyst", {})
+                    .get("finbert_sentiment_score", 0.0)
+                ),
+            },
+            default=str,
+        )
         macro_weather_layout = _resolve_auto_layout_id()
         match_score = int(math_block.get("match_probability") or 0)
         execution_strategy = core_quantum.resolve_matrix_strategy_id(
@@ -2575,6 +2899,10 @@ def _deploy_room2_deck() -> bool:
             shelf_expires_at=shelf_expires,
             structural_move_pct=structural_move,
             text_matrix_string=text_matrix_string,
+            forensic_dragnet_blob=forensic_dragnet_blob,
+            master_signature_json=master_signature_json,
+            metric_envelopes_json=metric_envelopes_json,
+            semantic_catalyst_json=semantic_catalyst_json,
         )
 
         ok, vault_message = core_quantum.stream_payload_to_vault(payload)
@@ -2595,9 +2923,26 @@ def _deploy_room2_deck() -> bool:
                 pattern_category=pattern_category,
                 layout_match_pct=match_score,
                 structural_move_pct=structural_move,
+                entry_coordinate=entry_coord or "",
+                exit_coordinate=exit_coord or "",
             )
             st.session_state.room2_alpha_decay_status = retro
-            if retro.get("halt_live_execution") and retro.get("diagnosis"):
+            if retro.get("repair_bay_demoted"):
+                vault_line = (
+                    f"{vault_message} · REPAIR BAY — {execution_strategy} benched "
+                    f"(live execution locked · 60-day recycle window)."
+                )
+            elif retro.get("autonomous_surgery", {}).get("database_action") == "entry_tweak_update":
+                vault_line = (
+                    f"{vault_message} · AUTO-TWEAK — entry coordinates updated in cloud "
+                    f"for {execution_strategy}."
+                )
+            elif retro.get("autonomous_surgery", {}).get("database_action") == "delete_and_purgatory":
+                vault_line = (
+                    f"{vault_message} · AUTO-PURGATORY — {execution_strategy} erased from "
+                    f"active layout; Repair Bay engaged."
+                )
+            elif retro.get("halt_live_execution") and retro.get("diagnosis"):
                 vault_line = f"{vault_message} · {retro['diagnosis']}"
             elif vault_state == VAULT_STATE_INCUBATION and incubation_msg:
                 vault_line = f"{vault_message} · {incubation_msg}"
@@ -2607,6 +2952,37 @@ def _deploy_room2_deck() -> bool:
                 vault_line = vault_message
         else:
             vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
+
+        if ok and quality.get("passed"):
+            velocity = st.session_state.get("room2_last_velocity") or {}
+            feature_vector = core_quantum.extract_forensic_feature_vector(
+                velocity,
+                math_block,
+                float(
+                    (st.session_state.get("room2_deep_research_audit") or {})
+                    .get("semantic_catalyst", {})
+                    .get("finbert_sentiment_score", 0.0)
+                ),
+            )
+            genetic = st.session_state.get("room2_master_signature") or {}
+            reminted = self_surgery.attempt_genetic_recycling_on_fresh_deploy(
+                ticker=ticker,
+                parent_layout_id=macro_weather_layout,
+                strategy_label=execution_strategy,
+                timeframe_resolution=timeframe_resolution,
+                quality=quality,
+                metric_envelopes=research_audit.get("metric_envelopes"),
+                master_signature=genetic.get("master_signature"),
+                feature_vector=feature_vector,
+                entry_time=start_time,
+                exit_time=end_time,
+            )
+            if reminted:
+                remint_note = (
+                    f"GENETIC RE-MINT — {execution_strategy} restored to "
+                    f"{macro_weather_layout} (boundaries updated · floor re-validated)."
+                )
+                vault_line = f"{vault_line} · {remint_note}" if vault_line else remint_note
 
         if incubation_msg and vault_state == VAULT_STATE_INCUBATION:
             final_terminal = _assign_matrix_terminal_output(
@@ -2672,12 +3048,12 @@ def _fetch_active_layout_folders() -> list[str]:
 
 
 def _render_dynamic_layout_registry() -> None:
-    """Automated dynamic UI — cloud-minted Layout folders only, zero manual selectors."""
+    """Database-minted layout folders only — zero manual selectors on the glass."""
     folders = _fetch_active_layout_folders()
     if folders:
         preview = " · ".join(folders[:16])
         extra = f" · +{len(folders) - 16} more" if len(folders) > 16 else ""
-        st.caption(f"📂 **Active Layout Folders (database-minted):** {preview}{extra}")
+        st.caption(f"📂 **Active Layout Folders:** {preview}{extra}")
     else:
         st.caption(
             "📂 **Active Layout Folders:** awaiting first cloud mint — "
@@ -2745,6 +3121,9 @@ def render_room2_forensic_lab():
     if st.session_state.polygon_lockout:
         st.error(core_quantum.THROTTLE_MESSAGE)
 
+    commit_throttle_active = _room2_commit_throttle_active()
+    _render_room2_commit_throttle_banner()
+
     col_left, col_right = st.columns([1.0, 1.0])
 
     with col_left:
@@ -2768,8 +3147,9 @@ def render_room2_forensic_lab():
                 good_deploy = st.form_submit_button(
                     "🔥 COMMIT WINNING PATTERN TO INTERNET",
                     use_container_width=True,
+                    disabled=commit_throttle_active,
                 )
-            if good_deploy:
+            if good_deploy and not commit_throttle_active:
                 _handle_room2_deck_submit()
 
     with col_right:
@@ -2866,8 +3246,15 @@ def render_terminal_nav() -> str:
 
 
 if st.session_state.pop("_pending_chat_submit", False):
-    with st.spinner("Savant processing live data layers..."):
-        process_chat_submission()
+    cap = core_quantum.room1_memory_capacity_status(
+        st.session_state.get("messages") or [],
+        pending_user_text=st.session_state.get("text_field_buffer", ""),
+    )
+    if not cap.get("locked"):
+        with st.spinner("Savant processing live data layers..."):
+            process_chat_submission()
+    else:
+        st.session_state.room1_memory_locked = True
 
 if st.session_state.pop("_pending_room2_chat_submit", False):
     with st.spinner("Forensic Pattern Research Expert processing..."):
@@ -2876,116 +3263,7 @@ if st.session_state.pop("_pending_room2_chat_submit", False):
 terminal_hub = render_terminal_nav()
 
 if terminal_hub == ROOM1_LABEL:
-    col_chart_side, col_chat_side = st.columns([1.1, 0.9])
-
-    with col_chart_side:
-        st.markdown(
-            '<div style="position: fixed; width: 45%; max-width: 750px; z-index: 99;">',
-            unsafe_allow_html=True,
-        )
-        st.markdown("<div style='height: 2vh;'></div>", unsafe_allow_html=True)
-        if st.session_state.current_ticker:
-            active_tk = st.session_state.current_ticker
-
-            tf_cols = st.columns(6)
-            tfs = ["5m", "15m", "1H", "1D", "1W", "1M"]
-            tf_map = {"5m": "5", "15m": "15", "1H": "60", "1D": "D", "1W": "W", "1M": "M"}
-            for i, t_label in enumerate(tfs):
-                with tf_cols[i]:
-                    if st.button(t_label, key=f"panel_tf_{t_label}"):
-                        st.session_state.timeframe = tf_map[t_label]
-                        st.rerun()
-
-            active_tf = st.session_state.timeframe
-            symbol = urllib.parse.quote(f"NASDAQ:{active_tk.upper()}", safe="")
-            pure_chart_url = (
-                f"https://s.tradingview.com/widgetembed/?symbol={symbol}&interval={active_tf}"
-                f"&theme=dark&style=1&timezone=Etc%2FUTC&locale=en&allow_symbol_change=0"
-            )
-
-            components.html(f"""
-                <div style="height:620px; width:100%; border-radius:8px; overflow:hidden; border:1px solid #1F1F1F;">
-                    <iframe src="{pure_chart_url}" width="100%" height="620" frameborder="0"
-                        allowtransparency="true" allowfullscreen="true" webkitallowfullscreen="true"
-                        scrolling="no"></iframe>
-                </div>
-            """, height=630)
-        else:
-            st.markdown("<div style='height: 25vh;'></div>", unsafe_allow_html=True)
-            st.markdown(
-                "<div style='text-align:center; color:#333; font-size:15px; font-weight:300;'>"
-                "Chart display queued. Enter an UPPERCASE stock setup query inside the terminal.</div>",
-                unsafe_allow_html=True,
-            )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with col_chat_side:
-        st.markdown("<div style='height: 1vh;'></div>", unsafe_allow_html=True)
-        col_empty, col_btn_anchor = st.columns([0.7, 0.3])
-        with col_btn_anchor:
-            if st.button("RESET MEMORY", key="clean_memory_cta", use_container_width=True):
-                st.session_state.chat_history = []
-                st.session_state.current_ticker = None
-                st.session_state.text_field_buffer = ""
-                st.session_state.llm_memory = st.session_state.llm_memory[:1]
-                st.session_state.active_news_wire = []
-                st.session_state.sector_rotation_context = ""
-                st.session_state.cross_asset_correlation_context = ""
-                st.session_state.institutional_accumulation_detected = False
-                st.session_state.data_payload_string = ""
-                st.rerun()
-
-        if st.session_state.current_ticker:
-            p, pct, v, vw, name = _fetch_tape_metrics(st.session_state.current_ticker)
-            color_choice = "#34C759" if pct >= 0 else "#FF3B30"
-            st.markdown(
-                f"""
-                <div style="background:#111;padding:12px;border-radius:6px;border:1px solid #1F1F1F;margin-bottom:15px;">
-                    <div class="metric-label" style="font-size:10px;color:#555;font-weight:700;">
-                        Exchange Tape Metrics — {name} ({st.session_state.current_ticker})
-                    </div>
-                    <div class="metric-grid">
-                        <div class="metric-card"><div class="metric-label">Price</div>
-                            <div class="metric-value">${p:,.2f}</div></div>
-                        <div class="metric-card"><div class="metric-label">Change</div>
-                            <div class="metric-value" style="color:{color_choice}">{pct:+.2f}%</div></div>
-                        <div class="metric-card"><div class="metric-label">Volume</div>
-                            <div class="metric-value">{v}</div></div>
-                        <div class="metric-card"><div class="metric-label">Sess. VWAP</div>
-                            <div class="metric-value">{vw}</div></div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        if not st.session_state.chat_history:
-            st.markdown("<div style='height: 18vh;'></div>", unsafe_allow_html=True)
-            st.markdown(
-                "<div style='text-align:center;color:#222;font-size:24px;font-weight:300;"
-                "letter-spacing:0.04em;'>Savant Apprentice</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            for msg in st.session_state.chat_history:
-                label_class = "speaker-you" if msg["speaker"] == "You" else "speaker-savant"
-                st.markdown(
-                    f'<div class="chat-row"><div class="speaker-label {label_class}">{msg["speaker"]}</div>'
-                    f'<div class="data-content">{msg.get("text", "")}</div></div>',
-                    unsafe_allow_html=True,
-                )
-
-        with st.form("chat_form", clear_on_submit=False):
-            st.text_input(
-                "Input",
-                key="text_field_buffer",
-                placeholder="Ask Savant anything... No filters active.",
-                label_visibility="collapsed",
-            )
-            if st.form_submit_button("Send") and st.session_state.text_field_buffer.strip():
-                st.session_state._pending_chat_submit = True
-                st.rerun()
-
+    _render_room1_forensic_front_desk()
 else:
     render_room2_forensic_lab()
 
