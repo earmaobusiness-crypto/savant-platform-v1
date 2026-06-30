@@ -314,6 +314,18 @@ st.markdown("""
             box-sizing: border-box;
             box-shadow: inset 0 0 32px rgba(52, 199, 89, 0.06);
         }
+        .matrix-telemetry-show {
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .matrix-telemetry-cursor::after {
+            content: "▌";
+            color: #34C759;
+            animation: matrixTelemetryBlink 0.85s step-end infinite;
+        }
+        @keyframes matrixTelemetryBlink {
+            50% { opacity: 0; }
+        }
         .room2-matrix-cascade-shell {
             background: #050505;
             border: 1px solid #0D3D0D;
@@ -2327,6 +2339,166 @@ def _assign_matrix_terminal_output(quantum_summary, vault_line: str | None = Non
     return terminal_text
 
 
+def _build_matrix_telemetry_html() -> str:
+    revealed = st.session_state.get("matrix_telemetry_revealed_lines") or []
+    body = "\n".join(escape(line) for line in revealed)
+    cursor = (
+        '<span class="matrix-telemetry-cursor"></span>'
+        if st.session_state.get("matrix_telemetry_show_active")
+        else ""
+    )
+    return (
+        f'<div class="room2-matrix-box matrix-telemetry-show">{body}{cursor}</div>'
+    )
+
+
+def _finalize_pending_vault_deploy() -> None:
+    """Execute deferred Supabase vault sync after the cinematic telemetry show completes."""
+    pending = st.session_state.get("matrix_telemetry_pending_deploy") or {}
+    if not pending:
+        return
+
+    payload = pending.get("payload")
+    if not payload:
+        st.session_state.matrix_telemetry_pending_deploy = None
+        return
+
+    ticker = pending.get("ticker", "")
+    timeframe_resolution = pending.get("timeframe_resolution", "15-Minute")
+    pattern_category = pending.get("pattern_category", "VALIDATED")
+    quantum_report = pending.get("quantum_report", "")
+    structural_move = float(pending.get("structural_move") or 0.0)
+    macro_weather_layout = pending.get("macro_weather_layout", "")
+    execution_strategy = pending.get("execution_strategy", "")
+    match_score = int(pending.get("match_score") or 0)
+    vault_state = pending.get("vault_state", "")
+    incubation_msg = pending.get("incubation_msg", "")
+    in_purgatory = bool(pending.get("in_purgatory"))
+    purgatory_message = pending.get("purgatory_message", "")
+    quality = pending.get("quality") or st.session_state.get("room2_playbook_quality") or {}
+    chart_coupling = pending.get("chart_coupling") or st.session_state.get("room2_chart_coupling") or {}
+    research_audit = pending.get("research_audit") or {}
+    math_block = pending.get("math_block") or {}
+    start_time = pending.get("start_time", "")
+    end_time = pending.get("end_time", "")
+    entry_coord = pending.get("entry_coord", "")
+    exit_coord = pending.get("exit_coord", "")
+    base_terminal = pending.get("base_terminal", quantum_report)
+
+    ok, vault_message = core_quantum.stream_payload_to_vault(payload)
+    if ok and pattern_category == "VALIDATED":
+        margin_pct = structural_move or abs(
+            float(
+                (st.session_state.get("room2_last_velocity") or {}).get(
+                    "session_velocity_pct", 0.0
+                )
+            )
+        )
+        retro = core_quantum.log_strategy_execution_with_fallback(
+            ticker=ticker,
+            macro_weather_layout=macro_weather_layout,
+            execution_strategy=execution_strategy,
+            timeframe_resolution=timeframe_resolution,
+            margin_pct=margin_pct,
+            pattern_category=pattern_category,
+            layout_match_pct=match_score,
+            structural_move_pct=structural_move,
+            entry_coordinate=entry_coord or "",
+            exit_coordinate=exit_coord or "",
+        )
+        st.session_state.room2_alpha_decay_status = retro
+        if retro.get("repair_bay_demoted"):
+            vault_line = (
+                f"{vault_message} · REPAIR BAY — {execution_strategy} benched "
+                f"(live execution locked · 60-day recycle window)."
+            )
+        elif retro.get("autonomous_surgery", {}).get("database_action") == "entry_tweak_update":
+            vault_line = (
+                f"{vault_message} · AUTO-TWEAK — entry coordinates updated in cloud "
+                f"for {execution_strategy}."
+            )
+        elif retro.get("autonomous_surgery", {}).get("database_action") == "delete_and_purgatory":
+            vault_line = (
+                f"{vault_message} · AUTO-PURGATORY — {execution_strategy} erased from "
+                f"active layout; Repair Bay engaged."
+            )
+        elif retro.get("halt_live_execution") and retro.get("diagnosis"):
+            vault_line = f"{vault_message} · {retro['diagnosis']}"
+        elif vault_state == VAULT_STATE_INCUBATION and incubation_msg:
+            vault_line = f"{vault_message} · {incubation_msg}"
+        elif (retro.get("degraded") or retro.get("evolving")) and retro.get("diagnosis"):
+            vault_line = f"{vault_message} · {retro['diagnosis']}"
+        else:
+            vault_line = vault_message
+    else:
+        vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
+
+    if ok and quality.get("passed"):
+        velocity = st.session_state.get("room2_last_velocity") or {}
+        feature_vector = core_quantum.extract_forensic_feature_vector(
+            velocity,
+            math_block,
+            float(
+                (st.session_state.get("room2_deep_research_audit") or {})
+                .get("semantic_catalyst", {})
+                .get("finbert_sentiment_score", 0.0)
+            ),
+        )
+        genetic = st.session_state.get("room2_master_signature") or {}
+        reminted = self_surgery.attempt_genetic_recycling_on_fresh_deploy(
+            ticker=ticker,
+            parent_layout_id=macro_weather_layout,
+            strategy_label=execution_strategy,
+            timeframe_resolution=timeframe_resolution,
+            quality=quality,
+            metric_envelopes=research_audit.get("metric_envelopes"),
+            master_signature=genetic.get("master_signature"),
+            feature_vector=feature_vector,
+            entry_time=start_time,
+            exit_time=end_time,
+        )
+        if reminted:
+            remint_note = (
+                f"GENETIC RE-MINT — {execution_strategy} restored to "
+                f"{macro_weather_layout} (boundaries updated · floor re-validated)."
+            )
+            vault_line = f"{vault_line} · {remint_note}" if vault_line else remint_note
+
+    if in_purgatory:
+        final_terminal = _assign_matrix_terminal_output(
+            f"{quantum_report}\n\n{purgatory_message}",
+            vault_line if ok else None,
+        )
+    elif incubation_msg and vault_state == VAULT_STATE_INCUBATION:
+        final_terminal = _assign_matrix_terminal_output(
+            f"{quantum_report}\n\n{incubation_msg}",
+            vault_line if ok else None,
+        )
+    elif ok and quality.get("passed") and chart_coupling.get("passed"):
+        confirm = (
+            f"✅ VAULT SYNC OK — {ticker} · {timeframe_resolution} · "
+            f"{structural_move:.2f}% structural move · "
+            f"bars={st.session_state.room2_bar_count} · Massive REST lane live."
+        )
+        final_terminal = _assign_matrix_terminal_output(
+            quantum_report,
+            f"{vault_line}\n{confirm}",
+        )
+        st.session_state.room2_stale_threshold_error = None
+        st.session_state.room2_vault_confirmation = confirm
+    else:
+        final_terminal = _assign_matrix_terminal_output(quantum_report, vault_line if ok else None)
+
+    st.session_state.quantum_terminal_output = final_terminal
+    st.session_state.room2_quantum_report = final_terminal
+    st.session_state.room2_vault_flash = vault_line if ok else ""
+    st.session_state.matrix_telemetry_pending_deploy = None
+    st.session_state.matrix_satellites_ready = True
+    st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
+    st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
+    _sync_matrix_chat_to_cloud()
+
+
 def _build_matrix_cascade_html() -> str:
     loop_lines = list(MATRIX_CASCADE_LINES) + list(MATRIX_CASCADE_LINES)
     rows = "".join(
@@ -2361,13 +2533,25 @@ def _tick_matrix_cascade_sequence() -> bool:
 
 
 def _render_matrix_window1_panel() -> None:
-    """Window 1 — scrolling Matrix cascade or finalized institutional readout."""
-    cascade_running = _tick_matrix_cascade_sequence()
+    """Window 1 — cinematic telemetry show or finalized institutional readout."""
+    show_status = core_quantum.tick_cinematic_telemetry_show()
+    if show_status == "complete":
+        _finalize_pending_vault_deploy()
 
     st.markdown(
         '<div class="room2-terminal-header">▸ WINDOW 1 — MATRIX REACTION PROCESSOR</div>',
         unsafe_allow_html=True,
     )
+
+    if st.session_state.get("matrix_telemetry_show_active") or show_status == "running":
+        st.markdown(_build_matrix_telemetry_html(), unsafe_allow_html=True)
+        delay = float(st.session_state.get("matrix_telemetry_delay_sec") or 0.1)
+        with st.spinner("Telemetry crawl in progress..."):
+            time.sleep(min(delay, 0.12))
+        st.rerun()
+        return
+
+    cascade_running = _tick_matrix_cascade_sequence()
 
     if cascade_running:
         st.markdown(_build_matrix_cascade_html(), unsafe_allow_html=True)

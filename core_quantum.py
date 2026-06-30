@@ -24,6 +24,17 @@ MASSIVE_API_BASES = (MASSIVE_API_BASE, POLYGON_API_BASE)
 WEBSOCKET_STREAMING_DISABLED = True
 FIVE_MINUTE_DRAGNET_BARS = 36
 ONE_MINUTE_DRAGNET_BARS = 5
+FIFTEEN_MINUTE_DRAGNET_BARS = 48
+TELEMETRY_SHOW_LINE_DELAYS = {
+    "1-Minute": 0.05,
+    "5-Minute": 0.15,
+    "15-Minute": 0.30,
+}
+TELEMETRY_SHOW_LANE_BARS = {
+    "1-Minute": ONE_MINUTE_DRAGNET_BARS,
+    "5-Minute": FIVE_MINUTE_DRAGNET_BARS,
+    "15-Minute": FIFTEEN_MINUTE_DRAGNET_BARS,
+}
 POLYGON_SESSION_OPEN_HOUR = 4
 POLYGON_SESSION_CLOSE_HOUR = 20
 ALPHA_DECAY_ROLLING_N = 15
@@ -3912,6 +3923,143 @@ def _build_matrix_execution_readout(
         extras.insert(1, "║  PROXY TRACKER FEED                      ║")
 
     return "\n".join(header + context_section + extras + footer)
+
+
+def telemetry_show_delay_for_timeframe(timeframe_resolution: str) -> float:
+    """Per-line typewriter delay for Window 1 cinematic telemetry."""
+    return float(TELEMETRY_SHOW_LINE_DELAYS.get(timeframe_resolution, 0.15))
+
+
+def telemetry_show_lane_bar_count(timeframe_resolution: str) -> int:
+    """Relative lookback lane depth that governs show pacing."""
+    return int(TELEMETRY_SHOW_LANE_BARS.get(timeframe_resolution, FIVE_MINUTE_DRAGNET_BARS))
+
+
+def build_cinematic_telemetry_lines(
+    *,
+    ticker: str,
+    timeframe_resolution: str,
+    bar_count: int = 0,
+    metric_envelopes: dict | None = None,
+    start_norm: str | None = None,
+    end_norm: str | None = None,
+    api_base: str = MASSIVE_API_BASE,
+    form4_summary: str = "",
+) -> list[str]:
+    """
+    Phase A (internet ingest) + Phase B (local processing) line script for Window 1.
+    Lane depth and boundary alerts scale with the active timeframe track.
+    """
+    ticker_clean = str(ticker or "").strip().upper()
+    lane_bars = bar_count or telemetry_show_lane_bar_count(timeframe_resolution)
+    host = str(api_base or MASSIVE_API_BASE).replace("https://", "").replace("http://", "")
+    envelopes = metric_envelopes if isinstance(metric_envelopes, dict) else {}
+    vol_env = envelopes.get("three_hour_volume_envelope") or envelopes.get("volume_baseline_3h")
+    vol_sd = envelopes.get("volume_sd") or envelopes.get("vol_sd")
+    rsi_hint = envelopes.get("rsi_lane") or envelopes.get("rsi")
+    sma_hint = envelopes.get("sma_lane") or envelopes.get("sma")
+
+    phase_a: list[str] = [
+        "── PHASE A · INTERNET INGEST ──────────────────",
+        f"📡 INGESTION CORE: Connected to ://{host}...",
+        f"🌐 MASSIVE REST AGGREGATES: 1m historical package armed for {ticker_clean}...",
+        f"🛰️ NET LANE: Operator window {start_norm or '?'} → {end_norm or '?'} locked.",
+        "📂 SEC EDGAR: Scraping company facts + XBRL wire...",
+        f"📋 FORM 4 TRACKER: {(form4_summary or 'Insider ledger scrape queued...')[:52]}",
+        "🧬 VECTOR DNA: Fusing Price Velocity, Vol-SD, VWAP, and SEC FinBERT...",
+    ]
+
+    phase_b: list[str] = [
+        "── PHASE B · LOCAL PROCESSING CORE ────────────",
+        "🔀 RESAMPLING METRICS: Normalizing timezones and stripping offsets...",
+        f"📊 LANE ARRAY: {lane_bars} bars in {timeframe_resolution} relative dragnet.",
+        "📦 3-HOUR VOLUME ENVELOPE: Computing σ-band from local pandas array...",
+    ]
+    if vol_env is not None:
+        phase_b.append(f"   └ σ-envelope baseline locked: {vol_env}")
+    elif vol_sd is not None:
+        phase_b.append(f"   └ volume σ-vector fused: {vol_sd}")
+    else:
+        phase_b.append("   └ σ-envelope: rolling 3h window from resampled volume lane...")
+
+    phase_b.append("📈 RSI VECTOR: Rolling relative-strength array fused to lane...")
+    if rsi_hint is not None:
+        phase_b.append(f"   └ RSI lane state: {rsi_hint}")
+    phase_b.append("📉 SMA ARRAY: Local simple moving averages on resampled OHLCV...")
+    if sma_hint is not None:
+        phase_b.append(f"   └ SMA stack: {sma_hint}")
+
+    if timeframe_resolution == "1-Minute":
+        for i in range(1, lane_bars + 1):
+            phase_b.append(f"⚡ STRIKE BAR {i}/{lane_bars}: 1m ignition probe...")
+    elif timeframe_resolution == "5-Minute":
+        for cp in (1, 9, 18, 27, lane_bars):
+            phase_b.append(f"🔍 RELATIVE LANE {cp}/{lane_bars}: Excavating resampled brick...")
+    else:
+        phase_b.extend(
+            [
+                "🌉 BOUNDARY ALERT: Regular session wall bypass active...",
+                "🌉 BOUNDARY ALERT: Post-market bridge merged into multi-hour dragnet...",
+                "🌉 BOUNDARY ALERT: Midnight roll — macro lane intact across sessions...",
+            ]
+        )
+        for cp in (1, 12, 24, 36, lane_bars):
+            phase_b.append(f"🔭 MACRO LANE {cp}/{lane_bars}: Deep structural scan...")
+
+    phase_b.append("✅ LOCAL CORE: Validation arrays synchronized — vault write queued...")
+    return phase_a + phase_b
+
+
+def arm_cinematic_telemetry_show(
+    *,
+    lines: list[str],
+    delay_sec: float,
+    pending_deploy: dict | None = None,
+) -> None:
+    """Clear Window 1 and queue the progressive telemetry scroll before vault sync."""
+    st.session_state.matrix_telemetry_show_active = True
+    st.session_state.matrix_telemetry_lines = list(lines)
+    st.session_state.matrix_telemetry_delay_sec = float(delay_sec)
+    st.session_state.matrix_telemetry_pending_deploy = pending_deploy or {}
+    st.session_state.matrix_telemetry_revealed_lines = []
+    st.session_state.matrix_telemetry_line_index = 0
+    st.session_state.matrix_telemetry_last_tick = time.time()
+    st.session_state.matrix_cascade_active = False
+    st.session_state.matrix_satellites_ready = False
+    st.session_state.quantum_terminal_output = ""
+
+
+def tick_cinematic_telemetry_show() -> str:
+    """
+    Advance one telemetry line per delay window.
+    Returns 'idle', 'running', or 'complete' (all lines revealed, vault may proceed).
+    """
+    if not st.session_state.get("matrix_telemetry_show_active"):
+        return "idle"
+
+    lines = st.session_state.get("matrix_telemetry_lines") or []
+    idx = int(st.session_state.get("matrix_telemetry_line_index") or 0)
+    delay = float(st.session_state.get("matrix_telemetry_delay_sec") or 0.15)
+    now = time.time()
+    last = float(st.session_state.get("matrix_telemetry_last_tick") or now)
+    revealed = list(st.session_state.get("matrix_telemetry_revealed_lines") or [])
+
+    if idx >= len(lines):
+        st.session_state.matrix_telemetry_show_active = False
+        return "complete"
+
+    if now - last >= delay:
+        revealed.append(lines[idx])
+        idx += 1
+        st.session_state.matrix_telemetry_line_index = idx
+        st.session_state.matrix_telemetry_revealed_lines = revealed
+        st.session_state.matrix_telemetry_last_tick = now
+
+    if idx >= len(lines):
+        st.session_state.matrix_telemetry_show_active = False
+        return "complete"
+
+    return "running"
 
 
 def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
