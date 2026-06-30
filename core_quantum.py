@@ -634,23 +634,203 @@ def _price_at_datetime(data_stream, target_dt: datetime.datetime):
     return None
 
 
-def hunt_volume_anchor(data_stream, exit_dt: datetime.datetime, lookback_start_dt):
-    """Walk backward from exit to find the original volume-cluster trigger bar."""
+def _lookback_window_frame(data_stream, exit_dt, lookback_start_dt):
     frame = _ensure_dataframe(data_stream)
     if frame is None or exit_dt is None or lookback_start_dt is None:
-        return None, None
+        return None
     try:
         window = frame[(frame.index <= exit_dt) & (frame.index >= lookback_start_dt)]
-        if not isinstance(window, pd.DataFrame) or window.empty:
+        if isinstance(window, pd.DataFrame) and not window.empty:
+            return window
+    except Exception:
+        pass
+    return None
+
+
+def _entry_margin_pct(entry_price: float | None, exit_price: float | None) -> float:
+    if not entry_price or not exit_price or entry_price <= 0:
+        return 0.0
+    return abs((float(exit_price) - float(entry_price)) / float(entry_price) * 100)
+
+
+def _candidate_volume_std_anchor(window) -> tuple[object | None, float | None]:
+    """Candidate A — bar with the highest rolling volume standard deviation."""
+    if "Volume" not in window.columns or window.empty:
+        idx = window.index[0]
+        return idx, float(window.loc[idx, "Close"])
+    vols = window["Volume"].astype(float).fillna(0.0)
+    if len(vols) <= 1:
+        idx = window.index[0]
+        return idx, float(window.loc[idx, "Close"])
+    roll = min(3, len(vols))
+    rolling_std = vols.rolling(window=roll, min_periods=1).std().fillna(0.0)
+    idx = rolling_std.idxmax()
+    return idx, float(window.loc[idx, "Close"])
+
+
+def _candidate_manual_anchor(window, manual_entry_dt) -> tuple[object | None, float | None]:
+    """Candidate B — operator-clicked entry coordinate."""
+    if manual_entry_dt is None:
+        return None, None
+    try:
+        subset = window[window.index <= manual_entry_dt]
+        if not isinstance(subset, pd.DataFrame) or subset.empty:
             return None, None
-        if "Volume" in window.columns and window["Volume"].sum() > 0:
-            anchor_idx = window["Volume"].idxmax()
-        else:
-            anchor_idx = window.index[0]
-        anchor_price = float(window.loc[anchor_idx, "Close"])
-        return anchor_idx, anchor_price
+        idx = subset.index[-1]
+        return idx, float(subset.loc[idx, "Close"])
     except Exception:
         return None, None
+
+
+def _candidate_structure_baseline(window, volume_spike_idx) -> tuple[object | None, float | None]:
+    """Candidate C — lowest swing low on flat terrain before the volume spike."""
+    if volume_spike_idx is None:
+        return None, None
+    try:
+        pre_spike = window[window.index <= volume_spike_idx]
+        if not isinstance(pre_spike, pd.DataFrame) or pre_spike.empty:
+            return None, None
+        if "Low" in pre_spike.columns:
+            lows = pre_spike["Low"].astype(float)
+            idx = lows.idxmin()
+            return idx, float(pre_spike.loc[idx, "Low"])
+        closes = pre_spike["Close"].astype(float)
+        idx = closes.idxmin()
+        return idx, float(closes.loc[idx])
+    except Exception:
+        return None, None
+
+
+def resolve_adaptive_entry_anchor(
+    data_stream,
+    *,
+    exit_dt: datetime.datetime | None,
+    manual_entry_dt: datetime.datetime | None = None,
+    lookback_start_dt: datetime.datetime | None = None,
+    exit_price: float | None = None,
+    floor_pct: float | None = None,
+    timeframe_resolution: str = "15-Minute",
+) -> dict:
+    """
+    Multi-candidate adaptive entry optimizer — volume std, manual, structure baseline.
+    Floor-aware disqualification; winner = lowest-priced earliest valid candidate.
+    """
+    floor = float(floor_pct if floor_pct is not None else timeframe_margin_floor(timeframe_resolution))
+    window = _lookback_window_frame(data_stream, exit_dt, lookback_start_dt)
+    empty_result = {
+        "anchor_timestamp": None,
+        "anchor_price": None,
+        "selected_candidate": None,
+        "candidates": [],
+        "floor_pct": floor,
+        "passed_floor": False,
+    }
+    if window is None or exit_dt is None:
+        return empty_result
+
+    raw_exit = exit_price if exit_price is not None else _price_at_datetime(data_stream, exit_dt)
+    vol_idx, vol_price = _candidate_volume_std_anchor(window)
+    manual_idx, manual_price = _candidate_manual_anchor(window, manual_entry_dt)
+    struct_idx, struct_price = _candidate_structure_baseline(window, vol_idx)
+
+    raw_candidates = (
+        ("volume_std_anchor", vol_idx, vol_price),
+        ("manual_anchor", manual_idx, manual_price),
+        ("structure_baseline", struct_idx, struct_price),
+    )
+    scored: list[dict] = []
+    for label, ts, price in raw_candidates:
+        if ts is None or price is None:
+            scored.append(
+                {
+                    "id": label,
+                    "timestamp": None,
+                    "price": None,
+                    "margin_pct": 0.0,
+                    "qualified": False,
+                    "disqualified_reason": "missing_bar",
+                }
+            )
+            continue
+        margin = _entry_margin_pct(price, raw_exit)
+        qualified = margin >= floor
+        scored.append(
+            {
+                "id": label,
+                "timestamp": str(ts),
+                "price": round(float(price), 6),
+                "margin_pct": round(margin, 4),
+                "qualified": qualified,
+                "disqualified_reason": None if qualified else "below_floor_late_chase",
+            }
+        )
+
+    qualified = [c for c in scored if c.get("qualified") and c.get("price") is not None]
+    if not qualified:
+        st.session_state.room2_entry_optimizer = {
+            "selected_candidate": None,
+            "candidates": scored,
+            "floor_pct": floor,
+            "downhill_pivot": False,
+        }
+        return {**empty_result, "candidates": scored}
+
+    winner = min(qualified, key=lambda c: (float(c["price"]), str(c["timestamp"])))
+    winner_label = winner["id"]
+    winner_ts = winner["timestamp"]
+    winner_price = float(winner["price"])
+
+    meta = {
+        "selected_candidate": winner_label,
+        "candidates": scored,
+        "floor_pct": floor,
+        "downhill_pivot": winner_label != "volume_std_anchor",
+        "winner_margin_pct": winner.get("margin_pct"),
+    }
+    st.session_state.room2_entry_optimizer = meta
+
+    return {
+        "anchor_timestamp": winner_ts,
+        "anchor_price": winner_price,
+        "selected_candidate": winner_label,
+        "candidates": scored,
+        "floor_pct": floor,
+        "passed_floor": True,
+        "optimizer_meta": meta,
+    }
+
+
+def hunt_volume_anchor(
+    data_stream,
+    exit_dt: datetime.datetime,
+    lookback_start_dt,
+    *,
+    manual_entry_dt: datetime.datetime | None = None,
+    timeframe_resolution: str = "15-Minute",
+    floor_pct: float | None = None,
+    exit_price: float | None = None,
+):
+    """
+    Adaptive entry anchor resolver — multi-candidate floor-aware selection.
+    Returns (anchor_timestamp, anchor_price).
+    """
+    resolved = resolve_adaptive_entry_anchor(
+        data_stream,
+        exit_dt=exit_dt,
+        manual_entry_dt=manual_entry_dt,
+        lookback_start_dt=lookback_start_dt,
+        exit_price=exit_price,
+        floor_pct=floor_pct,
+        timeframe_resolution=timeframe_resolution,
+    )
+    anchor_ts = resolved.get("anchor_timestamp")
+    anchor_price = resolved.get("anchor_price")
+    if anchor_ts is not None and not isinstance(anchor_ts, datetime.datetime):
+        try:
+            anchor_ts = datetime.datetime.fromisoformat(str(anchor_ts).replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return anchor_ts, anchor_price
 
 
 def resolve_stable_profit_exit_anchor(
@@ -825,8 +1005,23 @@ def evaluate_playbook_quality_barrier(
     elif inner_start is not None:
         anchor_search_start = inner_start
 
-    anchor_ts, anchor_price = hunt_volume_anchor(data_stream, end_dt, anchor_search_start)
     raw_exit_price = _price_at_datetime(data_stream, end_dt)
+    entry_resolution = resolve_adaptive_entry_anchor(
+        data_stream,
+        exit_dt=end_dt,
+        manual_entry_dt=start_dt,
+        lookback_start_dt=anchor_search_start,
+        exit_price=raw_exit_price,
+        floor_pct=floor_pct,
+        timeframe_resolution=timeframe_resolution,
+    )
+    anchor_ts = entry_resolution.get("anchor_timestamp")
+    anchor_price = entry_resolution.get("anchor_price")
+    if anchor_ts is not None and not isinstance(anchor_ts, datetime.datetime):
+        try:
+            anchor_ts = datetime.datetime.fromisoformat(str(anchor_ts).replace("Z", "+00:00"))
+        except ValueError:
+            pass
 
     structural_move_pct = 0.0
     exit_price = raw_exit_price
@@ -857,6 +1052,9 @@ def evaluate_playbook_quality_barrier(
         "timeframe_resolution": timeframe_resolution,
         "lookback_start": str(lookback_start) if lookback_start else None,
         "exit_cluster_zone": st.session_state.get("room2_exit_cluster_zone", {}),
+        "entry_optimizer": entry_resolution.get("optimizer_meta")
+        or st.session_state.get("room2_entry_optimizer", {}),
+        "entry_candidate_selected": entry_resolution.get("selected_candidate"),
     }
     return enforce_permanent_library_profit_floor(quality)
 
