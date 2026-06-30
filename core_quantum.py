@@ -1,6 +1,7 @@
 import datetime
 import json
 import math
+import os
 import re
 import statistics
 import time
@@ -17,6 +18,8 @@ except ImportError:
 
 POLYGON_CALLS_PER_MINUTE = 5
 POLYGON_REST_DATA_EMPTY = "POLYGON REST DATA EMPTY"
+MASSIVE_API_BASE = "https://api.massive.com"
+WEBSOCKET_STREAMING_DISABLED = True
 FIVE_MINUTE_DRAGNET_BARS = 36
 ONE_MINUTE_DRAGNET_BARS = 5
 POLYGON_SESSION_OPEN_HOUR = 4
@@ -57,7 +60,8 @@ PROCESSOR_LANE_LOCAL_STRIKE = "local_1m_strike"
 LOCAL_1M_RAM_CAP_MINUTES = 5
 IB_STRIKE_TARGET_MS = 100
 DATA_FEED_CLOUD_MACRO = "cloud_macro_pipeline"
-DATA_FEED_POLYGON_1M = "polygon_rest_1m"
+DATA_FEED_MASSIVE_REST_1M = "massive_rest_1m"
+DATA_FEED_POLYGON_1M = DATA_FEED_MASSIVE_REST_1M
 RESAMPLE_RULES = {
     "1-Minute": "1min",
     "5-Minute": "5min",
@@ -99,6 +103,30 @@ def _flatten_ohlcv_frame(df):
     return df
 
 
+def _resolve_market_data_api_key() -> str | None:
+    """Massive (formerly Polygon) REST key — secrets or environment only."""
+    for name in ("MASSIVE_API_KEY", "POLYGON_API_KEY"):
+        try:
+            val = st.secrets[name]
+            if val and str(val).strip():
+                return str(val).strip()
+        except Exception:
+            continue
+    for env_name in ("MASSIVE_API_KEY", "POLYGON_API_KEY"):
+        val = os.environ.get(env_name)
+        if val and str(val).strip():
+            return str(val).strip()
+    return None
+
+
+def _massive_aggs_url(ticker_clean: str, from_ms: int, to_ms: int, api_key: str) -> str:
+    """REST aggregates endpoint on Massive data servers (api.massive.com)."""
+    return (
+        f"{MASSIVE_API_BASE}/v2/aggs/ticker/{ticker_clean}/range/1/minute/"
+        f"{from_ms}/{to_ms}?adjusted=false&sort=asc&limit=50000&apiKey={api_key}"
+    )
+
+
 def _session_date_value(raw_date) -> str | None:
     if raw_date is None:
         return None
@@ -115,13 +143,16 @@ def _polygon_session_bounds_ms(start_date, end_date) -> tuple[int, int] | None:
     if not start_text or not end_text:
         return None
     try:
+        from zoneinfo import ZoneInfo
+
+        et = ZoneInfo("America/New_York")
         start_day = datetime.datetime.strptime(start_text, "%Y-%m-%d")
         end_day = datetime.datetime.strptime(end_text, "%Y-%m-%d")
         session_open = start_day.replace(
-            hour=POLYGON_SESSION_OPEN_HOUR, minute=0, second=0, microsecond=0
+            hour=POLYGON_SESSION_OPEN_HOUR, minute=0, second=0, microsecond=0, tzinfo=et
         )
         session_close = end_day.replace(
-            hour=POLYGON_SESSION_CLOSE_HOUR, minute=0, second=0, microsecond=0
+            hour=POLYGON_SESSION_CLOSE_HOUR, minute=0, second=0, microsecond=0, tzinfo=et
         )
         if session_close <= session_open:
             session_close = session_close + datetime.timedelta(days=1)
@@ -130,19 +161,20 @@ def _polygon_session_bounds_ms(start_date, end_date) -> tuple[int, int] | None:
         return None
 
 
-def fetch_polygon_session_1m_package(
+def fetch_massive_session_1m_package(
     ticker_clean: str,
     *,
     start_date,
     end_date,
 ) -> tuple[list | None, str | None]:
     """
-    Exactly ONE Polygon aggregates HTTP request per stock/submission.
+    Exactly ONE Massive REST aggregates HTTP request per stock/submission.
+    Free Starter tier — REST historical pulls only (no WebSocket streaming).
     Returns (results_list, pipeline_signal) where signal is None, THROTTLE, or POLYGON_REST_DATA_EMPTY.
     """
-    try:
-        api_key = st.secrets["POLYGON_API_KEY"]
-    except Exception:
+    api_key = _resolve_market_data_api_key()
+    if not api_key:
+        st.session_state.r2_market_data_error = "MASSIVE_API_KEY_MISSING"
         return None, POLYGON_REST_DATA_EMPTY
 
     bounds = _polygon_session_bounds_ms(start_date, end_date)
@@ -154,15 +186,16 @@ def fetch_polygon_session_1m_package(
 
     from_ms, to_ms = bounds
     try:
-        url = (
-            f"https://api.polygon.io/v2/aggs/ticker/{ticker_clean}/range/1/minute/"
-            f"{from_ms}/{to_ms}?adjusted=false&sort=asc&limit=50000&apiKey={api_key}"
-        )
+        url = _massive_aggs_url(ticker_clean, from_ms, to_ms, api_key)
         http_resp = requests.get(url, timeout=20)
         if not http_resp.ok:
+            st.session_state.r2_market_data_error = (
+                f"MASSIVE_HTTP_{http_resp.status_code}"
+            )
             return None, POLYGON_REST_DATA_EMPTY
         payload = http_resp.json()
-    except Exception:
+    except Exception as exc:
+        st.session_state.r2_market_data_error = f"MASSIVE_FETCH_ERR:{str(exc)[:60]}"
         return None, POLYGON_REST_DATA_EMPTY
 
     if not isinstance(payload, dict):
@@ -170,6 +203,7 @@ def fetch_polygon_session_1m_package(
 
     results = payload.get("results")
     if isinstance(results, list) and len(results) > 0:
+        st.session_state.r2_market_data_error = None
         return results, None
 
     status = str(payload.get("status", "")).upper()
@@ -178,11 +212,26 @@ def fetch_polygon_session_1m_package(
         st.session_state.polygon_calls_remaining = 0
         st.session_state.polygon_lockout = True
         return None, "THROTTLE"
+    st.session_state.r2_market_data_error = status or "MASSIVE_EMPTY_RESULTS"
     return None, POLYGON_REST_DATA_EMPTY
 
 
+fetch_polygon_session_1m_package = fetch_massive_session_1m_package
+
+
+def _strip_dataframe_index_timezone(frame):
+    """Strip exchange-native timezone metadata immediately after REST ingest."""
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    out = frame.copy()
+    idx = out.index
+    if getattr(idx, "tz", None) is not None:
+        out.index = idx.tz_convert("America/New_York").tz_localize(None)
+    return out
+
+
 def _polygon_aggs_to_dataframe(results):
-    """Convert Polygon agg list into a naive-timestamp OHLCV frame in local RAM."""
+    """Convert Massive agg list into naive-timestamp OHLCV+VWAP frame in local RAM."""
     if pd is None or not isinstance(results, list) or not results:
         return None
     rows = []
@@ -204,12 +253,13 @@ def _polygon_aggs_to_dataframe(results):
                 "Low": float(bar.get("l", 0) or 0),
                 "Close": float(bar.get("c", 0) or 0),
                 "Volume": float(bar.get("v", 0) or 0),
+                "VWAP": float(bar.get("vw", 0) or 0),
             }
         )
     if not rows:
         return None
     frame = pd.DataFrame(rows).set_index("Datetime")
-    frame.index = frame.index.tz_localize(None) if getattr(frame.index, "tz", None) else frame.index
+    frame = _strip_dataframe_index_timezone(frame)
     return frame if not frame.empty else None
 
 
@@ -219,17 +269,25 @@ def resample_ohlcv_bars(frame_1m, rule: str):
     if frame is None:
         return None
     try:
-        resampled = frame.resample(rule).agg(
-            {
-                "Open": "first",
-                "High": "max",
-                "Low": "min",
-                "Close": "last",
-                "Volume": "sum",
-            }
-        )
+        agg_map = {
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum",
+        }
+        if "VWAP" in frame.columns:
+            vol = frame["Volume"].astype(float).fillna(0.0)
+            vwap_num = (frame["VWAP"].astype(float).fillna(0.0) * vol).resample(rule).sum()
+            vwap_den = vol.resample(rule).sum()
+            resampled = frame.resample(rule).agg(agg_map)
+            resampled["VWAP"] = (vwap_num / vwap_den.replace(0.0, float("nan"))).fillna(
+                resampled["Close"]
+            )
+        else:
+            resampled = frame.resample(rule).agg(agg_map)
         resampled = resampled.dropna(subset=["Close"], how="any")
-        return resampled if not resampled.empty else None
+        return _strip_dataframe_index_timezone(resampled) if not resampled.empty else None
     except Exception:
         return None
 
@@ -275,6 +333,7 @@ def get_room2_polygon_pipeline(
         frame_1m = _polygon_aggs_to_dataframe(polygon_bars)
         if not is_usable_data_stream(frame_1m):
             return POLYGON_REST_DATA_EMPTY
+        frame_1m = _strip_dataframe_index_timezone(frame_1m)
         st.session_state.r2_polygon_1m_ram = frame_1m
         st.session_state.r2_polygon_session_key = cache_key
         st.session_state.r2_micro_feed_source = DATA_FEED_POLYGON_1M
@@ -3517,6 +3576,81 @@ def _parse_session_datetime(date_val, time_str: str):
         return None
 
 
+def format_operator_session_timestamp(dt: datetime.datetime | None) -> str | None:
+    """Canonical operator clock string aligned to stripped bar index (YYYY-MM-DD HH:MM:SS)."""
+    if dt is None:
+        return None
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_operator_boundaries(
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+) -> tuple[datetime.datetime | None, datetime.datetime | None, str | None, str | None]:
+    """Parse and normalize operator Start/Exit to naive ET strings matching the bar index."""
+    start_dt = _parse_session_datetime(start_date, start_time)
+    end_dt = _parse_session_datetime(end_date, end_time)
+    return (
+        start_dt,
+        end_dt,
+        format_operator_session_timestamp(start_dt),
+        format_operator_session_timestamp(end_dt),
+    )
+
+
+def validate_chart_data_coupling(data_stream, quality: dict | None = None) -> dict:
+    """
+    Coupling lock — chart lane must pass before SEC text or Supabase vault writes.
+    Rejects empty arrays, 0.00% flatlines, and missing volume ignition.
+    """
+    quality = dict(quality or {})
+    frame = _ensure_dataframe(data_stream)
+    reasons: list[str] = []
+
+    if frame is None or frame.empty:
+        reasons.append("chart_empty")
+
+    total_volume = 0.0
+    if frame is not None and "Volume" in frame.columns:
+        total_volume = float(frame["Volume"].astype(float).fillna(0.0).sum())
+        if total_volume <= 0:
+            reasons.append("zero_volume")
+
+    flatline = False
+    if frame is not None and "Close" in frame.columns and len(frame) >= 2:
+        closes = frame["Close"].astype(float)
+        first = float(closes.iloc[0])
+        last = float(closes.iloc[-1])
+        move_pct = abs((last - first) / first * 100.0) if first else 0.0
+        if move_pct < 0.01 and float(closes.std() or 0.0) < 1e-8:
+            flatline = True
+            reasons.append("flatline_zero_move")
+
+    ignition = bool(quality.get("liquidity_ignition"))
+    if not ignition:
+        ignition = quality.get("volatility_ignition_entry_price") is not None
+    if not ignition:
+        entry_opt = quality.get("entry_optimizer") or st.session_state.get("room2_entry_optimizer") or {}
+        ignition = bool(entry_opt.get("liquidity_ignition")) or (
+            entry_opt.get("selected_candidate") == "volatility_ignition"
+        )
+    if not ignition:
+        reasons.append("no_volume_ignition")
+
+    passed = len(reasons) == 0
+    return {
+        "passed": passed,
+        "trashed": not passed,
+        "chart_coupling_ok": passed,
+        "flatline": flatline,
+        "total_volume": round(total_volume, 0),
+        "rejection_reasons": reasons,
+        "trash_reason": "|".join(reasons) if reasons else None,
+    }
+
+
 def _format_session_duration(start_dt, end_dt) -> str:
     if not start_dt or not end_dt:
         return "UNRESOLVED"
@@ -3656,6 +3790,10 @@ def _build_matrix_execution_readout(
 
 def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
     """Direct secure Supabase REST anchor to live Postgres cloud table."""
+    coupling = st.session_state.get("room2_chart_coupling") or {}
+    quality = st.session_state.get("room2_playbook_quality") or {}
+    if not coupling.get("passed") or not quality.get("passed"):
+        return False, "VAULT BLOCKED — chart coupling or quality gate failed (PRE-STORAGE TRASH)."
     try:
         supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
         supabase_key = st.secrets["SUPABASE_KEY"]

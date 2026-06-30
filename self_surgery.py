@@ -390,6 +390,10 @@ def attempt_genetic_recycling_on_fresh_deploy(
     if not quality.get("passed"):
         return None
 
+    coupling = st.session_state.get("room2_chart_coupling") or {}
+    if not coupling.get("passed"):
+        return None
+
     floor_pct = float(
         quality.get("floor_pct") or core_quantum.timeframe_margin_floor(timeframe_resolution)
     )
