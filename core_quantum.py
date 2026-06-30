@@ -19,6 +19,8 @@ except ImportError:
 POLYGON_CALLS_PER_MINUTE = 5
 POLYGON_REST_DATA_EMPTY = "POLYGON REST DATA EMPTY"
 MASSIVE_API_BASE = "https://api.massive.com"
+POLYGON_API_BASE = "https://api.polygon.io"
+MASSIVE_API_BASES = (MASSIVE_API_BASE, POLYGON_API_BASE)
 WEBSOCKET_STREAMING_DISABLED = True
 FIVE_MINUTE_DRAGNET_BARS = 36
 ONE_MINUTE_DRAGNET_BARS = 5
@@ -103,20 +105,81 @@ def _flatten_ohlcv_frame(df):
     return df
 
 
-def _resolve_market_data_api_key() -> str | None:
-    """Massive (formerly Polygon) REST key — secrets or environment only."""
+def _is_placeholder_api_key(key: str) -> bool:
+    low = str(key or "").strip().lower()
+    if not low or len(low) < 8:
+        return True
+    return any(
+        token in low
+        for token in ("your-", "replace", "changeme", "api-key-here", "xxx", "placeholder")
+    )
+
+
+def _market_data_api_key_candidates() -> list[str]:
+    """Collect valid Massive/Polygon keys — secrets, env, then operator fallback."""
+    found: list[str] = []
     for name in ("MASSIVE_API_KEY", "POLYGON_API_KEY"):
         try:
             val = st.secrets[name]
-            if val and str(val).strip():
-                return str(val).strip()
+            if val and not _is_placeholder_api_key(str(val)):
+                found.append(str(val).strip())
         except Exception:
             continue
     for env_name in ("MASSIVE_API_KEY", "POLYGON_API_KEY"):
         val = os.environ.get(env_name)
-        if val and str(val).strip():
-            return str(val).strip()
-    return None
+        if val and not _is_placeholder_api_key(str(val)):
+            found.append(str(val).strip())
+    # Operator starter key — used only when secrets/env are missing or invalid.
+    operator_key = "IJmCrEhTtXg2lAHbiY2BaBRCYRgBMs7G"
+    if not _is_placeholder_api_key(operator_key):
+        found.append(operator_key)
+    deduped: list[str] = []
+    for key in found:
+        if key not in deduped:
+            deduped.append(key)
+    return deduped
+
+
+def _resolve_market_data_api_key() -> str | None:
+    keys = _market_data_api_key_candidates()
+    return keys[0] if keys else None
+
+
+def _massive_aggs_request(
+    ticker_clean: str,
+    *,
+    start_date,
+    end_date,
+    api_key: str,
+    api_base: str,
+) -> tuple[dict | None, int, str]:
+    """Single REST aggregates pull — date window + Bearer + apiKey (Massive/Polygon compatible)."""
+    start_text = _session_date_value(start_date)
+    end_text = _session_date_value(end_date) or start_text
+    if not start_text or not end_text:
+        return None, 0, "bad_session_dates"
+    url = (
+        f"{api_base.rstrip('/')}/v2/aggs/ticker/{ticker_clean}/range/1/minute/"
+        f"{start_text}/{end_text}"
+    )
+    params = {
+        "adjusted": "false",
+        "sort": "asc",
+        "limit": 50000,
+        "apiKey": api_key,
+    }
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        http_resp = requests.get(url, params=params, headers=headers, timeout=20)
+        body_text = http_resp.text[:240]
+        if not http_resp.ok:
+            return None, http_resp.status_code, body_text
+        payload = http_resp.json()
+        if isinstance(payload, dict):
+            return payload, http_resp.status_code, ""
+        return None, http_resp.status_code, body_text
+    except Exception as exc:
+        return None, 0, str(exc)[:120]
 
 
 def _massive_aggs_url(ticker_clean: str, from_ms: int, to_ms: int, api_key: str) -> str:
@@ -172,38 +235,58 @@ def fetch_massive_session_1m_package(
     Free Starter tier — REST historical pulls only (no WebSocket streaming).
     Returns (results_list, pipeline_signal) where signal is None, THROTTLE, or POLYGON_REST_DATA_EMPTY.
     """
-    api_key = _resolve_market_data_api_key()
-    if not api_key:
+    api_keys = _market_data_api_key_candidates()
+    if not api_keys:
         st.session_state.r2_market_data_error = "MASSIVE_API_KEY_MISSING"
-        return None, POLYGON_REST_DATA_EMPTY
-
-    bounds = _polygon_session_bounds_ms(start_date, end_date)
-    if bounds is None:
         return None, POLYGON_REST_DATA_EMPTY
 
     if not _consume_polygon_call():
         return None, "THROTTLE"
 
-    from_ms, to_ms = bounds
-    try:
-        url = _massive_aggs_url(ticker_clean, from_ms, to_ms, api_key)
-        http_resp = requests.get(url, timeout=20)
-        if not http_resp.ok:
-            st.session_state.r2_market_data_error = (
-                f"MASSIVE_HTTP_{http_resp.status_code}"
+    payload: dict | None = None
+    last_status = 0
+    last_detail = ""
+    for api_key in api_keys:
+        for api_base in MASSIVE_API_BASES:
+            payload, last_status, last_detail = _massive_aggs_request(
+                ticker_clean,
+                start_date=start_date,
+                end_date=end_date,
+                api_key=api_key,
+                api_base=api_base,
             )
-            return None, POLYGON_REST_DATA_EMPTY
-        payload = http_resp.json()
-    except Exception as exc:
-        st.session_state.r2_market_data_error = f"MASSIVE_FETCH_ERR:{str(exc)[:60]}"
-        return None, POLYGON_REST_DATA_EMPTY
+            if payload is not None and last_status == 200:
+                st.session_state.r2_market_data_error = None
+                st.session_state.r2_market_data_key_source = api_base
+                break
+            if last_status == 401:
+                last_detail = "Unknown API Key"
+                continue
+            if last_status == 429 or (
+                payload is not None
+                and str(payload.get("error", "")).lower().find("max requests") >= 0
+            ):
+                st.session_state.polygon_calls_remaining = 0
+                st.session_state.polygon_lockout = True
+                return None, "THROTTLE"
+        if payload is not None and last_status == 200:
+            break
 
-    if not isinstance(payload, dict):
+    if payload is None or last_status != 200:
+        if last_status == 401:
+            st.session_state.r2_market_data_error = (
+                "MASSIVE_HTTP_401|Unknown API Key — set MASSIVE_API_KEY in .streamlit/secrets.toml"
+            )
+        else:
+            st.session_state.r2_market_data_error = (
+                f"MASSIVE_HTTP_{last_status}|{last_detail[:80]}"
+                if last_status
+                else f"MASSIVE_FETCH_ERR|{last_detail[:80]}"
+            )
         return None, POLYGON_REST_DATA_EMPTY
 
     results = payload.get("results")
     if isinstance(results, list) and len(results) > 0:
-        st.session_state.r2_market_data_error = None
         return results, None
 
     status = str(payload.get("status", "")).upper()
@@ -212,7 +295,9 @@ def fetch_massive_session_1m_package(
         st.session_state.polygon_calls_remaining = 0
         st.session_state.polygon_lockout = True
         return None, "THROTTLE"
-    st.session_state.r2_market_data_error = status or "MASSIVE_EMPTY_RESULTS"
+    st.session_state.r2_market_data_error = (
+        str(payload.get("error") or status or "MASSIVE_EMPTY_RESULTS")
+    )
     return None, POLYGON_REST_DATA_EMPTY
 
 
