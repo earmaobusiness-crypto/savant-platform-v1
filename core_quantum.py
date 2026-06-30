@@ -95,6 +95,32 @@ def is_usable_data_stream(data_stream) -> bool:
         return False
 
 
+def _dataframe_is_empty(data_stream) -> bool:
+    """Explicit empty check — never use truthiness on a DataFrame."""
+    if data_stream is None or isinstance(data_stream, str):
+        return True
+    if pd is not None and isinstance(data_stream, pd.DataFrame):
+        return data_stream.empty
+    frame = _ensure_dataframe(data_stream)
+    return frame is None or frame.empty
+
+
+def _first_usable_dataframe(*candidates):
+    """Return first non-empty DataFrame without ambiguous `df or other` syntax."""
+    empty_fallback = None
+    for item in candidates:
+        if item is None:
+            continue
+        frame = item if isinstance(item, pd.DataFrame) else _ensure_dataframe(item)
+        if not isinstance(frame, pd.DataFrame):
+            continue
+        if empty_fallback is None:
+            empty_fallback = frame
+        if not frame.empty:
+            return frame
+    return empty_fallback
+
+
 def _flatten_ohlcv_frame(df):
     """Normalize MultiIndex OHLCV columns so Close/Volume accessors work."""
     if pd is None or not isinstance(df, pd.DataFrame) or df.empty:
@@ -813,7 +839,7 @@ def run_full_day_forensic_dragnet(
         else (None, None)
     )
     envelopes = compute_metric_envelopes(
-        baseline_window or dragnet_frame or track,
+        _first_usable_dataframe(baseline_window, dragnet_frame, track),
         end_dt,
         dragnet_start,
     )
@@ -822,7 +848,9 @@ def run_full_day_forensic_dragnet(
     form4 = _scrape_form4_insider_buys(ticker_clean)
     regulatory = _scrape_sec_regulatory_dragnet(ticker_clean)
     institutional = _detect_institutional_block_accumulation(
-        ticker_clean, dragnet_frame or track, timeframe_resolution
+        ticker_clean,
+        _first_usable_dataframe(dragnet_frame, track),
+        timeframe_resolution,
     )
     options = _options_sweep_proxy(ticker_clean)
 
@@ -921,6 +949,8 @@ def _entry_margin_pct(entry_price: float | None, exit_price: float | None) -> fl
 
 def _candidate_volume_std_anchor(window) -> tuple[object | None, float | None]:
     """Candidate A — bar with the highest rolling volume standard deviation."""
+    if window is None or _dataframe_is_empty(window):
+        return None, None
     if "Volume" not in window.columns or window.empty:
         idx = window.index[0]
         return idx, float(window.loc[idx, "Close"])
@@ -936,7 +966,7 @@ def _candidate_volume_std_anchor(window) -> tuple[object | None, float | None]:
 
 def _candidate_velocity_spike_anchor(window) -> tuple[object | None, float | None]:
     """Candidate B — bar with the sharpest price-velocity spike vs rolling std envelope."""
-    if window.empty or "Close" not in window.columns:
+    if window is None or _dataframe_is_empty(window) or "Close" not in window.columns:
         return None, None
     closes = window["Close"].astype(float)
     if len(closes) < 2:
@@ -985,6 +1015,8 @@ def _hill_trap_shrinks_margin(
     """True when a short-lived hill peak collapses margin vs the next structural low."""
     if anchor_price is None or exit_price is None or anchor_price <= 0:
         return False
+    if window is None or _dataframe_is_empty(window):
+        return False
     _, low_price = _immediate_structural_low_after(window, anchor_idx)
     if low_price is None or low_price >= anchor_price:
         return False
@@ -1011,7 +1043,9 @@ def _three_hour_baseline_envelope(window) -> dict:
 
 
 def _local_volume_at(window, bar_idx) -> float:
-    if bar_idx is None or window.empty or "Volume" not in window.columns:
+    if bar_idx is None or window is None or _dataframe_is_empty(window):
+        return 0.0
+    if "Volume" not in window.columns:
         return 0.0
     try:
         return float(window.loc[bar_idx, "Volume"])
@@ -1023,7 +1057,12 @@ def _volatility_ignition_anchor(window, search_from_idx=None) -> tuple[object | 
     """
     Volatility Ignition — price velocity breaks above std envelope on expanding volume.
     """
-    if window.empty or "Close" not in window.columns or "Volume" not in window.columns:
+    if (
+        window is None
+        or _dataframe_is_empty(window)
+        or "Close" not in window.columns
+        or "Volume" not in window.columns
+    ):
         return None, None
     subset = window
     if search_from_idx is not None:
@@ -1140,7 +1179,9 @@ def resolve_adaptive_entry_anchor(
     vel_idx, vel_price = _candidate_velocity_spike_anchor(window)
     struct_idx, struct_price = _candidate_structure_baseline(window, vol_idx)
     manual_idx, manual_price = _candidate_manual_anchor(window, manual_entry_dt)
-    baseline_env = _three_hour_baseline_envelope(baseline_window or window)
+    baseline_env = _three_hour_baseline_envelope(
+        _first_usable_dataframe(baseline_window, window)
+    )
 
     idx_by_label = {
         "volume_std_anchor": vol_idx,
@@ -1540,7 +1581,7 @@ def evaluate_playbook_quality_barrier(
         if timeframe_resolution == "5-Minute" and start_dt is not None
         else (None, None)
     )
-    if baseline_window is None and anchor_search_start is not None and end_dt is not None:
+    if _dataframe_is_empty(baseline_window) and anchor_search_start is not None and end_dt is not None:
         baseline_window = _lookback_window_frame(data_stream, end_dt, anchor_search_start)
 
     raw_exit_price = _price_at_datetime(data_stream, end_dt)
@@ -3694,17 +3735,17 @@ def validate_chart_data_coupling(data_stream, quality: dict | None = None) -> di
     frame = _ensure_dataframe(data_stream)
     reasons: list[str] = []
 
-    if frame is None or frame.empty:
+    if _dataframe_is_empty(frame):
         reasons.append("chart_empty")
 
     total_volume = 0.0
-    if frame is not None and "Volume" in frame.columns:
+    if frame is not None and not frame.empty and "Volume" in frame.columns:
         total_volume = float(frame["Volume"].astype(float).fillna(0.0).sum())
         if total_volume <= 0:
             reasons.append("zero_volume")
 
     flatline = False
-    if frame is not None and "Close" in frame.columns and len(frame) >= 2:
+    if frame is not None and not frame.empty and "Close" in frame.columns and len(frame) >= 2:
         closes = frame["Close"].astype(float)
         first = float(closes.iloc[0])
         last = float(closes.iloc[-1])
