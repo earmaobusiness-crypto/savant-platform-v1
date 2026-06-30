@@ -9,7 +9,6 @@ from xml.etree import ElementTree
 
 import requests
 import streamlit as st
-import yfinance as yf
 
 try:
     import pandas as pd
@@ -17,6 +16,11 @@ except ImportError:
     pd = None
 
 POLYGON_CALLS_PER_MINUTE = 5
+POLYGON_REST_DATA_EMPTY = "POLYGON REST DATA EMPTY"
+FIVE_MINUTE_DRAGNET_BARS = 36
+ONE_MINUTE_DRAGNET_BARS = 5
+POLYGON_SESSION_OPEN_HOUR = 4
+POLYGON_SESSION_CLOSE_HOUR = 20
 ALPHA_DECAY_ROLLING_N = 15
 ALPHA_DECAY_MARGIN_FLOOR_PCT = 0.15
 LAYOUT_SIGNATURE_MATCH_THRESHOLD = 85
@@ -32,13 +36,9 @@ EXECUTION_FRICTION_SLIPPAGE_MAX = 1.5
 HILL_BYPASS_LOCAL_BARS = 6
 HILL_MARGIN_SHRINK_MIN_PCT = 0.25
 HILL_DROP_MIN_PCT = 0.35
-MORNING_BASELINE_BARS = 30
 LOOKBACK_DELTAS = {
-    "1-Minute": datetime.timedelta(minutes=5),
-    "5-Minute": datetime.timedelta(hours=12),
     "15-Minute": datetime.timedelta(hours=18),
 }
-INNER_MOVE_MAX_1M = datetime.timedelta(minutes=2)
 NOISE_DIM_EPSILON = 0.18
 SEMANTIC_EMBED_DIMS = 32
 DRAGNET_TIMEFRAMES = frozenset({"5-Minute", "15-Minute"})
@@ -58,7 +58,11 @@ LOCAL_1M_RAM_CAP_MINUTES = 5
 IB_STRIKE_TARGET_MS = 100
 DATA_FEED_CLOUD_MACRO = "cloud_macro_pipeline"
 DATA_FEED_POLYGON_1M = "polygon_rest_1m"
-DATA_FEED_YFINANCE_1M = "yfinance_1m"
+RESAMPLE_RULES = {
+    "1-Minute": "1min",
+    "5-Minute": "5min",
+    "15-Minute": "15min",
+}
 THROTTLE_MESSAGE = (
     "⚠️ NETWORK THROTTLING SHIELD ACTIVE: 0 API CALLS REMAINING. COOLING DOWN PROCESSOR."
 )
@@ -85,8 +89,8 @@ def is_usable_data_stream(data_stream) -> bool:
         return False
 
 
-def _flatten_yfinance_frame(df):
-    """Normalize yfinance MultiIndex columns so Close/Volume accessors work."""
+def _flatten_ohlcv_frame(df):
+    """Normalize MultiIndex OHLCV columns so Close/Volume accessors work."""
     if pd is None or not isinstance(df, pd.DataFrame) or df.empty:
         return df
     if isinstance(df.columns, pd.MultiIndex):
@@ -95,104 +99,74 @@ def _flatten_yfinance_frame(df):
     return df
 
 
-def _download_yfinance_bars(ticker_clean: str, yf_interval: str, micro_fast_track: bool = False):
-    """Primary local datalink — 1m micro path uses tight lookback for sub-second routing."""
-    if micro_fast_track or yf_interval == "1m":
-        period = "1d"
-    elif yf_interval == "5m":
-        period = "30d"
-    else:
-        period = "60d"
+def _session_date_value(raw_date) -> str | None:
+    if raw_date is None:
+        return None
+    if hasattr(raw_date, "strftime"):
+        return raw_date.strftime("%Y-%m-%d")
+    text = str(raw_date).strip()
+    return text[:10] if text else None
+
+
+def _polygon_session_bounds_ms(start_date, end_date) -> tuple[int, int] | None:
+    """16-hour extended session window (4:00 AM – 8:00 PM ET) for submission dates."""
+    start_text = _session_date_value(start_date)
+    end_text = _session_date_value(end_date) or start_text
+    if not start_text or not end_text:
+        return None
     try:
-        hist = yf.Ticker(ticker_clean).history(period=period, interval=yf_interval)
-        flat = _flatten_yfinance_frame(hist)
-        if is_usable_data_stream(flat):
-            return flat
-    except Exception:
-        pass
-    try:
-        df_yf = yf.download(
-            ticker_clean,
-            period=period,
-            interval=yf_interval,
-            progress=False,
-            group_by="column",
-            auto_adjust=True,
-            threads=False,
+        start_day = datetime.datetime.strptime(start_text, "%Y-%m-%d")
+        end_day = datetime.datetime.strptime(end_text, "%Y-%m-%d")
+        session_open = start_day.replace(
+            hour=POLYGON_SESSION_OPEN_HOUR, minute=0, second=0, microsecond=0
         )
-        flat = _flatten_yfinance_frame(df_yf)
-        if is_usable_data_stream(flat):
-            return flat
-    except Exception:
-        pass
-    return None
+        session_close = end_day.replace(
+            hour=POLYGON_SESSION_CLOSE_HOUR, minute=0, second=0, microsecond=0
+        )
+        if session_close <= session_open:
+            session_close = session_close + datetime.timedelta(days=1)
+        return int(session_open.timestamp() * 1000), int(session_close.timestamp() * 1000)
+    except ValueError:
+        return None
 
 
-def _fetch_polygon_15m_bars(ticker_clean: str, start_date: str, end_date: str):
+def fetch_polygon_session_1m_package(
+    ticker_clean: str,
+    *,
+    start_date,
+    end_date,
+) -> tuple[list | None, str | None]:
     """
-    Safe Polygon aggs wire — only inspects plain dict JSON (never pandas objects).
-    Returns (bars, pipeline_signal) where pipeline_signal is None or 'THROTTLE'.
+    Exactly ONE Polygon aggregates HTTP request per stock/submission.
+    Returns (results_list, pipeline_signal) where signal is None, THROTTLE, or POLYGON_REST_DATA_EMPTY.
     """
     try:
         api_key = st.secrets["POLYGON_API_KEY"]
     except Exception:
-        return None, None
+        return None, POLYGON_REST_DATA_EMPTY
+
+    bounds = _polygon_session_bounds_ms(start_date, end_date)
+    if bounds is None:
+        return None, POLYGON_REST_DATA_EMPTY
 
     if not _consume_polygon_call():
         return None, "THROTTLE"
 
-    try:
-        url = (
-            f"https://api.polygon.io/v2/aggs/ticker/{ticker_clean}/range/15/minute/"
-            f"{start_date}/{end_date}?adjusted=true&sort=asc&apiKey={api_key}"
-        )
-        http_resp = requests.get(url, timeout=15)
-        if not http_resp.ok:
-            return None, None
-        payload = http_resp.json()
-    except Exception:
-        return None, None
-
-    if not isinstance(payload, dict):
-        return None, None
-
-    results = payload.get("results")
-    if isinstance(results, list) and len(results) > 0:
-        return results, None
-
-    status = str(payload.get("status", "")).upper()
-    error_text = str(payload.get("error") or payload.get("message") or "").lower()
-    if status == "ERROR" and "max requests" in error_text:
-        st.session_state.polygon_calls_remaining = 0
-        st.session_state.polygon_lockout = True
-        return None, "THROTTLE"
-    return None, None
-
-
-def _fetch_polygon_1m_bars(ticker_clean: str, start_date: str, end_date: str):
-    """Recent 1-minute aggs — preferred micro fast-track wire when Polygon key is live."""
-    try:
-        api_key = st.secrets["POLYGON_API_KEY"]
-    except Exception:
-        return None, None
-
-    if not _consume_polygon_call():
-        return None, "THROTTLE"
-
+    from_ms, to_ms = bounds
     try:
         url = (
             f"https://api.polygon.io/v2/aggs/ticker/{ticker_clean}/range/1/minute/"
-            f"{start_date}/{end_date}?adjusted=true&sort=asc&limit=50000&apiKey={api_key}"
+            f"{from_ms}/{to_ms}?adjusted=false&sort=asc&limit=50000&apiKey={api_key}"
         )
-        http_resp = requests.get(url, timeout=15)
+        http_resp = requests.get(url, timeout=20)
         if not http_resp.ok:
-            return None, None
+            return None, POLYGON_REST_DATA_EMPTY
         payload = http_resp.json()
     except Exception:
-        return None, None
+        return None, POLYGON_REST_DATA_EMPTY
 
     if not isinstance(payload, dict):
-        return None, None
+        return None, POLYGON_REST_DATA_EMPTY
 
     results = payload.get("results")
     if isinstance(results, list) and len(results) > 0:
@@ -204,11 +178,11 @@ def _fetch_polygon_1m_bars(ticker_clean: str, start_date: str, end_date: str):
         st.session_state.polygon_calls_remaining = 0
         st.session_state.polygon_lockout = True
         return None, "THROTTLE"
-    return None, None
+    return None, POLYGON_REST_DATA_EMPTY
 
 
 def _polygon_aggs_to_dataframe(results):
-    """Convert Polygon agg list into a yfinance-compatible OHLCV frame."""
+    """Convert Polygon agg list into a naive-timestamp OHLCV frame in local RAM."""
     if pd is None or not isinstance(results, list) or not results:
         return None
     rows = []
@@ -218,10 +192,13 @@ def _polygon_aggs_to_dataframe(results):
         ts_ms = bar.get("t")
         if ts_ms is None:
             continue
-        ts = datetime.datetime.fromtimestamp(float(ts_ms) / 1000.0)
+        ts = pd.to_datetime(float(ts_ms), unit="ms", utc=True)
+        if hasattr(ts, "tz_convert"):
+            ts = ts.tz_convert("America/New_York")
+        ts = ts.tz_localize(None)
         rows.append(
             {
-                "Datetime": ts,
+                "Datetime": ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
                 "Open": float(bar.get("o", 0) or 0),
                 "High": float(bar.get("h", 0) or 0),
                 "Low": float(bar.get("l", 0) or 0),
@@ -232,7 +209,93 @@ def _polygon_aggs_to_dataframe(results):
     if not rows:
         return None
     frame = pd.DataFrame(rows).set_index("Datetime")
+    frame.index = frame.index.tz_localize(None) if getattr(frame.index, "tz", None) else frame.index
     return frame if not frame.empty else None
+
+
+def resample_ohlcv_bars(frame_1m, rule: str):
+    """Local Pandas resample — 1 API credit already spent on the 1m package."""
+    frame = _ensure_dataframe(frame_1m)
+    if frame is None:
+        return None
+    try:
+        resampled = frame.resample(rule).agg(
+            {
+                "Open": "first",
+                "High": "max",
+                "Low": "min",
+                "Close": "last",
+                "Volume": "sum",
+            }
+        )
+        resampled = resampled.dropna(subset=["Close"], how="any")
+        return resampled if not resampled.empty else None
+    except Exception:
+        return None
+
+
+def _resolve_track_from_1m(frame_1m, timeframe_resolution: str):
+    rule = RESAMPLE_RULES.get(timeframe_resolution, "15min")
+    if timeframe_resolution == "1-Minute":
+        return frame_1m
+    return resample_ohlcv_bars(frame_1m, rule)
+
+
+def get_room2_polygon_pipeline(
+    ticker,
+    *,
+    start_date,
+    end_date,
+    timeframe_resolution: str = "15-Minute",
+):
+    """
+    Room 2 institutional datalink — one Polygon 1m macro-request per submission,
+    local resample to 5m/15m tracks, timezone stripped on ingest.
+    """
+    ticker_clean = str(ticker).strip().upper()
+    if not ticker_clean:
+        return POLYGON_REST_DATA_EMPTY
+
+    cache_key = f"{ticker_clean}|{_session_date_value(start_date)}|{_session_date_value(end_date)}"
+    cached_key = st.session_state.get("r2_polygon_session_key")
+    frame_1m = st.session_state.get("r2_polygon_1m_ram")
+
+    if cached_key != cache_key or not is_usable_data_stream(frame_1m):
+        polygon_bars, polygon_signal = fetch_polygon_session_1m_package(
+            ticker_clean,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if polygon_signal == "THROTTLE":
+            st.session_state.polygon_lockout = True
+            return "THROTTLE"
+        if polygon_signal == POLYGON_REST_DATA_EMPTY or not polygon_bars:
+            st.session_state.r2_micro_feed_source = DATA_FEED_POLYGON_1M
+            return POLYGON_REST_DATA_EMPTY
+        frame_1m = _polygon_aggs_to_dataframe(polygon_bars)
+        if not is_usable_data_stream(frame_1m):
+            return POLYGON_REST_DATA_EMPTY
+        st.session_state.r2_polygon_1m_ram = frame_1m
+        st.session_state.r2_polygon_session_key = cache_key
+        st.session_state.r2_micro_feed_source = DATA_FEED_POLYGON_1M
+
+    track = _resolve_track_from_1m(frame_1m, timeframe_resolution)
+    if not is_usable_data_stream(track):
+        return POLYGON_REST_DATA_EMPTY
+
+    if timeframe_resolution == "1-Minute":
+        track = apply_local_strike_ram_cap(track)
+    st.session_state.r2_processor_lane = (
+        PROCESSOR_LANE_LOCAL_STRIKE
+        if timeframe_resolution == "1-Minute"
+        else PROCESSOR_LANE_CLOUD
+    )
+    st.session_state.r2_timeframe_track_bars = len(track)
+    return track
+
+
+def _cached_polygon_1m_frame():
+    return st.session_state.get("r2_polygon_1m_ram")
 
 
 def timeframe_margin_floor(timeframe_resolution: str) -> float:
@@ -243,36 +306,73 @@ def _ensure_dataframe(data_stream):
     if pd is None:
         return None
     if isinstance(data_stream, pd.DataFrame) and not data_stream.empty:
-        return _flatten_yfinance_frame(data_stream)
+        return _flatten_ohlcv_frame(data_stream)
     return None
 
 
 def pad_datastream_gaps(data_stream):
-    """Forward-fill thin pre/post-market gaps so loops never hit empty holes."""
+    """v2 pipeline — no horizontal pre-market padding; return raw Polygon bars."""
     frame = _ensure_dataframe(data_stream)
-    if frame is None:
-        return data_stream
-    padded = frame.copy()
-    for col in ("Close", "Open", "High", "Low", "Volume"):
-        if col in padded.columns:
-            padded[col] = padded[col].ffill()
-            if col != "Volume":
-                padded[col] = padded[col].bfill()
-    return padded
+    return frame if frame is not None else data_stream
 
 
-def _calibrated_lookback_start(end_dt: datetime.datetime, timeframe_resolution: str):
-    """Timeframe-isolated forensic lookback — 1m tight, 5m to 4AM, 15m overnight bridge."""
+def _dynamic_bar_dragnet_window(
+    data_stream,
+    start_dt: datetime.datetime | None,
+    bar_count: int,
+):
+    """
+    Boundary-less relative bar lookback anchored at operator Start Time.
+    Never truncates at session walls — pulls the prior N bars seamlessly.
+    """
+    frame = _ensure_dataframe(data_stream)
+    if frame is None or start_dt is None or bar_count <= 0:
+        return None, None
+    try:
+        bars_up_to_start = frame[frame.index <= start_dt]
+        if not isinstance(bars_up_to_start, pd.DataFrame) or bars_up_to_start.empty:
+            return None, None
+        window = bars_up_to_start.tail(bar_count)
+        if window.empty:
+            return None, None
+        return window.index[0], window
+    except Exception:
+        return None, None
+
+
+def _dynamic_1m_dragnet_window(data_stream, start_dt: datetime.datetime | None):
+    """Strict 5-minute / 5-bar lookback on the 1m track from operator Start Time."""
+    return _dynamic_bar_dragnet_window(data_stream, start_dt, ONE_MINUTE_DRAGNET_BARS)
+
+
+def _dynamic_5m_dragnet_window(data_stream, start_dt: datetime.datetime | None):
+    """
+    Boundary-less 3-hour / 36-bar lookback on the 5m track, anchored at operator Start Time.
+    Crosses regular/post-market seamlessly — never truncates at the 4:00 PM wall.
+    """
+    return _dynamic_bar_dragnet_window(data_stream, start_dt, FIVE_MINUTE_DRAGNET_BARS)
+
+
+def _calibrated_lookback_start(
+    end_dt: datetime.datetime,
+    timeframe_resolution: str,
+    *,
+    start_dt: datetime.datetime | None = None,
+    data_stream=None,
+):
+    """Timeframe-isolated forensic lookback — 1m: 5 bars, 5m: 36 bars, both from Start Time."""
     if end_dt is None:
         return None
-    if timeframe_resolution == "1-Minute":
-        return end_dt - LOOKBACK_DELTAS["1-Minute"]
-    if timeframe_resolution == "5-Minute":
-        premarket_open = end_dt.replace(hour=4, minute=0, second=0, microsecond=0)
-        if end_dt < premarket_open:
-            premarket_open = premarket_open - datetime.timedelta(days=1)
-        wide_back = end_dt - LOOKBACK_DELTAS["5-Minute"]
-        return premarket_open if premarket_open > wide_back else wide_back
+    if timeframe_resolution == "1-Minute" and start_dt is not None:
+        lookback_start, _ = _dynamic_1m_dragnet_window(data_stream, start_dt)
+        if lookback_start is not None:
+            return lookback_start
+    if timeframe_resolution == "5-Minute" and start_dt is not None:
+        lookback_start, _ = _dynamic_5m_dragnet_window(data_stream, start_dt)
+        if lookback_start is not None:
+            return lookback_start
+    if timeframe_resolution == "1-Minute" and start_dt is not None:
+        return start_dt - datetime.timedelta(minutes=ONE_MINUTE_DRAGNET_BARS)
     if timeframe_resolution == "15-Minute":
         return end_dt - LOOKBACK_DELTAS["15-Minute"]
     delta = LOOKBACK_DELTAS.get(timeframe_resolution, datetime.timedelta(hours=1))
@@ -284,38 +384,35 @@ def _clamp_inner_move_window(
     end_dt: datetime.datetime | None,
     timeframe_resolution: str,
 ) -> datetime.datetime | None:
-    """1m track: limit in-move look-in to 1–2 minutes to protect entry runway."""
-    if (
-        timeframe_resolution != "1-Minute"
-        or start_dt is None
-        or end_dt is None
-        or end_dt <= start_dt
-    ):
-        return start_dt
-    if end_dt - start_dt > INNER_MOVE_MAX_1M:
-        return end_dt - INNER_MOVE_MAX_1M
+    """1m runway is capped by the 5-bar dragnet from Start Time — no extra timedelta clamp."""
     return start_dt
 
 
 def _research_dragnet_lookback_start(
-    end_dt: datetime.datetime | None, timeframe_resolution: str
+    end_dt: datetime.datetime | None,
+    timeframe_resolution: str,
+    *,
+    start_dt: datetime.datetime | None = None,
+    data_stream=None,
 ) -> datetime.datetime | None:
     """
-    Unconstrained full-day dragnet (Room 2 research only) — no profit-floor walls.
-    5m: entire session back to 4:00 AM pre-market. 15m: bridges overnight into prior post-market.
-    Temporal fence at Exit B still applies separately; this only widens historical ingestion.
+    Full-session dragnet for Room 2 research — 1m/5m use boundary-less bar windows from Start Time.
     """
     if end_dt is None:
         return None
-    if timeframe_resolution == "5-Minute":
-        premarket = end_dt.replace(hour=4, minute=0, second=0, microsecond=0)
-        if end_dt < premarket:
-            premarket = premarket - datetime.timedelta(days=1)
-        return premarket
+    if timeframe_resolution == "1-Minute" and start_dt is not None:
+        lookback_start, _ = _dynamic_1m_dragnet_window(data_stream, start_dt)
+        if lookback_start is not None:
+            return lookback_start
+    if timeframe_resolution == "5-Minute" and start_dt is not None:
+        lookback_start, _ = _dynamic_5m_dragnet_window(data_stream, start_dt)
+        if lookback_start is not None:
+            return lookback_start
     if timeframe_resolution == "15-Minute":
-        prior = end_dt - datetime.timedelta(days=1)
-        return prior.replace(hour=16, minute=0, second=0, microsecond=0)
-    return _calibrated_lookback_start(end_dt, timeframe_resolution)
+        return end_dt - LOOKBACK_DELTAS["15-Minute"]
+    return _calibrated_lookback_start(
+        end_dt, timeframe_resolution, start_dt=start_dt, data_stream=data_stream
+    )
 
 
 def compute_metric_envelopes(
@@ -523,24 +620,9 @@ def _scrape_sec_regulatory_dragnet(ticker: str, *, days: int = 30) -> dict:
 
 
 def _options_sweep_proxy(ticker: str) -> dict:
-    """Options sweep proxy — nearest-expiry chain volume (cloud research fat layer)."""
-    try:
-        tk = yf.Ticker(str(ticker).strip().upper())
-        expirations = list(tk.options or [])[:1]
-        if not expirations:
-            return {"status": "NO_CHAIN"}
-        chain = tk.option_chain(expirations[0])
-        call_vol = int(chain.calls["volume"].fillna(0).sum()) if "volume" in chain.calls else 0
-        put_vol = int(chain.puts["volume"].fillna(0).sum()) if "volume" in chain.puts else 0
-        return {
-            "status": "OK",
-            "expiry": expirations[0],
-            "call_volume": call_vol,
-            "put_volume": put_vol,
-            "sweep_ratio": round(call_vol / max(put_vol, 1), 3),
-        }
-    except Exception:
-        return {"status": "UNAVAILABLE"}
+    """Options sweep proxy — Polygon-only pipeline; chain data deferred to cloud research."""
+    _ = ticker
+    return {"status": "UNAVAILABLE", "reason": "polygon_only_pipeline_v2"}
 
 
 def run_full_day_forensic_dragnet(
@@ -549,10 +631,12 @@ def run_full_day_forensic_dragnet(
     end_date,
     end_time: str,
     timeframe_resolution: str,
+    start_date=None,
+    start_time: str = "",
 ) -> dict:
     """
-    Unconstrained full-day dragnet for 5m/15m Room 2 research.
-    Ingests unfiltered session fat (still future-blind at Exit B) for Supabase archival.
+    Room 2 forensic dragnet — slices cached Polygon 1m RAM, resampled locally.
+    5m uses boundary-less 36-bar window from operator Start Time.
     """
     if timeframe_resolution not in DRAGNET_TIMEFRAMES:
         return {}
@@ -560,26 +644,41 @@ def run_full_day_forensic_dragnet(
     end_dt = _parse_session_datetime(end_date, end_time)
     if end_dt is None:
         return {}
-    dragnet_start = _research_dragnet_lookback_start(end_dt, timeframe_resolution)
-    yf_interval = {"5-Minute": "5m", "15-Minute": "15m"}.get(timeframe_resolution, "15m")
-    raw = pad_datastream_gaps(_download_yfinance_bars(ticker_clean, yf_interval))
-    frame = _ensure_dataframe(raw)
+    start_dt = _parse_session_datetime(start_date, start_time) if start_date else None
+
+    frame_1m = _cached_polygon_1m_frame()
+    track = _resolve_track_from_1m(frame_1m, timeframe_resolution) if frame_1m is not None else None
+    dragnet_start = _research_dragnet_lookback_start(
+        end_dt,
+        timeframe_resolution,
+        start_dt=start_dt,
+        data_stream=track,
+    )
     dragnet_frame = None
-    if frame is not None and dragnet_start is not None:
+    if track is not None and dragnet_start is not None:
         try:
-            sliced = frame[(frame.index <= end_dt) & (frame.index >= dragnet_start)]
+            sliced = track[(track.index <= end_dt) & (track.index >= dragnet_start)]
             if isinstance(sliced, pd.DataFrame) and not sliced.empty:
                 dragnet_frame = sliced
         except Exception:
             dragnet_frame = None
 
-    envelopes = compute_metric_envelopes(dragnet_frame or raw, end_dt, dragnet_start)
+    _, baseline_window = (
+        _dynamic_5m_dragnet_window(track, start_dt)
+        if timeframe_resolution == "5-Minute" and start_dt is not None
+        else (None, None)
+    )
+    envelopes = compute_metric_envelopes(
+        baseline_window or dragnet_frame or track,
+        end_dt,
+        dragnet_start,
+    )
     headlines = _fetch_research_news_headlines(ticker_clean, limit=24)
     semantic = score_semantic_catalyst_stream(headlines)
     form4 = _scrape_form4_insider_buys(ticker_clean)
     regulatory = _scrape_sec_regulatory_dragnet(ticker_clean)
     institutional = _detect_institutional_block_accumulation(
-        ticker_clean, dragnet_frame or raw, yf_interval
+        ticker_clean, dragnet_frame or track, timeframe_resolution
     )
     options = _options_sweep_proxy(ticker_clean)
 
@@ -752,14 +851,18 @@ def _hill_trap_shrinks_margin(
     return drop_pct >= HILL_DROP_MIN_PCT and shrink >= HILL_MARGIN_SHRINK_MIN_PCT
 
 
-def _morning_volume_baseline_envelope(window) -> dict:
-    """Morning-session volume mean/std envelope for liquidity ignition guard."""
-    if window.empty or "Volume" not in window.columns:
+def _three_hour_baseline_envelope(window) -> dict:
+    """3-hour rolling dragnet volume mean/std envelope for liquidity ignition guard."""
+    if window is None or (isinstance(window, pd.DataFrame) and window.empty):
         return {"mean": 0.0, "std": 0.0, "floor": 0.0}
-    n = min(MORNING_BASELINE_BARS, max(3, len(window) // 3))
-    early = window["Volume"].iloc[:n].astype(float).fillna(0.0)
-    mu = float(early.mean()) if len(early) else 0.0
-    sigma = float(early.std()) if len(early) > 1 else 0.0
+    frame = window if isinstance(window, pd.DataFrame) else _ensure_dataframe(window)
+    if frame is None or "Volume" not in frame.columns:
+        return {"mean": 0.0, "std": 0.0, "floor": 0.0}
+    vols = frame["Volume"].astype(float).fillna(0.0)
+    if vols.empty:
+        return {"mean": 0.0, "std": 0.0, "floor": 0.0}
+    mu = float(vols.mean())
+    sigma = float(vols.std()) if len(vols) > 1 else 0.0
     return {"mean": mu, "std": sigma, "floor": max(0.0, mu - sigma)}
 
 
@@ -868,6 +971,7 @@ def resolve_adaptive_entry_anchor(
     exit_price: float | None = None,
     floor_pct: float | None = None,
     timeframe_resolution: str = "15-Minute",
+    baseline_window=None,
 ) -> dict:
     """
     Multi-candidate adaptive entry optimizer with hill bypass + liquidity ignition guard.
@@ -892,7 +996,7 @@ def resolve_adaptive_entry_anchor(
     vel_idx, vel_price = _candidate_velocity_spike_anchor(window)
     struct_idx, struct_price = _candidate_structure_baseline(window, vol_idx)
     manual_idx, manual_price = _candidate_manual_anchor(window, manual_entry_dt)
-    morning_env = _morning_volume_baseline_envelope(window)
+    baseline_env = _three_hour_baseline_envelope(baseline_window or window)
 
     idx_by_label = {
         "volume_std_anchor": vol_idx,
@@ -937,7 +1041,7 @@ def resolve_adaptive_entry_anchor(
                 disqualified_reason = "hill_trap_macro_rewind"
         elif label == "structure_baseline":
             local_vol = _local_volume_at(window, ts)
-            if local_vol < float(morning_env.get("floor", 0.0)):
+            if local_vol < float(baseline_env.get("floor", 0.0)):
                 qualified = False
                 disqualified_reason = "illiquid_dead_zone"
         scored.append(
@@ -973,7 +1077,7 @@ def resolve_adaptive_entry_anchor(
                     struct_margin = _entry_margin_pct(struct_c["price"], raw_exit)
                     if struct_margin >= floor:
                         local_vol = _local_volume_at(window, struct_idx)
-                        if local_vol >= float(morning_env.get("floor", 0.0)):
+                        if local_vol >= float(baseline_env.get("floor", 0.0)):
                             winner_label = "structure_baseline"
                             winner_ts = struct_c["timestamp"]
                             winner_price = float(struct_c["price"])
@@ -988,7 +1092,7 @@ def resolve_adaptive_entry_anchor(
                                     liquidity_ignition = True
         elif winner_label == "structure_baseline":
             local_vol = _local_volume_at(window, struct_idx)
-            if local_vol < float(morning_env.get("floor", 0.0)):
+            if local_vol < float(baseline_env.get("floor", 0.0)):
                 ign_idx, ign_price = _volatility_ignition_anchor(window, struct_idx)
                 if ign_idx is not None and ign_price is not None:
                     ign_margin = _entry_margin_pct(ign_price, raw_exit)
@@ -1002,17 +1106,24 @@ def resolve_adaptive_entry_anchor(
                         winner_ts = None
                         winner_price = None
 
-    if winner_label is None or winner_price is None:
-        ign_idx, ign_price = _volatility_ignition_anchor(window, struct_idx or vol_idx)
-        if ign_idx is not None and ign_price is not None:
-            ign_margin = _entry_margin_pct(ign_price, raw_exit)
-            if ign_margin >= floor:
-                winner_label = "volatility_ignition"
-                winner_ts = str(ign_idx)
-                winner_price = float(ign_price)
-                liquidity_ignition = True
+    ignition_search_from = struct_idx or vol_idx
+    if winner_label == "structure_baseline" and struct_idx is not None:
+        ignition_search_from = struct_idx
+    elif hill_rewind and struct_idx is not None:
+        ignition_search_from = struct_idx
 
-    if winner_label is None or winner_price is None:
+    ign_idx, ign_price = _volatility_ignition_anchor(window, ignition_search_from)
+    if ign_idx is not None and ign_price is not None:
+        winner_label = "volatility_ignition"
+        winner_ts = str(ign_idx)
+        winner_price = float(ign_price)
+        liquidity_ignition = True
+    else:
+        winner_label = None
+        winner_ts = None
+        winner_price = None
+
+    if winner_label != "volatility_ignition" or winner_price is None:
         st.session_state.room2_entry_optimizer = {
             "selected_candidate": None,
             "candidates": scored,
@@ -1020,7 +1131,7 @@ def resolve_adaptive_entry_anchor(
             "downhill_pivot": False,
             "hill_bypass_rewind": hill_rewind,
             "liquidity_ignition": False,
-            "morning_volume_envelope": morning_env,
+            "three_hour_volume_envelope": baseline_env,
         }
         return {**empty_result, "candidates": scored}
 
@@ -1032,7 +1143,9 @@ def resolve_adaptive_entry_anchor(
         "downhill_pivot": winner_label not in ("volume_std_anchor", "velocity_spike_anchor"),
         "hill_bypass_rewind": hill_rewind,
         "liquidity_ignition": liquidity_ignition,
-        "morning_volume_envelope": morning_env,
+        "three_hour_volume_envelope": baseline_env,
+        "volatility_ignition_entry_price": round(float(winner_price), 6),
+        "volatility_ignition_timestamp": winner_ts,
         "winner_margin_pct": round(winner_margin, 4),
         "manual_anchor_reference": (
             {"timestamp": str(manual_idx), "price": round(float(manual_price), 6)}
@@ -1203,10 +1316,9 @@ def apply_temporal_fence_and_lookback(
 ):
     """
     Hindsight blinding + calibrated lookback depths.
-    Bars after the exit timestamp are stripped; lookback window is timeframe-specific.
+    Bars after exit are stripped; 1m uses 5-bar / 5m uses 36-bar dragnet from Start Time.
     """
-    frame = pad_datastream_gaps(data_stream)
-    frame = _ensure_dataframe(frame)
+    frame = _ensure_dataframe(data_stream)
     if frame is None:
         return data_stream, {}
 
@@ -1214,13 +1326,21 @@ def apply_temporal_fence_and_lookback(
     if end_dt is None:
         return frame, {}
 
-    lookback_start = _calibrated_lookback_start(end_dt, timeframe_resolution)
     start_dt = _parse_session_datetime(start_date, start_time)
-    if start_dt is not None and start_dt < lookback_start:
+    lookback_start = _calibrated_lookback_start(
+        end_dt,
+        timeframe_resolution,
+        start_dt=start_dt,
+        data_stream=frame,
+    )
+    if start_dt is not None and lookback_start is not None and start_dt < lookback_start:
         lookback_start = start_dt
 
     try:
-        fenced = frame[(frame.index <= end_dt) & (frame.index >= lookback_start)]
+        if lookback_start is not None:
+            fenced = frame[(frame.index <= end_dt) & (frame.index >= lookback_start)]
+        else:
+            fenced = frame[frame.index <= end_dt]
         if isinstance(fenced, pd.DataFrame) and not fenced.empty:
             frame = fenced
     except Exception:
@@ -1228,8 +1348,14 @@ def apply_temporal_fence_and_lookback(
 
     meta = {
         "temporal_fence_end": end_dt.isoformat(),
-        "lookback_start": lookback_start.isoformat(),
+        "lookback_start": lookback_start.isoformat() if lookback_start else None,
         "timeframe_resolution": timeframe_resolution,
+        "five_minute_dragnet_bars": FIVE_MINUTE_DRAGNET_BARS
+        if timeframe_resolution == "5-Minute"
+        else None,
+        "one_minute_dragnet_bars": ONE_MINUTE_DRAGNET_BARS
+        if timeframe_resolution == "1-Minute"
+        else None,
     }
     return frame, meta
 
@@ -1250,13 +1376,28 @@ def evaluate_playbook_quality_barrier(
     floor_pct = timeframe_margin_floor(timeframe_resolution)
     end_dt = _parse_session_datetime(end_date, end_time)
     start_dt = _parse_session_datetime(start_date, start_time)
-    lookback_start = _calibrated_lookback_start(end_dt, timeframe_resolution) if end_dt else None
+    lookback_start = _calibrated_lookback_start(
+        end_dt,
+        timeframe_resolution,
+        start_dt=start_dt,
+        data_stream=data_stream,
+    ) if end_dt else None
     inner_start = _clamp_inner_move_window(start_dt, end_dt, timeframe_resolution)
     anchor_search_start = lookback_start
     if inner_start is not None and lookback_start is not None:
         anchor_search_start = max(inner_start, lookback_start)
     elif inner_start is not None:
         anchor_search_start = inner_start
+
+    _, baseline_window = (
+        _dynamic_1m_dragnet_window(data_stream, start_dt)
+        if timeframe_resolution == "1-Minute" and start_dt is not None
+        else _dynamic_5m_dragnet_window(data_stream, start_dt)
+        if timeframe_resolution == "5-Minute" and start_dt is not None
+        else (None, None)
+    )
+    if baseline_window is None and anchor_search_start is not None and end_dt is not None:
+        baseline_window = _lookback_window_frame(data_stream, end_dt, anchor_search_start)
 
     raw_exit_price = _price_at_datetime(data_stream, end_dt)
     entry_resolution = resolve_adaptive_entry_anchor(
@@ -1267,6 +1408,7 @@ def evaluate_playbook_quality_barrier(
         exit_price=raw_exit_price,
         floor_pct=floor_pct,
         timeframe_resolution=timeframe_resolution,
+        baseline_window=baseline_window,
     )
     anchor_ts = entry_resolution.get("anchor_timestamp")
     anchor_price = entry_resolution.get("anchor_price")
@@ -1276,20 +1418,28 @@ def evaluate_playbook_quality_barrier(
         except ValueError:
             pass
 
+    ignition_price = anchor_price
+    ignition_ts = anchor_ts
+    optimizer_meta = entry_resolution.get("optimizer_meta") or {}
+    if optimizer_meta.get("volatility_ignition_entry_price") is not None:
+        ignition_price = float(optimizer_meta["volatility_ignition_entry_price"])
+    if optimizer_meta.get("volatility_ignition_timestamp"):
+        ignition_ts = optimizer_meta["volatility_ignition_timestamp"]
+
     structural_move_pct = 0.0
     exit_price = raw_exit_price
     exit_anchor_ts = str(end_dt) if end_dt is not None else None
-    if anchor_price and raw_exit_price and anchor_price > 0:
-        structural_move_pct = abs((raw_exit_price - anchor_price) / anchor_price * 100)
+    if ignition_price and raw_exit_price and ignition_price > 0:
+        structural_move_pct = abs((raw_exit_price - ignition_price) / ignition_price * 100)
         exit_price, exit_anchor_ts = resolve_stable_profit_exit_anchor(
             data_stream,
             exit_dt=end_dt,
-            anchor_price=anchor_price,
+            anchor_price=ignition_price,
             target_move_pct=structural_move_pct,
             timeframe_resolution=timeframe_resolution,
         )
-        if exit_price and anchor_price:
-            structural_move_pct = abs((exit_price - anchor_price) / anchor_price * 100)
+        if exit_price and ignition_price:
+            structural_move_pct = abs((exit_price - ignition_price) / ignition_price * 100)
 
     gate_window = _lookback_window_frame(data_stream, end_dt, anchor_search_start)
     friction_pct = _execution_friction_buffer_pct(gate_window)
@@ -1302,8 +1452,10 @@ def evaluate_playbook_quality_barrier(
         "execution_friction_buffer_pct": round(friction_pct, 4),
         "net_margin_pct": net_margin_pct,
         "floor_pct": floor_pct,
-        "anchor_timestamp": str(anchor_ts) if anchor_ts is not None else None,
-        "anchor_price": anchor_price,
+        "anchor_timestamp": str(ignition_ts) if ignition_ts is not None else None,
+        "anchor_price": ignition_price,
+        "volatility_ignition_entry_price": ignition_price,
+        "volatility_ignition_timestamp": str(ignition_ts) if ignition_ts is not None else None,
         "exit_price": exit_price,
         "raw_exit_price": raw_exit_price,
         "exit_anchor_timestamp": exit_anchor_ts,
@@ -1753,11 +1905,12 @@ def evaluate_alpha_decay(
 
 
 def refresh_macro_carousel_telemetry(ticker: str) -> None:
-    """Cloud-stream 15s macro refresh — institutional + Form4 via cloud pipeline."""
+    """Cloud-stream macro refresh — uses cached Polygon 1m RAM when available."""
     ticker_clean = str(ticker or "").strip().upper()
     if not ticker_clean:
         return
-    bars = _download_yfinance_bars(ticker_clean, "15m", micro_fast_track=False)
+    frame_1m = _cached_polygon_1m_frame()
+    bars = resample_ohlcv_bars(frame_1m, "15min") if frame_1m is not None else None
     if not is_usable_data_stream(bars):
         return
     fetch_cloud_macro_intelligence(ticker_clean, "15m", bars)
@@ -1885,20 +2038,16 @@ def _xml_local_tag(tag: str) -> str:
     return tag.split("}")[-1] if "}" in tag else tag
 
 
-def _twenty_day_volume_baseline(ticker: str) -> float:
-    """Free yfinance proxy — 20 trading-day average daily volume baseline."""
-    ticker_clean = str(ticker).strip().upper()
-    try:
-        hist = yf.Ticker(ticker_clean).history(period="1mo", interval="1d")
-        if hist is None or hist.empty or "Volume" not in hist.columns:
-            return 0.0
-        volumes = hist["Volume"].dropna()
-        if volumes.empty:
-            return 0.0
-        window = volumes.tail(20)
-        return float(window.mean()) if len(window) >= 5 else float(volumes.mean())
-    except Exception:
+def _twenty_day_volume_baseline(ticker: str, data_stream=None) -> float:
+    """Session-volume proxy baseline — Polygon-only pipeline (no secondary daily fetch)."""
+    volumes = _volume_series_from_data_stream(data_stream)
+    if volumes is None:
         return 0.0
+    if pd is not None and isinstance(volumes, pd.Series) and not volumes.empty:
+        return float(volumes.mean()) * max(1, BARS_PER_SESSION.get("15m", 26))
+    if isinstance(volumes, list) and volumes:
+        return float(sum(volumes) / len(volumes)) * max(1, BARS_PER_SESSION.get("15m", 26))
+    return 0.0
 
 
 def _detect_institutional_block_accumulation(ticker: str, data_stream, interval: str) -> dict:
@@ -1906,7 +2055,7 @@ def _detect_institutional_block_accumulation(ticker: str, data_stream, interval:
     Free institutional proxy tracker: flags block accumulation when any active
     execution-window bar exceeds 300% above the 20-day volume baseline.
     """
-    baseline_daily = _twenty_day_volume_baseline(ticker)
+    baseline_daily = _twenty_day_volume_baseline(ticker, data_stream)
     if baseline_daily <= 0:
         return {
             "institutional_block_accumulation": False,
@@ -2168,16 +2317,9 @@ def apply_local_strike_ram_cap(data_stream, cap_minutes: int = LOCAL_1M_RAM_CAP_
 
 
 def _fetch_research_news_headlines(ticker: str, *, limit: int = 8) -> list[str]:
-    """Cloud-side news wire for Room 2 deep research — keeps heavy I/O off local silicon."""
+    """Cloud-side news wire for Room 2 deep research — RSS only (Polygon-only pipeline)."""
     headlines: list[str] = []
     ticker_clean = str(ticker).strip().upper()
-    try:
-        for item in (yf.Ticker(ticker_clean).news or [])[:limit]:
-            title = str(item.get("title", "")).strip()
-            if title:
-                headlines.append(title)
-    except Exception:
-        pass
     try:
         q = urllib.parse.quote(f"{ticker_clean} stock", safe="")
         rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
@@ -2351,8 +2493,17 @@ def run_deep_internet_research_audit(
     """
     ticker_clean = str(ticker).strip().upper()
     end_dt = _parse_session_datetime(end_date, end_time)
-    lookback_start = _calibrated_lookback_start(end_dt, timeframe_resolution) if end_dt else None
     start_dt = _parse_session_datetime(start_date, start_time)
+    lookback_start = (
+        _calibrated_lookback_start(
+            end_dt,
+            timeframe_resolution,
+            start_dt=start_dt,
+            data_stream=data_stream,
+        )
+        if end_dt
+        else None
+    )
     if start_dt is not None and lookback_start is not None and start_dt < lookback_start:
         lookback_start = start_dt
 
@@ -2376,20 +2527,24 @@ def run_deep_internet_research_audit(
             end_date=end_date,
             end_time=end_time,
             timeframe_resolution=timeframe_resolution,
+            start_date=start_date,
+            start_time=start_time,
         )
-        dragnet_start = _research_dragnet_lookback_start(end_dt, timeframe_resolution)
-        raw_drag = pad_datastream_gaps(
-            _download_yfinance_bars(
-                ticker_clean,
-                {"5-Minute": "5m", "15-Minute": "15m"}.get(timeframe_resolution, "15m"),
-            )
+        dragnet_start = _research_dragnet_lookback_start(
+            end_dt,
+            timeframe_resolution,
+            start_dt=start_dt,
+            data_stream=data_stream,
         )
-        dragnet_df = _ensure_dataframe(raw_drag)
-        if dragnet_df is not None and dragnet_start is not None and end_dt is not None:
+        frame_1m = _cached_polygon_1m_frame()
+        track = (
+            _resolve_track_from_1m(frame_1m, timeframe_resolution)
+            if frame_1m is not None
+            else _ensure_dataframe(data_stream)
+        )
+        if track is not None and dragnet_start is not None and end_dt is not None:
             try:
-                sliced = dragnet_df[
-                    (dragnet_df.index <= end_dt) & (dragnet_df.index >= dragnet_start)
-                ]
+                sliced = track[(track.index <= end_dt) & (track.index >= dragnet_start)]
                 if isinstance(sliced, pd.DataFrame) and not sliced.empty:
                     audit_frame = sliced
             except Exception:
@@ -2405,12 +2560,12 @@ def run_deep_internet_research_audit(
     if metric_envelopes:
         price_action["metric_envelopes"] = metric_envelopes
 
-    yf_interval = {"1-Minute": "1m", "5-Minute": "5m", "15-Minute": "15m"}.get(
+    interval_token = {"1-Minute": "1m", "5-Minute": "5m", "15-Minute": "15m"}.get(
         timeframe_resolution, "15m"
     )
     try:
         institutional = dragnet_blob.get("institutional") or _detect_institutional_block_accumulation(
-            ticker_clean, audit_frame, yf_interval
+            ticker_clean, audit_frame, interval_token
         )
         st.session_state.forensic_institutional_tracker = institutional
     except Exception:
@@ -2524,109 +2679,58 @@ def get_historical_interval_data(
     update_institutional_tracker=True,
     force_yfinance_only=False,
     micro_fast_track=False,
+    *,
+    start_date=None,
+    end_date=None,
+    timeframe_resolution: str | None = None,
 ):
     """
-    Dual-stream datalink:
-    - 1m local strike lane: tight RAM cap, no cloud macro scrape on deploy.
-    - 5m/15m cloud lane: Polygon/yfinance bars + cloud macro intelligence bundle.
+  Room 2 datalink — Polygon 1m macro-request + local resample (v2 pipeline).
+    Legacy interval/micro_fast_track kwargs retained for app compatibility.
     """
-    try:
-        return _get_historical_interval_data_impl(
-            ticker,
-            interval=interval,
-            update_institutional_tracker=update_institutional_tracker,
-            force_yfinance_only=force_yfinance_only or micro_fast_track,
-            micro_fast_track=micro_fast_track,
-        )
-    except Exception:
-        return None
-
-
-def _get_historical_interval_data_impl(
-    ticker,
-    interval="15m",
-    update_institutional_tracker=True,
-    force_yfinance_only=False,
-    micro_fast_track=False,
-):
-    ticker_clean = str(ticker).strip().upper()
-    if not ticker_clean:
-        return None
-
-    now = datetime.datetime.now()
-    interval = str(interval).lower()
-    yf_interval = interval if interval in {"1m", "5m", "15m", "1h", "1d"} else "15m"
-
-    if micro_fast_track:
-        update_institutional_tracker = False
-        st.session_state.r2_processor_lane = PROCESSOR_LANE_LOCAL_STRIKE
-        start_date = (now - datetime.timedelta(hours=8)).strftime("%Y-%m-%d")
-        end_date = now.strftime("%Y-%m-%d")
-        polygon_bars, polygon_signal = _fetch_polygon_1m_bars(
-            ticker_clean, start_date, end_date
-        )
-        if polygon_signal == "THROTTLE":
-            st.session_state.r2_micro_feed_source = DATA_FEED_YFINANCE_1M
-            st.session_state.polygon_lockout = True
-            return "THROTTLE"
-        polygon_frame = _polygon_aggs_to_dataframe(polygon_bars)
-        if is_usable_data_stream(polygon_frame):
-            st.session_state.r2_micro_feed_source = DATA_FEED_POLYGON_1M
-            return apply_local_strike_ram_cap(polygon_frame)
-        st.session_state.r2_micro_feed_source = DATA_FEED_YFINANCE_1M
-    else:
-        st.session_state.r2_processor_lane = PROCESSOR_LANE_CLOUD
-
-    data_stream = _download_yfinance_bars(
-        ticker_clean, yf_interval, micro_fast_track=micro_fast_track
+    _ = (force_yfinance_only, micro_fast_track, interval)
+    tf = timeframe_resolution or {
+        "1m": "1-Minute",
+        "5m": "5-Minute",
+        "15m": "15-Minute",
+    }.get(str(interval).lower(), "15-Minute")
+    if start_date is None or end_date is None:
+        return POLYGON_REST_DATA_EMPTY
+    return _get_room2_polygon_pipeline_with_macro(
+        ticker,
+        start_date=start_date,
+        end_date=end_date,
+        timeframe_resolution=tf,
+        update_institutional_tracker=update_institutional_tracker,
     )
 
-    if (
-        data_stream is None
-        and not force_yfinance_only
-        and not micro_fast_track
-        and yf_interval == "15m"
-    ):
-        start_date = (now - datetime.timedelta(days=730)).strftime("%Y-%m-%d")
-        end_date = now.strftime("%Y-%m-%d")
-        polygon_bars, polygon_signal = _fetch_polygon_15m_bars(
-            ticker_clean, start_date, end_date
-        )
-        if polygon_signal == "THROTTLE":
-            st.session_state.forensic_institutional_tracker = {
-                "institutional_block_accumulation": False,
-                "inst_block_summary": "INST_BLOCK: THROTTLED",
-                "volume_baseline_20d": 0.0,
-                "peak_surge_ratio": 0.0,
-            }
-            return "THROTTLE"
-        if is_usable_data_stream(polygon_bars):
-            polygon_frame = _polygon_aggs_to_dataframe(polygon_bars)
-            if is_usable_data_stream(polygon_frame):
-                data_stream = polygon_frame
 
-    if micro_fast_track and is_usable_data_stream(data_stream):
-        return apply_local_strike_ram_cap(data_stream)
+def _get_room2_polygon_pipeline_with_macro(
+    ticker,
+    *,
+    start_date,
+    end_date,
+    timeframe_resolution: str,
+    update_institutional_tracker: bool = True,
+):
+    data_stream = get_room2_polygon_pipeline(
+        ticker,
+        start_date=start_date,
+        end_date=end_date,
+        timeframe_resolution=timeframe_resolution,
+    )
+    if is_pipeline_signal(data_stream, "THROTTLE", POLYGON_REST_DATA_EMPTY):
+        return data_stream
 
-    if (
-        is_usable_data_stream(data_stream)
-        and update_institutional_tracker
-        and not micro_fast_track
-    ):
-        fetch_cloud_macro_intelligence(ticker_clean, yf_interval, data_stream)
-    elif update_institutional_tracker and not micro_fast_track:
-        st.session_state.forensic_institutional_tracker = {
-            "institutional_block_accumulation": False,
-            "inst_block_summary": "INST_BLOCK: CLOUD_PENDING",
-            "volume_baseline_20d": 0.0,
-            "peak_surge_ratio": 0.0,
-        }
-        st.session_state.forensic_form4_tracker = {
-            "insider_buy_detected": False,
-            "form4_summary": "FORM4: CLOUD_PENDING",
-            "insider_events": [],
-        }
-    elif micro_fast_track:
+    if not is_usable_data_stream(data_stream):
+        return POLYGON_REST_DATA_EMPTY
+
+    interval_token = {"1-Minute": "1m", "5-Minute": "5m", "15-Minute": "15m"}.get(
+        timeframe_resolution, "15m"
+    )
+    if update_institutional_tracker and timeframe_resolution != "1-Minute":
+        fetch_cloud_macro_intelligence(str(ticker).strip().upper(), interval_token, data_stream)
+    elif update_institutional_tracker:
         st.session_state.forensic_institutional_tracker = {
             "institutional_block_accumulation": False,
             "inst_block_summary": "INST_BLOCK: LOCAL_STRIKE_BYPASS",
@@ -2638,18 +2742,53 @@ def _get_historical_interval_data_impl(
             "form4_summary": "FORM4: LOCAL_STRIKE_BYPASS",
             "insider_events": [],
         }
-
     return data_stream
 
 
-def get_historical_5m_data(ticker):
-    """Local yfinance micro-interval wire — no Polygon quota consumed."""
-    return get_historical_interval_data(ticker, interval="5m", update_institutional_tracker=False)
+def _get_historical_interval_data_impl(
+    ticker,
+    interval="15m",
+    update_institutional_tracker=True,
+    force_yfinance_only=False,
+    micro_fast_track=False,
+    *,
+    start_date=None,
+    end_date=None,
+    timeframe_resolution: str | None = None,
+):
+    return get_historical_interval_data(
+        ticker,
+        interval=interval,
+        update_institutional_tracker=update_institutional_tracker,
+        force_yfinance_only=force_yfinance_only,
+        micro_fast_track=micro_fast_track,
+        start_date=start_date,
+        end_date=end_date,
+        timeframe_resolution=timeframe_resolution,
+    )
 
 
-def get_historical_15m_data(ticker):
-    """Backward-compatible 15m wrapper around the institutional interval wire."""
-    return get_historical_interval_data(ticker, interval="15m")
+def get_historical_5m_data(ticker, *, start_date=None, end_date=None):
+    """Polygon 1m macro-fetch + local 5m resample."""
+    return get_historical_interval_data(
+        ticker,
+        interval="5m",
+        update_institutional_tracker=False,
+        start_date=start_date,
+        end_date=end_date,
+        timeframe_resolution="5-Minute",
+    )
+
+
+def get_historical_15m_data(ticker, *, start_date=None, end_date=None):
+    """Polygon 1m macro-fetch + local 15m resample."""
+    return get_historical_interval_data(
+        ticker,
+        interval="15m",
+        start_date=start_date,
+        end_date=end_date,
+        timeframe_resolution="15-Minute",
+    )
 
 
 def _analyze_5m_micro_traps(data_5m, ticker: str) -> dict:

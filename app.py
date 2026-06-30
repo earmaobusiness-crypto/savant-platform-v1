@@ -14,7 +14,6 @@ import self_surgery
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-import yfinance as yf
 from groq import Groq
 
 if "layout_master_matrix_index" not in st.session_state:
@@ -696,13 +695,6 @@ def _dedupe_headlines(headlines: list[str], limit: int = 6) -> list[str]:
 def _fetch_news_wire(ticker: str) -> list[str]:
     headlines: list[str] = []
     try:
-        for item in (yf.Ticker(ticker).news or [])[:12]:
-            title = item.get("title", "")
-            if title:
-                headlines.append(title)
-    except Exception:
-        pass
-    try:
         q = urllib.parse.quote(f"{ticker} stock", safe="")
         rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
         resp = requests.get(rss_url, timeout=8, headers={"User-Agent": SEC_HEADERS["User-Agent"]})
@@ -719,17 +711,8 @@ def _fetch_news_wire(ticker: str) -> list[str]:
 def _fetch_sector_rotation() -> str:
     flows: list[tuple[str, str, float]] = []
     for sym, label in SECTOR_ETFS:
-        try:
-            info = yf.Ticker(sym).info or {}
-            chg = info.get("regularMarketChangePercent")
-            if chg is None and info.get("regularMarketPreviousClose"):
-                price = info.get("regularMarketPrice", info.get("currentPrice", 0.0)) or 0.0
-                prev = info.get("regularMarketPreviousClose") or 1.0
-                chg = ((price - prev) / prev) * 100
-            if chg is not None:
-                flows.append((sym, label, float(chg)))
-        except Exception:
-            continue
+        _ = (sym, label)
+        continue
     if not flows:
         st.session_state.sector_rotation_context = "SECTOR_FLOW:UNAVAILABLE"
         return st.session_state.sector_rotation_context
@@ -760,20 +743,8 @@ def _pearson_correlation(series_a: list[float], series_b: list[float]) -> float:
 
 
 def _price_velocity_array(symbol: str, periods: int = 20) -> list[float]:
-    try:
-        hist = yf.Ticker(symbol).history(period="2mo", interval="1d")
-        if hist is None or len(hist) < periods + 1:
-            return []
-        closes = [float(x) for x in hist["Close"].dropna().tolist()]
-        if len(closes) < periods + 1:
-            return []
-        velocity: list[float] = []
-        for i in range(-periods, 0):
-            prev = closes[i - 1]
-            velocity.append(((closes[i] - prev) / prev) * 100 if prev else 0.0)
-        return velocity
-    except Exception:
-        return []
+    _ = (symbol, periods)
+    return []
 
 
 def _compute_cross_asset_correlation(ticker: str) -> str:
@@ -850,12 +821,13 @@ def _compute_volatility_engine(
     ticker: str, price: float, session_vol: int, session_vwap: float,
 ) -> tuple[str, bool]:
     institutional_accumulation_detected = False
+    _ = ticker
     try:
-        hist = yf.Ticker(ticker).history(period="1mo", interval="1d")
-        if hist is None or getattr(hist, "empty", True) or len(hist) < 10:
+        frame = core_quantum._cached_polygon_1m_frame()
+        if frame is None or frame.empty or len(frame) < 10:
             return "VOL:INSUFFICIENT_HIST|VOLMOM:NORMAL|INST_ACCUM:FALSE", False
-        closes = [float(x) for x in hist["Close"].dropna().tolist()]
-        volumes = [float(x) for x in hist["Volume"].dropna().tolist()]
+        closes = [float(x) for x in frame["Close"].dropna().tolist()]
+        volumes = [float(x) for x in frame["Volume"].dropna().tolist()]
         if len(closes) < 10:
             return "VOL:INSUFFICIENT_HIST|VOLMOM:NORMAL|INST_ACCUM:FALSE", False
         _, rsi_ctx = _rsi_14(closes)
@@ -912,25 +884,26 @@ def _build_data_payload_string(
 
 
 def _fetch_tape_metrics(ticker):
-    """Fast yfinance read for UI metric cards — skips 12L engine on every rerun."""
+    """UI metric cards — Polygon-only pipeline defers live tape to session cache."""
     if not ticker:
         return 0.0, 0.0, "N/A", "N/A", "Unknown"
-    try:
-        ticker = ticker.upper()
-        info = yf.Ticker(ticker).info or {}
-        name = info.get("longName", info.get("shortName", ticker))
-        price = float(info.get("currentPrice", info.get("regularMarketPrice", 0.0)) or 0.0)
-        prev = float(info.get("regularMarketPreviousClose", 1.0) or 1.0)
-        pct = ((price - prev) / prev) * 100 if price and prev else 0.0
-        raw_vol = int(info.get("volume", info.get("regularMarketVolume", 0)) or 0)
-        vol = f"{raw_vol:,}" if raw_vol else "N/A"
-        high = float(info.get("dayHigh", price) or price)
-        low = float(info.get("dayLow", price) or price)
-        vwap_val = (high + low + price) / 3 if price else 0.0
-        vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
-        return price, pct, vol, vw_str, name
-    except Exception:
-        return 0.0, 0.0, "N/A", "N/A", ticker.upper()
+    ticker = ticker.upper()
+    frame = core_quantum._cached_polygon_1m_frame()
+    if frame is not None and not frame.empty:
+        try:
+            price = float(frame["Close"].iloc[-1])
+            prev = float(frame["Close"].iloc[-2]) if len(frame) > 1 else price
+            pct = ((price - prev) / prev) * 100 if prev else 0.0
+            raw_vol = int(frame["Volume"].iloc[-1])
+            vol = f"{raw_vol:,}" if raw_vol else "N/A"
+            high = float(frame["High"].iloc[-1])
+            low = float(frame["Low"].iloc[-1])
+            vwap_val = (high + low + price) / 3 if price else 0.0
+            vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
+            return price, pct, vol, vw_str, ticker
+        except Exception:
+            pass
+    return 0.0, 0.0, "N/A", "N/A", ticker
 
 
 def get_live_tape_data(ticker):
@@ -943,18 +916,13 @@ def get_live_tape_data(ticker):
         return 0.0, 0.0, "N/A", "N/A", "Unknown"
     try:
         ticker = ticker.upper()
-        ytk = yf.Ticker(ticker)
-        info = ytk.info or {}
-        name = info.get("longName", info.get("shortName", ticker))
-        price = float(info.get("currentPrice", info.get("regularMarketPrice", 0.0)) or 0.0)
-        prev = float(info.get("regularMarketPreviousClose", 1.0) or 1.0)
-        pct = ((price - prev) / prev) * 100 if price and prev else 0.0
-        raw_vol = int(info.get("volume", info.get("regularMarketVolume", 0)) or 0)
-        vol = f"{raw_vol:,}" if raw_vol else "N/A"
-        high = float(info.get("dayHigh", price) or price)
-        low = float(info.get("dayLow", price) or price)
-        vwap_val = (high + low + price) / 3 if price else 0.0
-        vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
+        price, pct, vol, vw_str, name = _fetch_tape_metrics(ticker)
+        raw_vol = 0
+        try:
+            raw_vol = int(str(vol).replace(",", "")) if vol not in ("N/A", "") else 0
+        except ValueError:
+            raw_vol = 0
+        vwap_val = float(str(vw_str).replace("$", "")) if vw_str not in ("N/A", "") else 0.0
 
         st.session_state.active_news_wire = _fetch_news_wire(ticker)
         sector_ctx = _fetch_sector_rotation()
@@ -1382,10 +1350,10 @@ def _processor_lane_readout(timeframe_resolution: str) -> str:
 
 
 def _micro_feed_readout_label() -> str:
-    source = st.session_state.get("r2_micro_feed_source", core_quantum.DATA_FEED_YFINANCE_1M)
+    source = st.session_state.get("r2_micro_feed_source", core_quantum.DATA_FEED_POLYGON_1M)
     if source == core_quantum.DATA_FEED_POLYGON_1M:
-        return "Polygon 1m REST (live aggs) · isolated from macro carousel"
-    return "yfinance 1m fallback · isolated from macro carousel"
+        return "Polygon 1m REST macro-dragnet · local 5m/15m resample"
+    return "Polygon REST pipeline"
 
 
 def _pattern_row_effective_fields(row: dict) -> dict:
@@ -2660,6 +2628,14 @@ def _handle_room2_deck_submit() -> None:
     st.rerun()
 
 
+def _session_date_label(raw_date) -> str:
+    if raw_date is None:
+        return "?"
+    if hasattr(raw_date, "strftime"):
+        return raw_date.strftime("%Y-%m-%d")
+    return str(raw_date)[:10]
+
+
 def _deploy_room2_deck() -> bool:
     """Harvest quantum math, vault payload, and lock matrix terminal output."""
     prefix = "r2_good"
@@ -2687,12 +2663,8 @@ def _deploy_room2_deck() -> bool:
     buffer_context_window = st.session_state.get(
         "r2_buffer_context_window", R2_BUFFER_WINDOWS["15-Minute"]
     )
-    yf_interval = _r2_yfinance_interval_from_mode(timeframe_resolution)
     data_feed_mode = _resolve_data_feed_mode(timeframe_resolution)
     st.session_state.r2_data_feed_mode = data_feed_mode
-    force_yfinance_track = _deck_dates_are_today(start_date, end_date) or (
-        timeframe_resolution == "1-Minute"
-    )
     micro_fast_track = timeframe_resolution == "1-Minute"
     st.session_state.r2_processor_lane = core_quantum.resolve_processor_lane(
         timeframe_resolution
@@ -2715,9 +2687,11 @@ def _deploy_room2_deck() -> bool:
 
         data_stream = core_quantum.get_historical_interval_data(
             ticker,
-            interval=yf_interval,
-            force_yfinance_only=force_yfinance_track,
+            interval=_r2_yfinance_interval_from_mode(timeframe_resolution),
             micro_fast_track=micro_fast_track,
+            start_date=start_date,
+            end_date=end_date,
+            timeframe_resolution=timeframe_resolution,
         )
         if micro_fast_track:
             data_feed_mode = _resolve_data_feed_mode(timeframe_resolution)
@@ -2730,9 +2704,20 @@ def _deploy_room2_deck() -> bool:
             st.session_state.matrix_satellites_ready = True
             return False
 
+        if core_quantum.is_pipeline_signal(data_stream, core_quantum.POLYGON_REST_DATA_EMPTY):
+            empty_text = (
+                f"⚠️ {core_quantum.POLYGON_REST_DATA_EMPTY} — No 1m bars for {ticker} "
+                f"on {_session_date_label(start_date)}–{_session_date_label(end_date)}. "
+                "Verify ticker symbol, Polygon key, and session dates."
+            )
+            st.session_state.quantum_terminal_output = empty_text
+            st.session_state.room2_quantum_report = empty_text
+            st.session_state.matrix_satellites_ready = True
+            return False
+
         if not core_quantum.is_usable_data_stream(data_stream):
             no_data_text = (
-                f"⚠️ [DATALINK: NO_DATA] No {yf_interval} bars for {ticker}. "
+                f"⚠️ [DATALINK: NO_DATA] No bars for {ticker} ({timeframe_resolution}). "
                 "Verify ticker symbol and market session dates."
             )
             st.session_state.quantum_terminal_output = no_data_text
@@ -2834,14 +2819,19 @@ def _deploy_room2_deck() -> bool:
             move_pct = quality.get("structural_move_pct", 0.0)
             if match_score >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
                 trash_text = (
-                    f"🛑 LATE-CHASE KILL — Layout match {match_score}% but runway "
-                    f"{move_pct:.2f}% below {floor_pct:.1f}% floor. "
+                    f"🛑 LATE-CHASE KILL — Layout match {match_score}% but net runway "
+                    f"{quality.get('net_margin_pct', move_pct):.2f}% below {floor_pct:.1f}% floor "
+                    f"(gross {move_pct:.2f}% − friction "
+                    f"{quality.get('execution_friction_buffer_pct', 0):.2f}%). "
                     "Reset to low-power tracking."
                 )
             else:
+                net = quality.get("net_margin_pct", move_pct)
+                friction = quality.get("execution_friction_buffer_pct", 0.0)
                 trash_text = (
-                    f"🗑️ PRE-STORAGE TRASH — Structural move {move_pct:.2f}% failed "
-                    f"{floor_pct:.1f}% minimum floor for {timeframe_resolution}. "
+                    f"🗑️ PRE-STORAGE TRASH — Net margin {net:.2f}% failed "
+                    f"{floor_pct:.1f}% strict alpha floor for {timeframe_resolution} "
+                    f"(gross {move_pct:.2f}% − slippage {friction:.2f}%). "
                     "Pattern rejected before vault mint."
                 )
             st.session_state.quantum_terminal_output = trash_text
