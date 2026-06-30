@@ -24,9 +24,15 @@ ANOMALY_SHELF_DAYS = 30
 ANOMALY_PERMANENT_MINT_COUNT = 5
 TIMEFRAME_MARGIN_FLOORS = {
     "1-Minute": 1.0,
-    "5-Minute": 3.0,
+    "5-Minute": 6.0,
     "15-Minute": 5.0,
 }
+EXECUTION_FRICTION_SLIPPAGE_MIN = 0.5
+EXECUTION_FRICTION_SLIPPAGE_MAX = 1.5
+HILL_BYPASS_LOCAL_BARS = 6
+HILL_MARGIN_SHRINK_MIN_PCT = 0.25
+HILL_DROP_MIN_PCT = 0.35
+MORNING_BASELINE_BARS = 30
 LOOKBACK_DELTAS = {
     "1-Minute": datetime.timedelta(minutes=5),
     "5-Minute": datetime.timedelta(hours=12),
@@ -604,20 +610,37 @@ def run_full_day_forensic_dragnet(
 def enforce_permanent_library_profit_floor(quality: dict) -> dict:
     """
     Non-negotiable tiered quality gate before permanent library save.
-    1m >= 1.0%, 5m >= 3.0%, 15m >= 5.0% — trash instantly below floor.
+    1m >= 1.0%, 5m >= 6.0% (strict alpha), 15m >= 5.0%.
+    When net_margin_pct is present, friction-adjusted margin must clear the floor.
     """
     out = dict(quality or {})
     tf = str(out.get("timeframe_resolution") or "15-Minute")
     floor_pct = float(out.get("floor_pct") or timeframe_margin_floor(tf))
     move_pct = float(out.get("structural_move_pct") or 0.0)
-    passed = move_pct >= floor_pct
+    friction_pct = float(out.get("execution_friction_buffer_pct") or 0.0)
+    net_margin_pct = out.get("net_margin_pct")
+    if net_margin_pct is not None:
+        effective_move = float(net_margin_pct)
+    elif friction_pct > 0:
+        effective_move = move_pct - friction_pct
+        out["net_margin_pct"] = round(effective_move, 4)
+    else:
+        effective_move = move_pct
+    passed = effective_move >= floor_pct
     out["floor_pct"] = floor_pct
     out["passed"] = passed
     out["trashed"] = not passed
     if not passed:
-        out["trash_reason"] = (
-            f"BELOW_TIERED_FLOOR|move={move_pct:.4f}%|required={floor_pct:.1f}%|tf={tf}"
-        )
+        if friction_pct > 0 and net_margin_pct is not None:
+            out["trash_reason"] = (
+                f"BELOW_NET_ALPHA_FLOOR|gross={move_pct:.4f}%|"
+                f"friction={friction_pct:.4f}%|net={effective_move:.4f}%|"
+                f"required={floor_pct:.1f}%|tf={tf}"
+            )
+        else:
+            out["trash_reason"] = (
+                f"BELOW_TIERED_FLOOR|move={move_pct:.4f}%|required={floor_pct:.1f}%|tf={tf}"
+            )
     return out
 
 
@@ -668,8 +691,143 @@ def _candidate_volume_std_anchor(window) -> tuple[object | None, float | None]:
     return idx, float(window.loc[idx, "Close"])
 
 
+def _candidate_velocity_spike_anchor(window) -> tuple[object | None, float | None]:
+    """Candidate B — bar with the sharpest price-velocity spike vs rolling std envelope."""
+    if window.empty or "Close" not in window.columns:
+        return None, None
+    closes = window["Close"].astype(float)
+    if len(closes) < 2:
+        idx = window.index[0]
+        return idx, float(closes.iloc[0])
+    velocity = closes.pct_change().abs() * 100.0
+    roll = min(5, len(velocity))
+    vel_mean = velocity.rolling(window=roll, min_periods=1).mean().fillna(0.0)
+    vel_std = velocity.rolling(window=roll, min_periods=1).std().fillna(0.0)
+    envelope = (vel_mean + vel_std).replace(0.0, float("nan"))
+    spike_score = (velocity / envelope).fillna(0.0)
+    idx = spike_score.idxmax()
+    return idx, float(window.loc[idx, "Close"])
+
+
+def _immediate_structural_low_after(window, anchor_idx, bars_ahead: int = HILL_BYPASS_LOCAL_BARS):
+    """Next localized swing low immediately after a candidate bar."""
+    if anchor_idx is None or window.empty:
+        return None, None
+    try:
+        pos = window.index.get_loc(anchor_idx)
+        if isinstance(pos, slice):
+            pos = pos.start or 0
+        elif hasattr(pos, "__len__") and not isinstance(pos, int):
+            pos = int(pos[0]) if len(pos) else 0
+        forward = window.iloc[int(pos) + 1 : int(pos) + 1 + bars_ahead]
+        if not isinstance(forward, pd.DataFrame) or forward.empty:
+            return None, None
+        if "Low" in forward.columns:
+            lows = forward["Low"].astype(float)
+            low_idx = lows.idxmin()
+            return low_idx, float(forward.loc[low_idx, "Low"])
+        closes = forward["Close"].astype(float)
+        low_idx = closes.idxmin()
+        return low_idx, float(closes.loc[low_idx])
+    except Exception:
+        return None, None
+
+
+def _hill_trap_shrinks_margin(
+    window,
+    anchor_idx,
+    anchor_price: float,
+    exit_price: float | None,
+) -> bool:
+    """True when a short-lived hill peak collapses margin vs the next structural low."""
+    if anchor_price is None or exit_price is None or anchor_price <= 0:
+        return False
+    _, low_price = _immediate_structural_low_after(window, anchor_idx)
+    if low_price is None or low_price >= anchor_price:
+        return False
+    drop_pct = (float(anchor_price) - float(low_price)) / float(anchor_price) * 100.0
+    margin_at_peak = _entry_margin_pct(anchor_price, exit_price)
+    margin_at_low = _entry_margin_pct(low_price, exit_price)
+    shrink = margin_at_peak - margin_at_low
+    return drop_pct >= HILL_DROP_MIN_PCT and shrink >= HILL_MARGIN_SHRINK_MIN_PCT
+
+
+def _morning_volume_baseline_envelope(window) -> dict:
+    """Morning-session volume mean/std envelope for liquidity ignition guard."""
+    if window.empty or "Volume" not in window.columns:
+        return {"mean": 0.0, "std": 0.0, "floor": 0.0}
+    n = min(MORNING_BASELINE_BARS, max(3, len(window) // 3))
+    early = window["Volume"].iloc[:n].astype(float).fillna(0.0)
+    mu = float(early.mean()) if len(early) else 0.0
+    sigma = float(early.std()) if len(early) > 1 else 0.0
+    return {"mean": mu, "std": sigma, "floor": max(0.0, mu - sigma)}
+
+
+def _local_volume_at(window, bar_idx) -> float:
+    if bar_idx is None or window.empty or "Volume" not in window.columns:
+        return 0.0
+    try:
+        return float(window.loc[bar_idx, "Volume"])
+    except Exception:
+        return 0.0
+
+
+def _volatility_ignition_anchor(window, search_from_idx=None) -> tuple[object | None, float | None]:
+    """
+    Volatility Ignition — price velocity breaks above std envelope on expanding volume.
+    """
+    if window.empty or "Close" not in window.columns or "Volume" not in window.columns:
+        return None, None
+    subset = window
+    if search_from_idx is not None:
+        try:
+            subset = window[window.index >= search_from_idx]
+        except Exception:
+            subset = window
+    if subset.empty or len(subset) < 2:
+        return None, None
+    closes = subset["Close"].astype(float)
+    vols = subset["Volume"].astype(float).fillna(0.0)
+    velocity = closes.pct_change().abs() * 100.0
+    roll = min(5, len(subset))
+    vel_mean = velocity.rolling(window=roll, min_periods=1).mean().fillna(0.0)
+    vel_std = velocity.rolling(window=roll, min_periods=1).std().fillna(0.0)
+    vol_mean = vols.rolling(window=roll, min_periods=1).mean().fillna(0.0)
+    vol_std = vols.rolling(window=roll, min_periods=1).std().fillna(0.0)
+    for idx in subset.index:
+        v = velocity.loc[idx] if idx in velocity.index else float("nan")
+        if pd.isna(v):
+            continue
+        env_high = float(vel_mean.loc[idx] + vel_std.loc[idx])
+        vol_expand = float(vols.loc[idx]) >= float(vol_mean.loc[idx] + 0.5 * vol_std.loc[idx])
+        if env_high > 0 and float(v) > env_high and vol_expand:
+            return idx, float(subset.loc[idx, "Close"])
+    return None, None
+
+
+def _execution_friction_buffer_pct(window) -> float:
+    """Simulated slippage buffer (0.5%–1.5%) from spread thickness."""
+    if window is None or (isinstance(window, pd.DataFrame) and window.empty):
+        return EXECUTION_FRICTION_SLIPPAGE_MIN
+    if not isinstance(window, pd.DataFrame):
+        return EXECUTION_FRICTION_SLIPPAGE_MIN
+    if "High" not in window.columns or "Low" not in window.columns or "Close" not in window.columns:
+        return EXECUTION_FRICTION_SLIPPAGE_MIN
+    spread_pct = (
+        (window["High"].astype(float) - window["Low"].astype(float))
+        / window["Close"].astype(float).replace(0.0, float("nan"))
+        * 100.0
+    )
+    mean_spread = float(spread_pct.mean(skipna=True) or 0.0)
+    lo_sp, hi_sp = 0.05, 1.5
+    t = max(0.0, min(1.0, (mean_spread - lo_sp) / (hi_sp - lo_sp)))
+    return EXECUTION_FRICTION_SLIPPAGE_MIN + t * (
+        EXECUTION_FRICTION_SLIPPAGE_MAX - EXECUTION_FRICTION_SLIPPAGE_MIN
+    )
+
+
 def _candidate_manual_anchor(window, manual_entry_dt) -> tuple[object | None, float | None]:
-    """Candidate B — operator-clicked entry coordinate."""
+    """Operator-clicked coordinate — reference only; hill-bypass may reject if on a trap."""
     if manual_entry_dt is None:
         return None, None
     try:
@@ -712,8 +870,9 @@ def resolve_adaptive_entry_anchor(
     timeframe_resolution: str = "15-Minute",
 ) -> dict:
     """
-    Multi-candidate adaptive entry optimizer — volume std, manual, structure baseline.
-    Floor-aware disqualification; winner = lowest-priced earliest valid candidate.
+    Multi-candidate adaptive entry optimizer with hill bypass + liquidity ignition guard.
+    A = volume peak, B = velocity spike, C = macro structural low.
+    Hill traps on A/B force rewind to C; illiquid C shifts to volatility ignition minute.
     """
     floor = float(floor_pct if floor_pct is not None else timeframe_margin_floor(timeframe_resolution))
     window = _lookback_window_frame(data_stream, exit_dt, lookback_start_dt)
@@ -730,12 +889,27 @@ def resolve_adaptive_entry_anchor(
 
     raw_exit = exit_price if exit_price is not None else _price_at_datetime(data_stream, exit_dt)
     vol_idx, vol_price = _candidate_volume_std_anchor(window)
-    manual_idx, manual_price = _candidate_manual_anchor(window, manual_entry_dt)
+    vel_idx, vel_price = _candidate_velocity_spike_anchor(window)
     struct_idx, struct_price = _candidate_structure_baseline(window, vol_idx)
+    manual_idx, manual_price = _candidate_manual_anchor(window, manual_entry_dt)
+    morning_env = _morning_volume_baseline_envelope(window)
+
+    idx_by_label = {
+        "volume_std_anchor": vol_idx,
+        "velocity_spike_anchor": vel_idx,
+        "structure_baseline": struct_idx,
+        "manual_anchor": manual_idx,
+    }
+    price_by_label = {
+        "volume_std_anchor": vol_price,
+        "velocity_spike_anchor": vel_price,
+        "structure_baseline": struct_price,
+        "manual_anchor": manual_price,
+    }
 
     raw_candidates = (
         ("volume_std_anchor", vol_idx, vol_price),
-        ("manual_anchor", manual_idx, manual_price),
+        ("velocity_spike_anchor", vel_idx, vel_price),
         ("structure_baseline", struct_idx, struct_price),
     )
     scored: list[dict] = []
@@ -753,7 +927,19 @@ def resolve_adaptive_entry_anchor(
             )
             continue
         margin = _entry_margin_pct(price, raw_exit)
+        disqualified_reason = None
         qualified = margin >= floor
+        if not qualified:
+            disqualified_reason = "below_floor_late_chase"
+        elif label in ("volume_std_anchor", "velocity_spike_anchor"):
+            if _hill_trap_shrinks_margin(window, ts, price, raw_exit):
+                qualified = False
+                disqualified_reason = "hill_trap_macro_rewind"
+        elif label == "structure_baseline":
+            local_vol = _local_volume_at(window, ts)
+            if local_vol < float(morning_env.get("floor", 0.0)):
+                qualified = False
+                disqualified_reason = "illiquid_dead_zone"
         scored.append(
             {
                 "id": label,
@@ -761,31 +947,98 @@ def resolve_adaptive_entry_anchor(
                 "price": round(float(price), 6),
                 "margin_pct": round(margin, 4),
                 "qualified": qualified,
-                "disqualified_reason": None if qualified else "below_floor_late_chase",
+                "disqualified_reason": disqualified_reason,
             }
         )
 
+    hill_rewind = False
+    liquidity_ignition = False
     qualified = [c for c in scored if c.get("qualified") and c.get("price") is not None]
-    if not qualified:
+
+    winner_label: str | None = None
+    winner_ts: str | None = None
+    winner_price: float | None = None
+
+    if qualified:
+        winner = min(qualified, key=lambda c: (float(c["price"]), str(c["timestamp"])))
+        winner_label = winner["id"]
+        winner_ts = winner["timestamp"]
+        winner_price = float(winner["price"])
+        winner_idx = idx_by_label.get(winner_label)
+        if winner_label in ("volume_std_anchor", "velocity_spike_anchor"):
+            if _hill_trap_shrinks_margin(window, winner_idx, winner_price, raw_exit):
+                hill_rewind = True
+                struct_c = next((c for c in scored if c["id"] == "structure_baseline"), None)
+                if struct_c and struct_c.get("price") is not None:
+                    struct_margin = _entry_margin_pct(struct_c["price"], raw_exit)
+                    if struct_margin >= floor:
+                        local_vol = _local_volume_at(window, struct_idx)
+                        if local_vol >= float(morning_env.get("floor", 0.0)):
+                            winner_label = "structure_baseline"
+                            winner_ts = struct_c["timestamp"]
+                            winner_price = float(struct_c["price"])
+                        else:
+                            ign_idx, ign_price = _volatility_ignition_anchor(window, struct_idx)
+                            if ign_idx is not None and ign_price is not None:
+                                ign_margin = _entry_margin_pct(ign_price, raw_exit)
+                                if ign_margin >= floor:
+                                    winner_label = "volatility_ignition"
+                                    winner_ts = str(ign_idx)
+                                    winner_price = float(ign_price)
+                                    liquidity_ignition = True
+        elif winner_label == "structure_baseline":
+            local_vol = _local_volume_at(window, struct_idx)
+            if local_vol < float(morning_env.get("floor", 0.0)):
+                ign_idx, ign_price = _volatility_ignition_anchor(window, struct_idx)
+                if ign_idx is not None and ign_price is not None:
+                    ign_margin = _entry_margin_pct(ign_price, raw_exit)
+                    if ign_margin >= floor:
+                        winner_label = "volatility_ignition"
+                        winner_ts = str(ign_idx)
+                        winner_price = float(ign_price)
+                        liquidity_ignition = True
+                    else:
+                        winner_label = None
+                        winner_ts = None
+                        winner_price = None
+
+    if winner_label is None or winner_price is None:
+        ign_idx, ign_price = _volatility_ignition_anchor(window, struct_idx or vol_idx)
+        if ign_idx is not None and ign_price is not None:
+            ign_margin = _entry_margin_pct(ign_price, raw_exit)
+            if ign_margin >= floor:
+                winner_label = "volatility_ignition"
+                winner_ts = str(ign_idx)
+                winner_price = float(ign_price)
+                liquidity_ignition = True
+
+    if winner_label is None or winner_price is None:
         st.session_state.room2_entry_optimizer = {
             "selected_candidate": None,
             "candidates": scored,
             "floor_pct": floor,
             "downhill_pivot": False,
+            "hill_bypass_rewind": hill_rewind,
+            "liquidity_ignition": False,
+            "morning_volume_envelope": morning_env,
         }
         return {**empty_result, "candidates": scored}
 
-    winner = min(qualified, key=lambda c: (float(c["price"]), str(c["timestamp"])))
-    winner_label = winner["id"]
-    winner_ts = winner["timestamp"]
-    winner_price = float(winner["price"])
-
+    winner_margin = _entry_margin_pct(winner_price, raw_exit)
     meta = {
         "selected_candidate": winner_label,
         "candidates": scored,
         "floor_pct": floor,
-        "downhill_pivot": winner_label != "volume_std_anchor",
-        "winner_margin_pct": winner.get("margin_pct"),
+        "downhill_pivot": winner_label not in ("volume_std_anchor", "velocity_spike_anchor"),
+        "hill_bypass_rewind": hill_rewind,
+        "liquidity_ignition": liquidity_ignition,
+        "morning_volume_envelope": morning_env,
+        "winner_margin_pct": round(winner_margin, 4),
+        "manual_anchor_reference": (
+            {"timestamp": str(manual_idx), "price": round(float(manual_price), 6)}
+            if manual_idx is not None and manual_price is not None
+            else None
+        ),
     }
     st.session_state.room2_entry_optimizer = meta
 
@@ -991,8 +1244,8 @@ def evaluate_playbook_quality_barrier(
     timeframe_resolution: str,
 ) -> dict:
     """
-    Pre-storage quality gate: anchor hunt + tiered structural move floors.
-    1m >= 1.0%, 5m >= 3.0%, 15m >= 5.0%.
+    Pre-storage quality gate: hill bypass + liquidity ignition anchor + tiered floors.
+    1m >= 1.0%, 5m >= 6.0% strict alpha (net of slippage), 15m >= 5.0%.
     """
     floor_pct = timeframe_margin_floor(timeframe_resolution)
     end_dt = _parse_session_datetime(end_date, end_time)
@@ -1038,11 +1291,16 @@ def evaluate_playbook_quality_barrier(
         if exit_price and anchor_price:
             structural_move_pct = abs((exit_price - anchor_price) / anchor_price * 100)
 
-    passed = structural_move_pct >= floor_pct
+    gate_window = _lookback_window_frame(data_stream, end_dt, anchor_search_start)
+    friction_pct = _execution_friction_buffer_pct(gate_window)
+    net_margin_pct = round(structural_move_pct - friction_pct, 4)
+    passed = net_margin_pct >= floor_pct
     quality = {
         "passed": passed,
         "trashed": not passed,
         "structural_move_pct": round(structural_move_pct, 4),
+        "execution_friction_buffer_pct": round(friction_pct, 4),
+        "net_margin_pct": net_margin_pct,
         "floor_pct": floor_pct,
         "anchor_timestamp": str(anchor_ts) if anchor_ts is not None else None,
         "anchor_price": anchor_price,
@@ -1055,6 +1313,12 @@ def evaluate_playbook_quality_barrier(
         "entry_optimizer": entry_resolution.get("optimizer_meta")
         or st.session_state.get("room2_entry_optimizer", {}),
         "entry_candidate_selected": entry_resolution.get("selected_candidate"),
+        "hill_bypass_rewind": bool(
+            (entry_resolution.get("optimizer_meta") or {}).get("hill_bypass_rewind")
+        ),
+        "liquidity_ignition": bool(
+            (entry_resolution.get("optimizer_meta") or {}).get("liquidity_ignition")
+        ),
     }
     return enforce_permanent_library_profit_floor(quality)
 

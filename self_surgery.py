@@ -172,6 +172,16 @@ def _vector_align_score(a: list[float], b: list[float]) -> float:
     return core_quantum._cosine_similarity(a, b)
 
 
+def _effective_margin_from_quality(quality: dict) -> tuple[float, float, float]:
+    """Return (gross_move, friction_buffer, net_margin) for elevated gate checks."""
+    gross = float(quality.get("structural_move_pct") or 0.0)
+    friction = float(quality.get("execution_friction_buffer_pct") or 0.0)
+    net = quality.get("net_margin_pct")
+    if net is None:
+        net = gross - friction if friction > 0 else gross
+    return gross, friction, float(net)
+
+
 def _analyze_breakdown_deltas(
     benched: dict,
     *,
@@ -179,14 +189,23 @@ def _analyze_breakdown_deltas(
     feature_vector: list[float] | None,
     structural_move_pct: float,
     floor_pct: float,
+    net_margin_pct: float | None = None,
+    execution_friction_buffer_pct: float | None = None,
 ) -> dict:
     """Isolate fluid variables that diverged vs the benched Historical Observation Profile."""
     snapshot_env = benched.get("metric_envelopes") or {}
     fresh_env = metric_envelopes or {}
+    effective_margin = (
+        float(net_margin_pct)
+        if net_margin_pct is not None
+        else float(structural_move_pct)
+    )
     deltas: dict[str, Any] = {
         "structural_move_pct": round(float(structural_move_pct), 4),
+        "net_margin_pct": round(effective_margin, 4),
+        "execution_friction_buffer_pct": round(float(execution_friction_buffer_pct or 0.0), 4),
         "floor_pct": round(float(floor_pct), 4),
-        "below_floor": structural_move_pct < floor_pct,
+        "below_floor": effective_margin < floor_pct,
         "shifted_fields": [],
     }
     for field in ("volume", "velocity_pct", "spread_pct"):
@@ -374,8 +393,8 @@ def attempt_genetic_recycling_on_fresh_deploy(
     floor_pct = float(
         quality.get("floor_pct") or core_quantum.timeframe_margin_floor(timeframe_resolution)
     )
-    move_pct = float(quality.get("structural_move_pct") or 0.0)
-    if move_pct < floor_pct:
+    _, friction, net_margin = _effective_margin_from_quality(quality)
+    if net_margin < floor_pct:
         return None
 
     bay = dict(st.session_state.get("purgatory_repair_bay") or {})
@@ -393,8 +412,10 @@ def attempt_genetic_recycling_on_fresh_deploy(
             profile,
             metric_envelopes=metric_envelopes,
             feature_vector=feature_vector,
-            structural_move_pct=move_pct,
+            structural_move_pct=float(quality.get("structural_move_pct") or 0.0),
             floor_pct=floor_pct,
+            net_margin_pct=net_margin,
+            execution_friction_buffer_pct=friction,
         )
         profile["breakdown_last"] = breakdown
 
