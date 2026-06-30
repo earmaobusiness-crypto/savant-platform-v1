@@ -25,12 +25,7 @@ WEBSOCKET_STREAMING_DISABLED = True
 FIVE_MINUTE_DRAGNET_BARS = 36
 ONE_MINUTE_DRAGNET_BARS = 5
 FIFTEEN_MINUTE_DRAGNET_BARS = 48
-TELEMETRY_SHOW_LINE_DELAYS = {
-    "1-Minute": 0.05,
-    "5-Minute": 0.15,
-    "15-Minute": 0.30,
-}
-TELEMETRY_SHOW_LANE_BARS = {
+PROCESSING_LANE_BARS = {
     "1-Minute": ONE_MINUTE_DRAGNET_BARS,
     "5-Minute": FIVE_MINUTE_DRAGNET_BARS,
     "15-Minute": FIFTEEN_MINUTE_DRAGNET_BARS,
@@ -3925,89 +3920,251 @@ def _build_matrix_execution_readout(
     return "\n".join(header + context_section + extras + footer)
 
 
-def telemetry_show_delay_for_timeframe(timeframe_resolution: str) -> float:
-    """Per-line typewriter delay for Window 1 cinematic telemetry."""
-    return float(TELEMETRY_SHOW_LINE_DELAYS.get(timeframe_resolution, 0.15))
+def _processing_timestamp() -> str:
+    now = datetime.datetime.now()
+    return now.strftime("%H:%M:%S.") + f"{now.microsecond // 1000:03d}"
 
 
-def telemetry_show_lane_bar_count(timeframe_resolution: str) -> int:
-    """Relative lookback lane depth that governs show pacing."""
-    return int(TELEMETRY_SHOW_LANE_BARS.get(timeframe_resolution, FIVE_MINUTE_DRAGNET_BARS))
+def reset_processing_heartbeat() -> None:
+    """Clear Window 1 and arm live processor telemetry."""
+    st.session_state.matrix_processing_active = True
+    st.session_state.matrix_processing_logs = []
+    st.session_state.quantum_terminal_output = ""
 
 
-def build_cinematic_telemetry_lines(
+def emit_processing_heartbeat(line: str, *, detail: str = "") -> None:
+    """Append a timestamped log line the instant local CPU finishes a pipeline stage."""
+    if line:
+        entry = f"[{_processing_timestamp()}] {line}"
+        if detail:
+            entry = f"{entry}\n   └ {detail}"
+    elif detail:
+        entry = f"   └ {detail}"
+    else:
+        return
+    logs = list(st.session_state.get("matrix_processing_logs") or [])
+    logs.append(entry)
+    st.session_state.matrix_processing_logs = logs
+    st.session_state.quantum_terminal_output = "\n".join(logs)
+
+
+def flash_processing_fault(message: str) -> None:
+    """Hard-stop fault — bypass heartbeat and show the error immediately."""
+    st.session_state.matrix_processing_active = False
+    st.session_state.matrix_processing_logs = []
+    st.session_state.quantum_terminal_output = message
+
+
+def complete_processing_heartbeat(final_terminal: str) -> None:
+    """Snap final validated readout when live computations conclude."""
+    st.session_state.matrix_processing_active = False
+    st.session_state.quantum_terminal_output = final_terminal
+
+
+def processing_lane_bar_target(timeframe_resolution: str) -> int:
+    return int(PROCESSING_LANE_BARS.get(timeframe_resolution, FIVE_MINUTE_DRAGNET_BARS))
+
+
+def _rsi_last(closes, period: int = 14) -> float | None:
+    if closes is None or len(closes) < period + 1:
+        return None
+    try:
+        delta = closes.astype(float).diff()
+        gain = delta.clip(lower=0).rolling(window=period, min_periods=period).mean()
+        loss = (-delta.clip(upper=0)).rolling(window=period, min_periods=period).mean()
+        rs = gain / loss.replace(0, pd.NA)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        val = rsi.iloc[-1]
+        return round(float(val), 2) if pd.notna(val) else None
+    except Exception:
+        return None
+
+
+def _sma_last(closes, period: int = 20) -> float | None:
+    if closes is None or len(closes) < period:
+        return None
+    try:
+        val = closes.astype(float).rolling(window=period, min_periods=period).mean().iloc[-1]
+        return round(float(val), 4) if pd.notna(val) else None
+    except Exception:
+        return None
+
+
+def _session_boundary_digest_logs(frame) -> list[str]:
+    """Emit boundary-crossing digests when the lane spans session walls."""
+    logs: list[str] = []
+    if frame is None or _dataframe_is_empty(frame):
+        return logs
+    prev_date = None
+    prev_hour = None
+    for ts in frame.index:
+        try:
+            cur_date = ts.date()
+            cur_hour = ts.hour
+        except Exception:
+            continue
+        if prev_date is not None and cur_date != prev_date:
+            logs.append(
+                f"🌉 midnight roll at {ts.strftime('%Y-%m-%d %H:%M')} — "
+                "multi-hour lane stitched across session wall"
+            )
+        elif prev_hour is not None and cur_hour != prev_hour and cur_date == prev_date:
+            logs.append(
+                f"🕐 hour boundary {prev_hour:02d}→{cur_hour:02d} at "
+                f"{ts.strftime('%H:%M')} — macro brick resampled"
+            )
+        prev_date = cur_date
+        prev_hour = cur_hour
+    return logs
+
+
+def emit_parsing_telemetry(
+    data_stream,
     *,
-    ticker: str,
     timeframe_resolution: str,
-    bar_count: int = 0,
-    metric_envelopes: dict | None = None,
+    bar_count: int,
     start_norm: str | None = None,
     end_norm: str | None = None,
-    api_base: str = MASSIVE_API_BASE,
-    form4_summary: str = "",
-) -> list[str]:
-    """
-    Phase A (internet ingest) + Phase B (local processing) line script for Window 1.
-    Lane depth and boundary alerts scale with the active timeframe track.
-    """
-    ticker_clean = str(ticker or "").strip().upper()
-    lane_bars = bar_count or telemetry_show_lane_bar_count(timeframe_resolution)
-    host = str(api_base or MASSIVE_API_BASE).replace("https://", "").replace("http://", "")
-    envelopes = metric_envelopes if isinstance(metric_envelopes, dict) else {}
-    vol_env = envelopes.get("three_hour_volume_envelope") or envelopes.get("volume_baseline_3h")
-    vol_sd = envelopes.get("volume_sd") or envelopes.get("vol_sd")
-    rsi_hint = envelopes.get("rsi_lane") or envelopes.get("rsi")
-    sma_hint = envelopes.get("sma_lane") or envelopes.get("sma")
-
-    phase_a: list[str] = [
-        "── PHASE A · INTERNET INGEST ──────────────────",
-        f"📡 INGESTION CORE: Connected to ://{host}...",
-        f"🌐 MASSIVE REST AGGREGATES: 1m historical package armed for {ticker_clean}...",
-        f"🛰️ NET LANE: Operator window {start_norm or '?'} → {end_norm or '?'} locked.",
-        "📂 SEC EDGAR: Scraping company facts + XBRL wire...",
-        f"📋 FORM 4 TRACKER: {(form4_summary or 'Insider ledger scrape queued...')[:52]}",
-        "🧬 VECTOR DNA: Fusing Price Velocity, Vol-SD, VWAP, and SEC FinBERT...",
-    ]
-
-    phase_b: list[str] = [
-        "── PHASE B · LOCAL PROCESSING CORE ────────────",
-        "🔀 RESAMPLING METRICS: Normalizing timezones and stripping offsets...",
-        f"📊 LANE ARRAY: {lane_bars} bars in {timeframe_resolution} relative dragnet.",
-        "📦 3-HOUR VOLUME ENVELOPE: Computing σ-band from local pandas array...",
-    ]
-    if vol_env is not None:
-        phase_b.append(f"   └ σ-envelope baseline locked: {vol_env}")
-    elif vol_sd is not None:
-        phase_b.append(f"   └ volume σ-vector fused: {vol_sd}")
-    else:
-        phase_b.append("   └ σ-envelope: rolling 3h window from resampled volume lane...")
-
-    phase_b.append("📈 RSI VECTOR: Rolling relative-strength array fused to lane...")
-    if rsi_hint is not None:
-        phase_b.append(f"   └ RSI lane state: {rsi_hint}")
-    phase_b.append("📉 SMA ARRAY: Local simple moving averages on resampled OHLCV...")
-    if sma_hint is not None:
-        phase_b.append(f"   └ SMA stack: {sma_hint}")
-
+) -> None:
+    """Log parsing/resampling work proportional to the active lane depth."""
+    emit_processing_heartbeat(
+        "⚙️ PARSING: Normalizing timezones, dropping metadata, and restructuring lookback lane arrays...",
+        detail=(
+            f"{bar_count} bars · {timeframe_resolution} lane · "
+            f"window {start_norm or '?'} → {end_norm or '?'}"
+        ),
+    )
+    frame = _ensure_dataframe(data_stream)
+    if frame is None:
+        return
     if timeframe_resolution == "1-Minute":
-        for i in range(1, lane_bars + 1):
-            phase_b.append(f"⚡ STRIKE BAR {i}/{lane_bars}: 1m ignition probe...")
+        for i, ts in enumerate(frame.index[:processing_lane_bar_target(timeframe_resolution)], start=1):
+            emit_processing_heartbeat(
+                "",
+                detail=f"strike lane [{i}/{bar_count}] @ {ts.strftime('%H:%M')} tz-stripped",
+            )
     elif timeframe_resolution == "5-Minute":
-        for cp in (1, 9, 18, 27, lane_bars):
-            phase_b.append(f"🔍 RELATIVE LANE {cp}/{lane_bars}: Excavating resampled brick...")
-    else:
-        phase_b.extend(
-            [
-                "🌉 BOUNDARY ALERT: Regular session wall bypass active...",
-                "🌉 BOUNDARY ALERT: Post-market bridge merged into multi-hour dragnet...",
-                "🌉 BOUNDARY ALERT: Midnight roll — macro lane intact across sessions...",
-            ]
+        indices = list(frame.index)
+        checkpoints = sorted(
+            {0, len(indices) // 4, len(indices) // 2, (3 * len(indices)) // 4, len(indices) - 1}
         )
-        for cp in (1, 12, 24, 36, lane_bars):
-            phase_b.append(f"🔭 MACRO LANE {cp}/{lane_bars}: Deep structural scan...")
+        for pos in checkpoints:
+            if pos < 0 or pos >= len(indices):
+                continue
+            ts = indices[pos]
+            emit_processing_heartbeat(
+                "",
+                detail=f"relative lane [{pos + 1}/{bar_count}] @ {ts.strftime('%H:%M')} resampled",
+            )
+    else:
+        for boundary in _session_boundary_digest_logs(frame):
+            emit_processing_heartbeat("", detail=boundary)
+        indices = list(frame.index)
+        stride = max(1, len(indices) // 6)
+        for pos in range(0, len(indices), stride):
+            ts = indices[pos]
+            emit_processing_heartbeat(
+                "",
+                detail=f"macro lane [{pos + 1}/{bar_count}] @ {ts.strftime('%m-%d %H:%M')} digested",
+            )
 
-    phase_b.append("✅ LOCAL CORE: Validation arrays synchronized — vault write queued...")
-    return phase_a + phase_b
+
+def emit_calculating_telemetry(
+    data_stream,
+    *,
+    timeframe_resolution: str,
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+) -> dict:
+    """
+    Run local 4-layer feature math and emit logs as each array completes.
+    Returns the 3-hour volume envelope dict for downstream ignition checks.
+    """
+    emit_processing_heartbeat(
+        "🧮 CALCULATING: Generating relative 3-hour volume standard deviation envelopes, "
+        "RSI indices, and SMA vectors...",
+    )
+    end_dt = _parse_session_datetime(end_date, end_time)
+    start_dt = _parse_session_datetime(start_date, start_time)
+    frame = _ensure_dataframe(data_stream)
+    bar_count = len(frame) if frame is not None and not frame.empty else 0
+
+    baseline_window = None
+    if timeframe_resolution == "1-Minute" and start_dt is not None:
+        _, baseline_window = _dynamic_1m_dragnet_window(data_stream, start_dt)
+    elif timeframe_resolution == "5-Minute" and start_dt is not None:
+        _, baseline_window = _dynamic_5m_dragnet_window(data_stream, start_dt)
+    elif end_dt is not None:
+        lookback_start = _calibrated_lookback_start(
+            end_dt, timeframe_resolution, start_dt=start_dt, data_stream=data_stream
+        )
+        if lookback_start is not None:
+            baseline_window = _lookback_window_frame(data_stream, end_dt, lookback_start)
+
+    envelope = _three_hour_baseline_envelope(baseline_window)
+    emit_processing_heartbeat(
+        "",
+        detail=(
+            f"3h volume σ-envelope μ={envelope['mean']:.0f} σ={envelope['std']:.0f} "
+            f"floor={envelope['floor']:.0f}"
+        ),
+    )
+
+    if frame is not None and "Close" in frame.columns:
+        closes = frame["Close"]
+        rsi_val = _rsi_last(closes)
+        if rsi_val is not None:
+            emit_processing_heartbeat("", detail=f"RSI(14) terminal vector = {rsi_val}")
+        sma20 = _sma_last(closes, 20)
+        if sma20 is not None:
+            emit_processing_heartbeat("", detail=f"SMA(20) local array terminus = {sma20:.4f}")
+        sma50 = _sma_last(closes, min(50, len(closes)))
+        if sma50 is not None and sma50 != sma20:
+            emit_processing_heartbeat("", detail=f"SMA({min(50, len(closes))}) stack = {sma50:.4f}")
+
+    workload_steps = {
+        "1-Minute": max(1, min(bar_count, ONE_MINUTE_DRAGNET_BARS)),
+        "5-Minute": max(4, min(bar_count // 9, 8)),
+        "15-Minute": max(6, min(bar_count // 8, 12)),
+    }
+    steps = workload_steps.get(timeframe_resolution, 4)
+    for step in range(1, steps + 1):
+        emit_processing_heartbeat(
+            "",
+            detail=f"feature layer {step}/{steps} fused · {bar_count} bar covariance lane",
+        )
+
+    return envelope
+
+
+def emit_digesting_telemetry(
+    *,
+    ticker: str,
+    finbert_score: float | None = None,
+    filing_count: int = 0,
+    headline_count: int = 0,
+) -> None:
+    """Log SEC / FinBERT digestion as corporate text matrices are scored."""
+    emit_processing_heartbeat(
+        "🧠 DIGESTING: Processing SEC corporate text files through local FinBERT coordinate matrices...",
+        detail=f"{ticker.upper()} · {filing_count} SEC filings · {headline_count} headline vectors",
+    )
+    if finbert_score is not None:
+        emit_processing_heartbeat(
+            "",
+            detail=f"FinBERT sentiment coordinate = {finbert_score:+.3f}",
+        )
+
+
+# Legacy cinematic API — kept so older app.py builds on Streamlit Cloud do not crash
+# when core_quantum is deployed ahead of app.py. New code uses emit_processing_heartbeat().
+_LEGACY_TELEMETRY_DELAYS = {"1-Minute": 0.05, "5-Minute": 0.15, "15-Minute": 0.30}
+
+
+def telemetry_show_delay_for_timeframe(timeframe_resolution: str) -> float:
+    return float(_LEGACY_TELEMETRY_DELAYS.get(timeframe_resolution, 0.15))
 
 
 def arm_cinematic_telemetry_show(
@@ -4016,7 +4173,6 @@ def arm_cinematic_telemetry_show(
     delay_sec: float,
     pending_deploy: dict | None = None,
 ) -> None:
-    """Clear Window 1 and queue the progressive telemetry scroll before vault sync."""
     st.session_state.matrix_telemetry_show_active = True
     st.session_state.matrix_telemetry_lines = list(lines)
     st.session_state.matrix_telemetry_delay_sec = float(delay_sec)
@@ -4030,10 +4186,6 @@ def arm_cinematic_telemetry_show(
 
 
 def tick_cinematic_telemetry_show() -> str:
-    """
-    Advance one telemetry line per delay window.
-    Returns 'idle', 'running', or 'complete' (all lines revealed, vault may proceed).
-    """
     if not st.session_state.get("matrix_telemetry_show_active"):
         return "idle"
 

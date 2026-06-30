@@ -314,17 +314,9 @@ st.markdown("""
             box-sizing: border-box;
             box-shadow: inset 0 0 32px rgba(52, 199, 89, 0.06);
         }
-        .matrix-telemetry-show {
+        .matrix-processing-heartbeat {
             white-space: pre-wrap;
             word-break: break-word;
-        }
-        .matrix-telemetry-cursor::after {
-            content: "▌";
-            color: #34C759;
-            animation: matrixTelemetryBlink 0.85s step-end infinite;
-        }
-        @keyframes matrixTelemetryBlink {
-            50% { opacity: 0; }
         }
         .room2-matrix-cascade-shell {
             background: #050505;
@@ -611,6 +603,9 @@ if "matrix_trash_vault_count" not in st.session_state: st.session_state.matrix_t
 if "matrix_cascade_active" not in st.session_state: st.session_state.matrix_cascade_active = False
 if "matrix_cascade_started_at" not in st.session_state: st.session_state.matrix_cascade_started_at = 0.0
 if "matrix_cascade_final_output" not in st.session_state: st.session_state.matrix_cascade_final_output = ""
+if "matrix_processing_active" not in st.session_state: st.session_state.matrix_processing_active = False
+if "matrix_processing_logs" not in st.session_state: st.session_state.matrix_processing_logs = []
+if "room2_processor" not in st.session_state: st.session_state.room2_processor = {}
 if "matrix_satellites_ready" not in st.session_state: st.session_state.matrix_satellites_ready = True
 if "r2_data_feed_mode" not in st.session_state: st.session_state.r2_data_feed_mode = DATA_FEED_CAROUSEL
 if "r2_timeframe_mode" not in st.session_state: st.session_state.r2_timeframe_mode = "15-Minute"
@@ -2339,51 +2334,108 @@ def _assign_matrix_terminal_output(quantum_summary, vault_line: str | None = Non
     return terminal_text
 
 
-def _build_matrix_telemetry_html() -> str:
-    revealed = st.session_state.get("matrix_telemetry_revealed_lines") or []
-    body = "\n".join(escape(line) for line in revealed)
-    cursor = (
-        '<span class="matrix-telemetry-cursor"></span>'
-        if st.session_state.get("matrix_telemetry_show_active")
-        else ""
-    )
-    return (
-        f'<div class="room2-matrix-box matrix-telemetry-show">{body}{cursor}</div>'
-    )
+def _build_processing_heartbeat_html() -> str:
+    logs = st.session_state.get("matrix_processing_logs") or []
+    body = "\n".join(escape(line) for line in logs)
+    return f'<div class="room2-matrix-box matrix-processing-heartbeat">{body}</div>'
 
 
-def _finalize_pending_vault_deploy() -> None:
-    """Execute deferred Supabase vault sync after the cinematic telemetry show completes."""
-    pending = st.session_state.get("matrix_telemetry_pending_deploy") or {}
-    if not pending:
-        return
+def _capture_room2_deploy_snapshot() -> dict:
+    prefix = "r2_good"
+    ticker = str(st.session_state.get(f"{prefix}_ticker", "")).strip().upper()
+    start_date = st.session_state.get(f"{prefix}_start_date")
+    start_time = _normalize_room2_timestamp(
+        st.session_state.get(f"{prefix}_start_time", "09:31 AM")
+    ) or "09:31 AM"
+    end_date = st.session_state.get(f"{prefix}_end_date")
+    end_time = _normalize_room2_timestamp(
+        st.session_state.get(f"{prefix}_end_time", "04:00 PM")
+    ) or "04:00 PM"
+    entry_coord = _room2_coordinate_string(start_date, start_time) or ""
+    exit_coord = _room2_coordinate_string(end_date, end_time) or ""
+    notes = st.session_state.get("r2_single_notes_field", "")
+    deck_tag = "WINNING_DNA"
+    feedback = notes.strip()
+    if start_time or end_time:
+        time_meta = f"START:{start_time} | END:{end_time} | DECK:{deck_tag}"
+        feedback = f"{feedback} | {time_meta}".strip(" |") if feedback else time_meta
+    timeframe_resolution = st.session_state.get("r2_timeframe_mode", "15-Minute")
+    return {
+        "ticker": ticker,
+        "start_date": start_date,
+        "end_date": end_date,
+        "start_time": start_time,
+        "end_time": end_time,
+        "entry_coord": entry_coord,
+        "exit_coord": exit_coord,
+        "notes": notes,
+        "feedback": feedback,
+        "timeframe_resolution": timeframe_resolution,
+        "buffer_context_window": st.session_state.get(
+            "r2_buffer_context_window", R2_BUFFER_WINDOWS["15-Minute"]
+        ),
+        "pattern_category": "VALIDATED",
+    }
 
-    payload = pending.get("payload")
-    if not payload:
-        st.session_state.matrix_telemetry_pending_deploy = None
-        return
 
-    ticker = pending.get("ticker", "")
-    timeframe_resolution = pending.get("timeframe_resolution", "15-Minute")
-    pattern_category = pending.get("pattern_category", "VALIDATED")
-    quantum_report = pending.get("quantum_report", "")
-    structural_move = float(pending.get("structural_move") or 0.0)
-    macro_weather_layout = pending.get("macro_weather_layout", "")
-    execution_strategy = pending.get("execution_strategy", "")
-    match_score = int(pending.get("match_score") or 0)
-    vault_state = pending.get("vault_state", "")
-    incubation_msg = pending.get("incubation_msg", "")
-    in_purgatory = bool(pending.get("in_purgatory"))
-    purgatory_message = pending.get("purgatory_message", "")
-    quality = pending.get("quality") or st.session_state.get("room2_playbook_quality") or {}
-    chart_coupling = pending.get("chart_coupling") or st.session_state.get("room2_chart_coupling") or {}
-    research_audit = pending.get("research_audit") or {}
-    math_block = pending.get("math_block") or {}
-    start_time = pending.get("start_time", "")
-    end_time = pending.get("end_time", "")
-    entry_coord = pending.get("entry_coord", "")
-    exit_coord = pending.get("exit_coord", "")
-    base_terminal = pending.get("base_terminal", quantum_report)
+def _arm_room2_processor() -> None:
+    """Queue a live processing heartbeat run — steps execute from Window 1 on reruns."""
+    core_quantum.reset_processing_heartbeat()
+    st.session_state.room2_processor = {
+        "active": True,
+        "step": 0,
+        "snapshot": _capture_room2_deploy_snapshot(),
+    }
+    st.session_state.matrix_satellites_ready = False
+    st.session_state.forensic_institutional_tracker = {
+        "institutional_block_accumulation": False,
+        "inst_block_summary": "INST_BLOCK: RECALIBRATING...",
+        "volume_baseline_20d": 0.0,
+        "peak_surge_ratio": 0.0,
+    }
+    st.session_state.forensic_form4_tracker = {
+        "insider_buy_detected": False,
+        "form4_summary": "FORM4: RECALIBRATING...",
+        "insider_events": [],
+    }
+
+
+def _halt_room2_processor(*, fault_text: str) -> str:
+    """Instant hard-stop — no artificial pacing."""
+    proc = st.session_state.get("room2_processor") or {}
+    proc["active"] = False
+    st.session_state.room2_processor = proc
+    core_quantum.flash_processing_fault(fault_text)
+    st.session_state.room2_quantum_report = fault_text
+    st.session_state.matrix_satellites_ready = True
+    st.session_state.matrix_cascade_active = False
+    return "failed"
+
+
+def _finalize_room2_processor_vault(proc: dict) -> None:
+    """Vault sync + Window 4 strategy node — runs the instant computations conclude."""
+    snap = proc.get("snapshot") or {}
+    ticker = snap.get("ticker", "")
+    timeframe_resolution = snap.get("timeframe_resolution", "15-Minute")
+    pattern_category = snap.get("pattern_category", "VALIDATED")
+    quantum_report = proc.get("quantum_report", "")
+    structural_move = float(proc.get("structural_move") or 0.0)
+    macro_weather_layout = proc.get("macro_weather_layout", "")
+    execution_strategy = proc.get("execution_strategy", "")
+    match_score = int(proc.get("match_score") or 0)
+    vault_state = proc.get("vault_state", "")
+    incubation_msg = proc.get("incubation_msg", "")
+    in_purgatory = bool(proc.get("in_purgatory"))
+    purgatory_message = proc.get("purgatory_message", "")
+    quality = proc.get("quality") or {}
+    chart_coupling = proc.get("chart_coupling") or {}
+    research_audit = proc.get("research_audit") or {}
+    math_block = proc.get("math_block") or {}
+    start_time = snap.get("start_time", "")
+    end_time = snap.get("end_time", "")
+    entry_coord = snap.get("entry_coord", "")
+    exit_coord = snap.get("exit_coord", "")
+    payload = proc.get("payload") or {}
 
     ok, vault_message = core_quantum.stream_payload_to_vault(payload)
     if ok and pattern_category == "VALIDATED":
@@ -2489,75 +2541,348 @@ def _finalize_pending_vault_deploy() -> None:
     else:
         final_terminal = _assign_matrix_terminal_output(quantum_report, vault_line if ok else None)
 
-    st.session_state.quantum_terminal_output = final_terminal
+    core_quantum.complete_processing_heartbeat(final_terminal)
     st.session_state.room2_quantum_report = final_terminal
     st.session_state.room2_vault_flash = vault_line if ok else ""
-    st.session_state.matrix_telemetry_pending_deploy = None
     st.session_state.matrix_satellites_ready = True
     st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
     _sync_matrix_chat_to_cloud()
+    _record_room2_successful_commit()
+    _clear_room2_form_buffers()
 
 
-def _build_matrix_cascade_html() -> str:
-    loop_lines = list(MATRIX_CASCADE_LINES) + list(MATRIX_CASCADE_LINES)
-    rows = "".join(
-        f'<div class="matrix-cascade-line">{escape(line)}</div>' for line in loop_lines
-    )
-    return (
-        '<div class="room2-matrix-cascade-shell">'
-        f'<div class="matrix-cascade-track">{rows}</div>'
-        "</div>"
-    )
-
-
-def _tick_matrix_cascade_sequence() -> bool:
+def _advance_room2_processor() -> str:
     """
-    Advance the 2-second Matrix crawl. Returns True while cascade animation runs.
-    On completion, snaps finalized readout and unlocks satellite tiles.
+    Execute the next real pipeline stage and emit Window 1 logs on CPU completion.
+    Returns idle | running | complete | failed.
     """
-    if not st.session_state.get("matrix_cascade_active"):
-        return False
+    proc = st.session_state.get("room2_processor") or {}
+    if not proc.get("active"):
+        return "idle"
 
-    elapsed = time.time() - float(st.session_state.get("matrix_cascade_started_at", 0.0))
-    if elapsed >= MATRIX_CASCADE_DURATION_SEC:
-        final_out = st.session_state.get("matrix_cascade_final_output", "")
-        if final_out:
-            st.session_state.quantum_terminal_output = _coerce_quantum_summary_to_text(final_out)
-        st.session_state.matrix_cascade_active = False
-        st.session_state.matrix_satellites_ready = True
-        return False
+    snap = proc.get("snapshot") or {}
+    step = int(proc.get("step") or 0)
+    ticker = snap.get("ticker", "")
+    start_date = snap.get("start_date")
+    start_time = snap.get("start_time", "09:31 AM")
+    end_date = snap.get("end_date")
+    end_time = snap.get("end_time", "04:00 PM")
+    notes = snap.get("notes", "")
+    feedback = snap.get("feedback", "")
+    timeframe_resolution = snap.get("timeframe_resolution", "15-Minute")
+    buffer_context_window = snap.get("buffer_context_window", R2_BUFFER_WINDOWS["15-Minute"])
+    pattern_category = snap.get("pattern_category", "VALIDATED")
+    micro_fast_track = timeframe_resolution == "1-Minute"
+    data_feed_mode = _resolve_data_feed_mode(timeframe_resolution)
+    st.session_state.r2_data_feed_mode = data_feed_mode
+    st.session_state.r2_processor_lane = core_quantum.resolve_processor_lane(timeframe_resolution)
 
-    st.session_state.matrix_satellites_ready = False
-    return True
+    try:
+        if step == 0:
+            data_stream = core_quantum.get_historical_interval_data(
+                ticker,
+                interval=_r2_yfinance_interval_from_mode(timeframe_resolution),
+                micro_fast_track=micro_fast_track,
+                start_date=start_date,
+                end_date=end_date,
+                timeframe_resolution=timeframe_resolution,
+            )
+            if core_quantum.is_pipeline_signal(data_stream, "THROTTLE"):
+                st.session_state.polygon_lockout = True
+                return _halt_room2_processor(
+                    fault_text=_coerce_quantum_summary_to_text(core_quantum.THROTTLE_MESSAGE)
+                )
+            if core_quantum.is_pipeline_signal(data_stream, core_quantum.POLYGON_REST_DATA_EMPTY):
+                api_err = st.session_state.get("r2_market_data_error", "")
+                return _halt_room2_processor(
+                    fault_text=(
+                        f"⚠️ {core_quantum.POLYGON_REST_DATA_EMPTY} — No 1m bars for {ticker} "
+                        f"on {_session_date_label(start_date)}–{_session_date_label(end_date)}. "
+                        f"Verify Massive API key and session dates."
+                        + (f" [{api_err}]" if api_err else "")
+                    )
+                )
+            if not core_quantum.is_usable_data_stream(data_stream):
+                return _halt_room2_processor(
+                    fault_text=(
+                        f"⚠️ [DATALINK: NO_DATA] No bars for {ticker} ({timeframe_resolution}). "
+                        "Verify ticker symbol and market session dates."
+                    )
+                )
+            bar_n = len(data_stream) if core_quantum.is_usable_data_stream(data_stream) else 0
+            core_quantum.emit_processing_heartbeat(
+                "📥 CONSUMING: Fetching historical 1-minute arrays from ://massive.com...",
+                detail=f"Received {bar_n} raw 1m bars · {timeframe_resolution} lane armed",
+            )
+            proc["data_stream"] = data_stream
+            proc["step"] = 1
+
+        elif step == 1:
+            data_stream = proc.get("data_stream")
+            start_dt, end_dt, start_norm, end_norm = core_quantum.parse_operator_boundaries(
+                start_date, start_time, end_date, end_time
+            )
+            st.session_state.room2_operator_start_norm = start_norm
+            st.session_state.room2_operator_end_norm = end_norm
+            data_stream = core_quantum.pad_datastream_gaps(data_stream)
+            data_stream, _fence_meta = core_quantum.apply_temporal_fence_and_lookback(
+                data_stream,
+                start_date=start_date,
+                start_time=start_time,
+                end_date=end_date,
+                end_time=end_time,
+                timeframe_resolution=timeframe_resolution,
+            )
+            if not core_quantum.is_usable_data_stream(data_stream):
+                return _halt_room2_processor(
+                    fault_text=(
+                        f"⚠️ [DATALINK: FENCE_EMPTY] Temporal fence/lookback returned no bars for "
+                        f"{ticker} ({timeframe_resolution}). Operator window "
+                        f"{start_norm or '?'} → {end_norm or '?'}. "
+                        "Widen the date window or check session hours."
+                    )
+                )
+            bar_count = len(data_stream)
+            core_quantum.emit_parsing_telemetry(
+                data_stream,
+                timeframe_resolution=timeframe_resolution,
+                bar_count=bar_count,
+                start_norm=start_norm,
+                end_norm=end_norm,
+            )
+            proc["data_stream"] = data_stream
+            proc["start_norm"] = start_norm
+            proc["end_norm"] = end_norm
+            proc["step"] = 2
+
+        elif step == 2:
+            data_stream = proc.get("data_stream")
+            core_quantum.emit_calculating_telemetry(
+                data_stream,
+                timeframe_resolution=timeframe_resolution,
+                start_date=start_date,
+                start_time=start_time,
+                end_date=end_date,
+                end_time=end_time,
+            )
+            quality = core_quantum.evaluate_playbook_quality_barrier(
+                data_stream,
+                start_date=start_date,
+                start_time=start_time,
+                end_date=end_date,
+                end_time=end_time,
+                timeframe_resolution=timeframe_resolution,
+            )
+            st.session_state.room2_playbook_quality = quality
+            chart_coupling = core_quantum.validate_chart_data_coupling(data_stream, quality)
+            st.session_state.room2_chart_coupling = chart_coupling
+
+            if not chart_coupling.get("passed"):
+                reasons = ", ".join(chart_coupling.get("rejection_reasons") or ["chart_failed"])
+                return _halt_room2_processor(
+                    fault_text=(
+                        f"🗑️ PRE-STORAGE TRASH — Chart coupling failed ({reasons}). "
+                        "Market data lane blocked — SEC/vault writes halted."
+                    )
+                )
+            if not quality.get("passed"):
+                floor_pct = quality.get("floor_pct", 1.0)
+                move_pct = quality.get("structural_move_pct", 0.0)
+                net = quality.get("net_margin_pct", move_pct)
+                friction = quality.get("execution_friction_buffer_pct", 0.0)
+                return _halt_room2_processor(
+                    fault_text=(
+                        f"🗑️ PRE-STORAGE TRASH — Net margin {net:.2f}% failed "
+                        f"{floor_pct:.1f}% strict alpha floor for {timeframe_resolution} "
+                        f"(gross {move_pct:.2f}% − slippage {friction:.2f}%). "
+                        "Pattern rejected before vault mint."
+                    )
+                )
+            proc["quality"] = quality
+            proc["chart_coupling"] = chart_coupling
+            proc["step"] = 3
+
+        elif step == 3:
+            data_stream = proc.get("data_stream")
+            quality = proc.get("quality") or {}
+            research_audit = core_quantum.run_deep_internet_research_audit(
+                ticker=ticker,
+                data_stream=data_stream,
+                start_date=start_date,
+                start_time=start_time,
+                end_date=end_date,
+                end_time=end_time,
+                timeframe_resolution=timeframe_resolution,
+                quality=quality,
+            )
+            st.session_state.room2_deep_research_audit = research_audit
+            semantic = research_audit.get("semantic_catalyst") or {}
+            form4 = research_audit.get("form4") or {}
+            headlines = research_audit.get("news_headlines") or []
+            core_quantum.emit_digesting_telemetry(
+                ticker=ticker,
+                finbert_score=semantic.get("finbert_sentiment_score"),
+                filing_count=len(form4.get("insider_events") or []),
+                headline_count=len(headlines),
+            )
+            proc["research_audit"] = research_audit
+            proc["step"] = 4
+
+        elif step == 4:
+            data_stream = proc.get("data_stream")
+            quality = proc.get("quality") or {}
+            research_audit = proc.get("research_audit") or {}
+            entry_coord = snap.get("entry_coord", "")
+            exit_coord = snap.get("exit_coord", "")
+
+            text_matrix_string = research_audit.get("text_matrix_string", "")
+            forensic_dragnet_blob = research_audit.get("forensic_dragnet_blob", "")
+            metric_envelopes_json = json.dumps(
+                research_audit.get("metric_envelopes", {}), default=str
+            )
+            semantic_catalyst_json = json.dumps(
+                research_audit.get("semantic_catalyst", {}), default=str
+            )
+
+            quantum_summary = core_quantum.calculate_quantum_frequencies(
+                data_stream,
+                pattern_category=pattern_category,
+                ticker=ticker,
+                start_date=start_date,
+                start_time=start_time,
+                end_date=end_date,
+                end_time=end_time,
+                operator_context=notes,
+                human_feedback=feedback,
+                layout_block_id="",
+            )
+            quantum_report = _coerce_quantum_summary_to_text(quantum_summary)
+            math_block = st.session_state.get("room2_last_math_block", {}) or {}
+            genetic = st.session_state.get("room2_master_signature") or {}
+            master_signature_json = json.dumps(
+                {
+                    "master_signature": genetic.get("master_signature") or [],
+                    "overlap_pct": genetic.get("overlap_pct", 0),
+                    "dimensions_trashed": genetic.get("dimensions_trashed", 0),
+                    "pure_overlap_dims": genetic.get("pure_overlap_dims", 0),
+                    "finbert_sentiment_score": (
+                        (research_audit.get("semantic_catalyst") or {}).get(
+                            "finbert_sentiment_score", 0.0
+                        )
+                    ),
+                },
+                default=str,
+            )
+            macro_weather_layout = _resolve_auto_layout_id()
+            match_score = int(math_block.get("match_probability") or 0)
+            execution_strategy = core_quantum.resolve_matrix_strategy_id(
+                layout_id=macro_weather_layout,
+                timeframe_resolution=timeframe_resolution,
+                spatial_match_pct=match_score,
+            )
+
+            if not (st.session_state.get("room2_chart_coupling") or {}).get("passed"):
+                return _halt_room2_processor(
+                    fault_text=(
+                        "🗑️ PRE-STORAGE TRASH — Chart coupling lock tripped. "
+                        "Supabase write blocked."
+                    )
+                )
+
+            st.session_state.polygon_lockout = False
+            st.session_state.room2_bar_count = (
+                len(data_stream) if core_quantum.is_usable_data_stream(data_stream) else 0
+            )
+            st.session_state.room2_forensic_ticker = ticker
+            structural_move = float(quality.get("structural_move_pct") or 0.0)
+            vault_track, vault_state = _resolve_vault_track(pattern_category)
+            vault_track, vault_state, repeat_count, shelf_expires, incubation_msg = (
+                _resolve_anomaly_incubation(
+                    ticker=ticker,
+                    timeframe_resolution=timeframe_resolution,
+                    macro_weather_layout=macro_weather_layout,
+                    match_score=match_score,
+                )
+            )
+            in_purgatory, purgatory_message = _evaluate_purgatory_cluster(
+                ticker=ticker,
+                pattern_category=pattern_category,
+            )
+            payload = core_quantum.build_vault_payload(
+                ticker=ticker,
+                pattern_category=pattern_category,
+                entry_coordinate=entry_coord or "",
+                exit_coordinate=exit_coord or "",
+                entry_time=start_time,
+                exit_time=end_time,
+                operator_notes=notes,
+                quantum_report=quantum_report,
+                bar_count=st.session_state.room2_bar_count,
+                timeframe_resolution=timeframe_resolution,
+                macro_weather_layout=macro_weather_layout,
+                execution_strategy=execution_strategy,
+                buffer_context_window=buffer_context_window,
+                vault_track=vault_track,
+                vault_state=vault_state,
+                data_feed_mode=data_feed_mode,
+                layout_match_pct=match_score,
+                anomaly_repeat_count=repeat_count,
+                shelf_expires_at=shelf_expires,
+                structural_move_pct=structural_move,
+                text_matrix_string=text_matrix_string,
+                forensic_dragnet_blob=forensic_dragnet_blob,
+                master_signature_json=master_signature_json,
+                metric_envelopes_json=metric_envelopes_json,
+                semantic_catalyst_json=semantic_catalyst_json,
+            )
+            proc["payload"] = payload
+            proc["quantum_report"] = quantum_report
+            proc["structural_move"] = structural_move
+            proc["macro_weather_layout"] = macro_weather_layout
+            proc["execution_strategy"] = execution_strategy
+            proc["match_score"] = match_score
+            proc["vault_state"] = vault_state
+            proc["incubation_msg"] = incubation_msg
+            proc["in_purgatory"] = in_purgatory
+            proc["purgatory_message"] = purgatory_message
+            proc["quality"] = quality
+            proc["chart_coupling"] = proc.get("chart_coupling") or st.session_state.get(
+                "room2_chart_coupling"
+            )
+            proc["research_audit"] = research_audit
+            proc["math_block"] = math_block
+            proc["active"] = False
+            st.session_state.room2_processor = proc
+            _finalize_room2_processor_vault(proc)
+            return "complete"
+
+        st.session_state.room2_processor = proc
+        return "running"
+
+    except Exception as exc:
+        return _halt_room2_processor(
+            fault_text=(
+                "⚠️ [PROCESSOR FAULT] Deploy halted safely.\n"
+                f"│ Detail: {str(exc)[:100]} │\n"
+                "│ Check: ticker letters only, times like 09:31 AM │"
+            )
+        )
 
 
 def _render_matrix_window1_panel() -> None:
-    """Window 1 — cinematic telemetry show or finalized institutional readout."""
-    show_status = core_quantum.tick_cinematic_telemetry_show()
-    if show_status == "complete":
-        _finalize_pending_vault_deploy()
+    """Window 1 — live processing heartbeat or finalized institutional readout."""
+    status = _advance_room2_processor()
 
     st.markdown(
         '<div class="room2-terminal-header">▸ WINDOW 1 — MATRIX REACTION PROCESSOR</div>',
         unsafe_allow_html=True,
     )
 
-    if st.session_state.get("matrix_telemetry_show_active") or show_status == "running":
-        st.markdown(_build_matrix_telemetry_html(), unsafe_allow_html=True)
-        delay = float(st.session_state.get("matrix_telemetry_delay_sec") or 0.1)
-        with st.spinner("Telemetry crawl in progress..."):
-            time.sleep(min(delay, 0.12))
-        st.rerun()
-        return
-
-    cascade_running = _tick_matrix_cascade_sequence()
-
-    if cascade_running:
-        st.markdown(_build_matrix_cascade_html(), unsafe_allow_html=True)
-        with st.spinner("Matrix crawl in progress..."):
-            time.sleep(0.35)
-        st.rerun()
+    if st.session_state.get("matrix_processing_active") or status == "running":
+        st.markdown(_build_processing_heartbeat_html(), unsafe_allow_html=True)
+        if status == "running":
+            st.rerun()
         return
 
     terminal_text = _coerce_quantum_summary_to_text(st.session_state.quantum_terminal_output)
@@ -2574,14 +2899,14 @@ def _render_room2_proxy_telemetry_body() -> None:
         st.markdown(
             '<div class="whale-banner">'
             '<div class="proxy-banner-title">🐳 INSTITUTIONAL BLOCK FLOWS</div>'
-            '<div class="proxy-banner-body">⏳ MATRIX CRAWL ACTIVE — RECALIBRATING 20-DAY VOLUME BASELINE...</div>'
+            '<div class="proxy-banner-body">⏳ PROCESSOR ACTIVE — LIVE VOLUME BASELINE RECALIBRATION...</div>'
             "</div>",
             unsafe_allow_html=True,
         )
         st.markdown(
             '<div class="insider-banner">'
             '<div class="proxy-banner-title">👔 MANAGEMENT INSIDER RECONNAISSANCE</div>'
-            '<div class="proxy-banner-body">⏳ MATRIX CRAWL ACTIVE — SCANNING SEC FORM 4 DISCLOSURE WIRE...</div>'
+            '<div class="proxy-banner-body">⏳ PROCESSOR ACTIVE — SEC FORM 4 DIGESTION IN FLIGHT...</div>'
             "</div>"
             "</div>",
             unsafe_allow_html=True,
@@ -2807,9 +3132,7 @@ def _handle_room2_deck_submit() -> None:
         _activate_room2_commit_throttle()
         st.rerun()
         return
-    if _deploy_room2_deck():
-        _record_room2_successful_commit()
-        _clear_room2_form_buffers()
+    _arm_room2_processor()
     st.rerun()
 
 
@@ -2819,416 +3142,6 @@ def _session_date_label(raw_date) -> str:
     if hasattr(raw_date, "strftime"):
         return raw_date.strftime("%Y-%m-%d")
     return str(raw_date)[:10]
-
-
-def _deploy_room2_deck() -> bool:
-    """Harvest quantum math, vault payload, and lock matrix terminal output."""
-    prefix = "r2_good"
-    ticker = str(st.session_state.get(f"{prefix}_ticker", "")).strip().upper()
-    start_date = st.session_state.get(f"{prefix}_start_date")
-    start_time = _normalize_room2_timestamp(
-        st.session_state.get(f"{prefix}_start_time", "09:31 AM")
-    ) or "09:31 AM"
-    end_date = st.session_state.get(f"{prefix}_end_date")
-    end_time = _normalize_room2_timestamp(
-        st.session_state.get(f"{prefix}_end_time", "04:00 PM")
-    ) or "04:00 PM"
-    entry_coord = _room2_coordinate_string(start_date, start_time) or None
-    exit_coord = _room2_coordinate_string(end_date, end_time) or None
-
-    pattern_category = "VALIDATED"
-    notes = st.session_state.get("r2_single_notes_field", "")
-    deck_tag = "WINNING_DNA"
-    feedback = notes.strip()
-    if start_time or end_time:
-        time_meta = f"START:{start_time} | END:{end_time} | DECK:{deck_tag}"
-        feedback = f"{feedback} | {time_meta}".strip(" |") if feedback else time_meta
-
-    timeframe_resolution = st.session_state.get("r2_timeframe_mode", "15-Minute")
-    buffer_context_window = st.session_state.get(
-        "r2_buffer_context_window", R2_BUFFER_WINDOWS["15-Minute"]
-    )
-    data_feed_mode = _resolve_data_feed_mode(timeframe_resolution)
-    st.session_state.r2_data_feed_mode = data_feed_mode
-    micro_fast_track = timeframe_resolution == "1-Minute"
-    st.session_state.r2_processor_lane = core_quantum.resolve_processor_lane(
-        timeframe_resolution
-    )
-    vault_track, vault_state = _resolve_vault_track(pattern_category)
-
-    try:
-        st.session_state.matrix_satellites_ready = False
-        st.session_state.forensic_institutional_tracker = {
-            "institutional_block_accumulation": False,
-            "inst_block_summary": "INST_BLOCK: RECALIBRATING...",
-            "volume_baseline_20d": 0.0,
-            "peak_surge_ratio": 0.0,
-        }
-        st.session_state.forensic_form4_tracker = {
-            "insider_buy_detected": False,
-            "form4_summary": "FORM4: RECALIBRATING...",
-            "insider_events": [],
-        }
-
-        data_stream = core_quantum.get_historical_interval_data(
-            ticker,
-            interval=_r2_yfinance_interval_from_mode(timeframe_resolution),
-            micro_fast_track=micro_fast_track,
-            start_date=start_date,
-            end_date=end_date,
-            timeframe_resolution=timeframe_resolution,
-        )
-        if micro_fast_track:
-            data_feed_mode = _resolve_data_feed_mode(timeframe_resolution)
-
-        if core_quantum.is_pipeline_signal(data_stream, "THROTTLE"):
-            st.session_state.polygon_lockout = True
-            throttle_text = _coerce_quantum_summary_to_text(core_quantum.THROTTLE_MESSAGE)
-            st.session_state.quantum_terminal_output = throttle_text
-            st.session_state.room2_quantum_report = throttle_text
-            st.session_state.matrix_satellites_ready = True
-            return False
-
-        if core_quantum.is_pipeline_signal(data_stream, core_quantum.POLYGON_REST_DATA_EMPTY):
-            api_err = st.session_state.get("r2_market_data_error", "")
-            empty_text = (
-                f"⚠️ {core_quantum.POLYGON_REST_DATA_EMPTY} — No 1m bars for {ticker} "
-                f"on {_session_date_label(start_date)}–{_session_date_label(end_date)}. "
-                f"Verify Massive API key and session dates."
-                + (f" [{api_err}]" if api_err else "")
-            )
-            st.session_state.quantum_terminal_output = empty_text
-            st.session_state.room2_quantum_report = empty_text
-            st.session_state.matrix_satellites_ready = True
-            st.session_state.room2_chart_coupling = {"passed": False, "trashed": True}
-            return False
-
-        if not core_quantum.is_usable_data_stream(data_stream):
-            no_data_text = (
-                f"⚠️ [DATALINK: NO_DATA] No bars for {ticker} ({timeframe_resolution}). "
-                "Verify ticker symbol and market session dates."
-            )
-            st.session_state.quantum_terminal_output = no_data_text
-            st.session_state.room2_quantum_report = no_data_text
-            st.session_state.matrix_satellites_ready = True
-            return False
-
-        start_dt, end_dt, start_norm, end_norm = core_quantum.parse_operator_boundaries(
-            start_date, start_time, end_date, end_time
-        )
-        st.session_state.room2_operator_start_norm = start_norm
-        st.session_state.room2_operator_end_norm = end_norm
-
-        data_stream = core_quantum.pad_datastream_gaps(data_stream)
-        data_stream, _fence_meta = core_quantum.apply_temporal_fence_and_lookback(
-            data_stream,
-            start_date=start_date,
-            start_time=start_time,
-            end_date=end_date,
-            end_time=end_time,
-            timeframe_resolution=timeframe_resolution,
-        )
-
-        if not core_quantum.is_usable_data_stream(data_stream):
-            no_data_text = (
-                f"⚠️ [DATALINK: FENCE_EMPTY] Temporal fence/lookback returned no bars for "
-                f"{ticker} ({timeframe_resolution}). Operator window "
-                f"{start_norm or '?'} → {end_norm or '?'}. "
-                "Widen the date window or check session hours."
-            )
-            st.session_state.quantum_terminal_output = no_data_text
-            st.session_state.room2_quantum_report = no_data_text
-            st.session_state.matrix_satellites_ready = True
-            st.session_state.room2_chart_coupling = {"passed": False, "trashed": True}
-            return False
-
-        quality = core_quantum.evaluate_playbook_quality_barrier(
-            data_stream,
-            start_date=start_date,
-            start_time=start_time,
-            end_date=end_date,
-            end_time=end_time,
-            timeframe_resolution=timeframe_resolution,
-        )
-        st.session_state.room2_playbook_quality = quality
-
-        chart_coupling = core_quantum.validate_chart_data_coupling(data_stream, quality)
-        st.session_state.room2_chart_coupling = chart_coupling
-
-        if not chart_coupling.get("passed"):
-            reasons = ", ".join(chart_coupling.get("rejection_reasons") or ["chart_failed"])
-            trash_text = (
-                f"🗑️ PRE-STORAGE TRASH — Chart coupling failed ({reasons}). "
-                "Market data lane blocked — SEC/vault writes halted."
-            )
-            st.session_state.quantum_terminal_output = trash_text
-            st.session_state.room2_quantum_report = trash_text
-            st.session_state.matrix_satellites_ready = True
-            return False
-
-        if not quality.get("passed"):
-            floor_pct = quality.get("floor_pct", 1.0)
-            move_pct = quality.get("structural_move_pct", 0.0)
-            net = quality.get("net_margin_pct", move_pct)
-            friction = quality.get("execution_friction_buffer_pct", 0.0)
-            trash_text = (
-                f"🗑️ PRE-STORAGE TRASH — Net margin {net:.2f}% failed "
-                f"{floor_pct:.1f}% strict alpha floor for {timeframe_resolution} "
-                f"(gross {move_pct:.2f}% − slippage {friction:.2f}%). "
-                "Pattern rejected before vault mint."
-            )
-            st.session_state.quantum_terminal_output = trash_text
-            st.session_state.room2_quantum_report = trash_text
-            st.session_state.matrix_satellites_ready = True
-            return False
-
-        research_audit = core_quantum.run_deep_internet_research_audit(
-            ticker=ticker,
-            data_stream=data_stream,
-            start_date=start_date,
-            start_time=start_time,
-            end_date=end_date,
-            end_time=end_time,
-            timeframe_resolution=timeframe_resolution,
-            quality=quality,
-        )
-        text_matrix_string = research_audit.get("text_matrix_string", "")
-        forensic_dragnet_blob = research_audit.get("forensic_dragnet_blob", "")
-        master_signature_json = research_audit.get("master_signature_json", "")
-        metric_envelopes_json = json.dumps(
-            research_audit.get("metric_envelopes", {}), default=str
-        )
-        semantic_catalyst_json = json.dumps(
-            research_audit.get("semantic_catalyst", {}), default=str
-        )
-
-        quantum_summary = core_quantum.calculate_quantum_frequencies(
-            data_stream,
-            pattern_category=pattern_category,
-            ticker=ticker,
-            start_date=start_date,
-            start_time=start_time,
-            end_date=end_date,
-            end_time=end_time,
-            operator_context=notes,
-            human_feedback=feedback,
-            layout_block_id="",
-        )
-
-        quantum_report = _coerce_quantum_summary_to_text(quantum_summary)
-
-        math_block = st.session_state.get("room2_last_math_block", {}) or {}
-        genetic = st.session_state.get("room2_master_signature") or {}
-        master_signature_json = json.dumps(
-            {
-                "master_signature": genetic.get("master_signature") or [],
-                "overlap_pct": genetic.get("overlap_pct", 0),
-                "dimensions_trashed": genetic.get("dimensions_trashed", 0),
-                "pure_overlap_dims": genetic.get("pure_overlap_dims", 0),
-                "finbert_sentiment_score": (
-                    (st.session_state.get("room2_deep_research_audit") or {})
-                    .get("semantic_catalyst", {})
-                    .get("finbert_sentiment_score", 0.0)
-                ),
-            },
-            default=str,
-        )
-        macro_weather_layout = _resolve_auto_layout_id()
-        match_score = int(math_block.get("match_probability") or 0)
-        execution_strategy = core_quantum.resolve_matrix_strategy_id(
-            layout_id=macro_weather_layout,
-            timeframe_resolution=timeframe_resolution,
-            spatial_match_pct=match_score,
-        )
-
-        if not (st.session_state.get("room2_chart_coupling") or {}).get("passed"):
-            trash_text = (
-                "🗑️ PRE-STORAGE TRASH — Chart coupling lock tripped. "
-                "Supabase write blocked."
-            )
-            st.session_state.quantum_terminal_output = trash_text
-            st.session_state.room2_quantum_report = trash_text
-            st.session_state.matrix_satellites_ready = True
-            return False
-
-        st.session_state.polygon_lockout = False
-        st.session_state.room2_bar_count = (
-            len(data_stream) if core_quantum.is_usable_data_stream(data_stream) else 0
-        )
-        st.session_state.room2_quantum_report = quantum_report
-        st.session_state.room2_forensic_ticker = ticker
-
-        quality = st.session_state.get("room2_playbook_quality", {}) or {}
-        structural_move = float(quality.get("structural_move_pct") or 0.0)
-
-        vault_track, vault_state, repeat_count, shelf_expires, incubation_msg = (
-            _resolve_anomaly_incubation(
-                ticker=ticker,
-                timeframe_resolution=timeframe_resolution,
-                macro_weather_layout=macro_weather_layout,
-                match_score=match_score,
-            )
-        )
-
-        in_purgatory, purgatory_message = _evaluate_purgatory_cluster(
-            ticker=ticker,
-            pattern_category=pattern_category,
-        )
-
-        payload = core_quantum.build_vault_payload(
-            ticker=ticker,
-            pattern_category=pattern_category,
-            entry_coordinate=entry_coord or "",
-            exit_coordinate=exit_coord or "",
-            entry_time=start_time,
-            exit_time=end_time,
-            operator_notes=notes,
-            quantum_report=quantum_report,
-            bar_count=st.session_state.room2_bar_count,
-            timeframe_resolution=timeframe_resolution,
-            macro_weather_layout=macro_weather_layout,
-            execution_strategy=execution_strategy,
-            buffer_context_window=buffer_context_window,
-            vault_track=vault_track,
-            vault_state=vault_state,
-            data_feed_mode=data_feed_mode,
-            layout_match_pct=match_score,
-            anomaly_repeat_count=repeat_count,
-            shelf_expires_at=shelf_expires,
-            structural_move_pct=structural_move,
-            text_matrix_string=text_matrix_string,
-            forensic_dragnet_blob=forensic_dragnet_blob,
-            master_signature_json=master_signature_json,
-            metric_envelopes_json=metric_envelopes_json,
-            semantic_catalyst_json=semantic_catalyst_json,
-        )
-
-        ok, vault_message = core_quantum.stream_payload_to_vault(payload)
-        if ok and pattern_category == "VALIDATED":
-            margin_pct = structural_move or abs(
-                float(
-                    (st.session_state.get("room2_last_velocity") or {}).get(
-                        "session_velocity_pct", 0.0
-                    )
-                )
-            )
-            retro = core_quantum.log_strategy_execution_with_fallback(
-                ticker=ticker,
-                macro_weather_layout=macro_weather_layout,
-                execution_strategy=execution_strategy,
-                timeframe_resolution=timeframe_resolution,
-                margin_pct=margin_pct,
-                pattern_category=pattern_category,
-                layout_match_pct=match_score,
-                structural_move_pct=structural_move,
-                entry_coordinate=entry_coord or "",
-                exit_coordinate=exit_coord or "",
-            )
-            st.session_state.room2_alpha_decay_status = retro
-            if retro.get("repair_bay_demoted"):
-                vault_line = (
-                    f"{vault_message} · REPAIR BAY — {execution_strategy} benched "
-                    f"(live execution locked · 60-day recycle window)."
-                )
-            elif retro.get("autonomous_surgery", {}).get("database_action") == "entry_tweak_update":
-                vault_line = (
-                    f"{vault_message} · AUTO-TWEAK — entry coordinates updated in cloud "
-                    f"for {execution_strategy}."
-                )
-            elif retro.get("autonomous_surgery", {}).get("database_action") == "delete_and_purgatory":
-                vault_line = (
-                    f"{vault_message} · AUTO-PURGATORY — {execution_strategy} erased from "
-                    f"active layout; Repair Bay engaged."
-                )
-            elif retro.get("halt_live_execution") and retro.get("diagnosis"):
-                vault_line = f"{vault_message} · {retro['diagnosis']}"
-            elif vault_state == VAULT_STATE_INCUBATION and incubation_msg:
-                vault_line = f"{vault_message} · {incubation_msg}"
-            elif (retro.get("degraded") or retro.get("evolving")) and retro.get("diagnosis"):
-                vault_line = f"{vault_message} · {retro['diagnosis']}"
-            else:
-                vault_line = vault_message
-        else:
-            vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
-
-        if ok and quality.get("passed"):
-            velocity = st.session_state.get("room2_last_velocity") or {}
-            feature_vector = core_quantum.extract_forensic_feature_vector(
-                velocity,
-                math_block,
-                float(
-                    (st.session_state.get("room2_deep_research_audit") or {})
-                    .get("semantic_catalyst", {})
-                    .get("finbert_sentiment_score", 0.0)
-                ),
-            )
-            genetic = st.session_state.get("room2_master_signature") or {}
-            reminted = self_surgery.attempt_genetic_recycling_on_fresh_deploy(
-                ticker=ticker,
-                parent_layout_id=macro_weather_layout,
-                strategy_label=execution_strategy,
-                timeframe_resolution=timeframe_resolution,
-                quality=quality,
-                metric_envelopes=research_audit.get("metric_envelopes"),
-                master_signature=genetic.get("master_signature"),
-                feature_vector=feature_vector,
-                entry_time=start_time,
-                exit_time=end_time,
-            )
-            if reminted:
-                remint_note = (
-                    f"GENETIC RE-MINT — {execution_strategy} restored to "
-                    f"{macro_weather_layout} (boundaries updated · floor re-validated)."
-                )
-                vault_line = f"{vault_line} · {remint_note}" if vault_line else remint_note
-
-        if incubation_msg and vault_state == VAULT_STATE_INCUBATION:
-            final_terminal = _assign_matrix_terminal_output(
-                f"{quantum_report}\n\n{incubation_msg}",
-                vault_line if ok else None,
-            )
-        elif in_purgatory:
-            final_terminal = _assign_matrix_terminal_output(
-                f"{quantum_report}\n\n{purgatory_message}",
-                None,
-            )
-        else:
-            final_terminal = _assign_matrix_terminal_output(quantum_report, vault_line)
-        st.session_state.matrix_cascade_final_output = final_terminal
-        st.session_state.matrix_cascade_active = True
-        st.session_state.matrix_cascade_started_at = time.time()
-        st.session_state.matrix_satellites_ready = False
-        st.session_state.room2_vault_flash = vault_line if ok else ""
-        if ok and quality.get("passed") and chart_coupling.get("passed"):
-            confirm = (
-                f"✅ VAULT SYNC OK — {ticker} · {timeframe_resolution} · "
-                f"{structural_move:.2f}% structural move · "
-                f"bars={st.session_state.room2_bar_count} · Massive REST lane live."
-            )
-            st.session_state.quantum_terminal_output = _assign_matrix_terminal_output(
-                quantum_report,
-                f"{vault_line}\n{confirm}",
-            )
-            st.session_state.room2_quantum_report = st.session_state.quantum_terminal_output
-            st.session_state.room2_stale_threshold_error = None
-            st.session_state.room2_vault_confirmation = confirm
-            st.session_state.matrix_cascade_active = False
-            st.session_state.matrix_cascade_final_output = st.session_state.quantum_terminal_output
-        st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
-        st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
-        _sync_matrix_chat_to_cloud()
-        return True
-    except Exception as exc:
-        fault_text = (
-            "⚠️ [PROCESSOR FAULT] Deploy halted safely.\n"
-            f"│ Detail: {str(exc)[:100]} │\n"
-            "│ Check: ticker letters only, times like 09:31 AM │"
-        )
-        st.session_state.quantum_terminal_output = fault_text
-        st.session_state.room2_quantum_report = fault_text
-        st.session_state.matrix_satellites_ready = True
-        st.session_state.matrix_cascade_active = False
-        return False
 
 
 def _fetch_active_layout_folders() -> list[str]:
