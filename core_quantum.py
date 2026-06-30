@@ -3949,10 +3949,231 @@ def emit_processing_heartbeat(line: str, *, detail: str = "") -> None:
 
 
 def flash_processing_fault(message: str) -> None:
-    """Hard-stop fault — bypass heartbeat and show the error immediately."""
+    """Hard-stop fault — bypass visuals and show the error immediately."""
+    clear_window1_visual_state()
     st.session_state.matrix_processing_active = False
     st.session_state.matrix_processing_logs = []
     st.session_state.quantum_terminal_output = message
+
+
+def clear_window1_visual_state() -> None:
+    st.session_state.matrix_window1_charts_html = ""
+    st.session_state.matrix_window1_rejection_text = ""
+
+
+def publish_window1_visual_charts(html: str) -> None:
+    """Store pre-gate chart HTML once Massive ingest succeeds."""
+    st.session_state.matrix_window1_charts_html = html
+    st.session_state.matrix_window1_rejection_text = ""
+
+
+def publish_window1_rejection_overlay(message: str) -> None:
+    """Companion rejection banner — keeps charts visible underneath."""
+    st.session_state.matrix_window1_rejection_text = message
+    st.session_state.matrix_processing_active = False
+    st.session_state.matrix_processing_logs = []
+    st.session_state.quantum_terminal_output = message
+
+
+def is_critical_window1_fault(message: str) -> bool:
+    """Connection/auth/syntax faults that bypass the visual chart stream."""
+    text = str(message or "").upper()
+    markers = (
+        "MASSIVE_HTTP_401",
+        "HTTP_401",
+        "UNKNOWN API KEY",
+        "PROCESSOR FAULT",
+        "THROTTLE",
+        "POLYGON REST DATA EMPTY",
+        "DATALINK: NO_DATA",
+        "DATALINK: FENCE_EMPTY",
+    )
+    return any(m in text for m in markers)
+
+
+def _chart_lane_baseline_window(
+    data_stream,
+    *,
+    timeframe_resolution: str,
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+):
+    end_dt = _parse_session_datetime(end_date, end_time)
+    start_dt = _parse_session_datetime(start_date, start_time)
+    if timeframe_resolution == "1-Minute" and start_dt is not None:
+        _, window = _dynamic_1m_dragnet_window(data_stream, start_dt)
+        return window
+    if timeframe_resolution == "5-Minute" and start_dt is not None:
+        _, window = _dynamic_5m_dragnet_window(data_stream, start_dt)
+        return window
+    if end_dt is not None:
+        lookback_start = _calibrated_lookback_start(
+            end_dt,
+            timeframe_resolution,
+            start_dt=start_dt,
+            data_stream=data_stream,
+        )
+        if lookback_start is not None:
+            return _lookback_window_frame(data_stream, end_dt, lookback_start)
+    return _ensure_dataframe(data_stream)
+
+
+def _svg_polyline(values: list[float], *, width: int, height: int, stroke: str) -> str:
+    if not values:
+        return ""
+    vmin = float(min(values))
+    vmax = float(max(values))
+    span = vmax - vmin or 1.0
+    n = len(values)
+    points: list[str] = []
+    for i, raw in enumerate(values):
+        x = 2 + (i / max(n - 1, 1)) * (width - 4)
+        y = height - 2 - ((float(raw) - vmin) / span) * (height - 4)
+        points.append(f"{x:.1f},{y:.1f}")
+    return (
+        f'<polyline fill="none" stroke="{stroke}" stroke-width="1.6" '
+        f'points="{" ".join(points)}"/>'
+    )
+
+
+def _svg_volume_envelope_grid(
+    volumes: list[float],
+    *,
+    mu: float,
+    sigma: float,
+    width: int = 400,
+    height: int = 88,
+) -> str:
+    if not volumes:
+        return ""
+    import html as html_mod
+
+    max_v = max(float(max(volumes)), mu + sigma, 1.0)
+    n = len(volumes)
+    slot = (width - 8) / max(n, 1)
+    bar_w = max(2.0, slot - 1.0)
+    parts: list[str] = []
+    ceil_v = mu + sigma
+    floor_v = max(0.0, mu - sigma)
+    ceil_y = height - 4 - (ceil_v / max_v) * (height - 10)
+    floor_y = height - 4 - (floor_v / max_v) * (height - 10)
+    parts.append(
+        f'<rect x="2" y="{ceil_y:.1f}" width="{width - 4}" height="{max(1.0, floor_y - ceil_y):.1f}" '
+        f'fill="rgba(52,199,89,0.07)" stroke="none"/>'
+    )
+    parts.append(
+        f'<line x1="2" y1="{ceil_y:.1f}" x2="{width - 2}" y2="{ceil_y:.1f}" '
+        f'stroke="#5BD975" stroke-width="1" stroke-dasharray="5,4" opacity="0.75"/>'
+    )
+    parts.append(
+        f'<line x1="2" y1="{floor_y:.1f}" x2="{width - 2}" y2="{floor_y:.1f}" '
+        f'stroke="#5BD975" stroke-width="1" stroke-dasharray="5,4" opacity="0.75"/>'
+    )
+    for i, vol in enumerate(volumes):
+        h = (float(vol) / max_v) * (height - 10)
+        x = 4 + i * slot
+        y = height - 4 - h
+        parts.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" '
+            f'fill="#145A2A" stroke="#34C759" stroke-width="0.45" opacity="0.92"/>'
+        )
+    legend = (
+        f"μ={mu:,.0f} σ={sigma:,.0f} · envelope "
+        f"[{floor_v:,.0f} – {ceil_v:,.0f}]"
+    )
+    return (
+        f'<div class="w1-chart-row w1-chart-volume">'
+        f'<div class="w1-chart-label">INDICATOR BAR GRID · 3H VOLUME σ-ENVELOPE</div>'
+        f'<svg class="w1-chart-svg" viewBox="0 0 {width} {height}" '
+        f'width="100%" height="{height}" preserveAspectRatio="none">{"".join(parts)}</svg>'
+        f'<div class="w1-chart-meta">{html_mod.escape(legend)}</div></div>'
+    )
+
+
+def build_window1_visual_charts_html(
+    data_stream,
+    *,
+    ticker: str,
+    timeframe_resolution: str,
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+) -> str:
+    """
+    Pre-gate visual stack for Window 1 — close trajectory, VWAP anchor, volume σ-grid.
+  Rendered immediately after successful Massive ingest, before ignition gates.
+    """
+    import html as html_mod
+
+    frame = _ensure_dataframe(data_stream)
+    if frame is None or frame.empty or "Close" not in frame.columns:
+        return ""
+
+    baseline = _chart_lane_baseline_window(
+        data_stream,
+        timeframe_resolution=timeframe_resolution,
+        start_date=start_date,
+        start_time=start_time,
+        end_date=end_date,
+        end_time=end_time,
+    )
+    envelope = _three_hour_baseline_envelope(baseline)
+
+    closes = frame["Close"].astype(float).tolist()
+    if "VWAP" in frame.columns:
+        vwaps = frame["VWAP"].astype(float).tolist()
+    else:
+        vwaps = closes[:]
+    volumes = (
+        frame["Volume"].astype(float).tolist()
+        if "Volume" in frame.columns
+        else [0.0] * len(closes)
+    )
+
+    width = 400
+    close_line = _svg_polyline(closes, width=width, height=52, stroke="#34C759")
+    vwap_line = _svg_polyline(vwaps, width=width, height=52, stroke="#7AE582")
+    vol_grid = _svg_volume_envelope_grid(
+        volumes,
+        mu=float(envelope.get("mean", 0.0)),
+        sigma=float(envelope.get("std", 0.0)),
+        width=width,
+        height=88,
+    )
+
+    try:
+        t0 = frame.index[0].strftime("%H:%M")
+        t1 = frame.index[-1].strftime("%H:%M")
+        span_label = f"{t0} → {t1} · {len(frame)} bars"
+    except Exception:
+        span_label = f"{len(frame)} bars"
+
+    ticker_clean = html_mod.escape(str(ticker or "").strip().upper())
+    tf_clean = html_mod.escape(str(timeframe_resolution))
+    close_bounds = f"{min(closes):.2f} → {max(closes):.2f}"
+    vwap_bounds = f"{min(vwaps):.2f} → {max(vwaps):.2f}"
+
+    return (
+        '<div class="w1-visual-shell">'
+        f'<div class="w1-visual-title">▸ {ticker_clean} · {tf_clean} · {html_mod.escape(span_label)}</div>'
+        '<div class="w1-chart-row">'
+        '<div class="w1-chart-label">CHART LINE 1 · CLOSE TRAJECTORY</div>'
+        f'<svg class="w1-chart-svg" viewBox="0 0 {width} 52" width="100%" height="52" '
+        f'preserveAspectRatio="none">{close_line}</svg>'
+        f'<div class="w1-chart-meta">{html_mod.escape(close_bounds)}</div>'
+        "</div>"
+        '<div class="w1-chart-row">'
+        '<div class="w1-chart-label">CHART LINE 2 · MASSIVE VWAP (vw) ANCHOR</div>'
+        f'<svg class="w1-chart-svg" viewBox="0 0 {width} 52" width="100%" height="52" '
+        f'preserveAspectRatio="none">{vwap_line}</svg>'
+        f'<div class="w1-chart-meta">{html_mod.escape(vwap_bounds)}</div>'
+        "</div>"
+        f"{vol_grid}"
+        "</div>"
+    )
 
 
 def complete_processing_heartbeat(final_terminal: str) -> None:

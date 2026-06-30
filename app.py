@@ -318,6 +318,66 @@ st.markdown("""
             white-space: pre-wrap;
             word-break: break-word;
         }
+        .w1-visual-shell {
+            background: #050505;
+            border: 1px solid #0D3D0D;
+            border-radius: 4px;
+            padding: 14px 16px 10px;
+            margin-bottom: 8px;
+            box-shadow: inset 0 0 28px rgba(52, 199, 89, 0.05);
+        }
+        .w1-visual-title {
+            font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+            font-size: 10px;
+            letter-spacing: 0.04em;
+            color: #5BD975;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+        .w1-chart-row {
+            margin-bottom: 12px;
+        }
+        .w1-chart-label {
+            font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+            font-size: 9px;
+            color: #7AE582;
+            letter-spacing: 0.06em;
+            margin-bottom: 4px;
+        }
+        .w1-chart-meta {
+            font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+            font-size: 9px;
+            color: #34C759;
+            opacity: 0.85;
+            margin-top: 3px;
+        }
+        .w1-chart-svg {
+            display: block;
+            background: #030303;
+            border: 1px solid #123812;
+            border-radius: 3px;
+        }
+        .w1-rejection-overlay {
+            background: #1A0A0A;
+            border: 1px solid #6B2020;
+            border-radius: 4px;
+            padding: 12px 14px;
+            margin-top: 8px;
+            font-family: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+            font-size: 11px;
+            line-height: 1.5;
+            color: #FF6B6B;
+            text-shadow: 0 0 8px rgba(255, 107, 107, 0.25);
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .w1-critical-fault {
+            white-space: pre-wrap;
+            word-break: break-word;
+            color: #FF6B6B;
+            border-color: #6B2020;
+            text-shadow: 0 0 8px rgba(255, 107, 107, 0.2);
+        }
         .room2-matrix-cascade-shell {
             background: #050505;
             border: 1px solid #0D3D0D;
@@ -605,6 +665,8 @@ if "matrix_cascade_started_at" not in st.session_state: st.session_state.matrix_
 if "matrix_cascade_final_output" not in st.session_state: st.session_state.matrix_cascade_final_output = ""
 if "matrix_processing_active" not in st.session_state: st.session_state.matrix_processing_active = False
 if "matrix_processing_logs" not in st.session_state: st.session_state.matrix_processing_logs = []
+if "matrix_window1_charts_html" not in st.session_state: st.session_state.matrix_window1_charts_html = ""
+if "matrix_window1_rejection_text" not in st.session_state: st.session_state.matrix_window1_rejection_text = ""
 if "room2_processor" not in st.session_state: st.session_state.room2_processor = {}
 if "matrix_satellites_ready" not in st.session_state: st.session_state.matrix_satellites_ready = True
 if "r2_data_feed_mode" not in st.session_state: st.session_state.r2_data_feed_mode = DATA_FEED_CAROUSEL
@@ -2381,6 +2443,7 @@ def _capture_room2_deploy_snapshot() -> dict:
 def _arm_room2_processor() -> None:
     """Queue a live processing heartbeat run — steps execute from Window 1 on reruns."""
     core_quantum.reset_processing_heartbeat()
+    core_quantum.clear_window1_visual_state()
     st.session_state.room2_processor = {
         "active": True,
         "step": 0,
@@ -2401,12 +2464,28 @@ def _arm_room2_processor() -> None:
 
 
 def _halt_room2_processor(*, fault_text: str) -> str:
-    """Instant hard-stop — no artificial pacing."""
+    """Instant hard-stop for connection/auth/syntax faults — full-screen text only."""
     proc = st.session_state.get("room2_processor") or {}
     proc["active"] = False
     st.session_state.room2_processor = proc
     core_quantum.flash_processing_fault(fault_text)
     st.session_state.room2_quantum_report = fault_text
+    st.session_state.matrix_satellites_ready = True
+    st.session_state.matrix_cascade_active = False
+    return "failed"
+
+
+def _halt_room2_processor_with_charts(*, fault_text: str) -> str:
+    """Post-ingest rejection — keep charts visible with companion trash overlay."""
+    proc = st.session_state.get("room2_processor") or {}
+    proc["active"] = False
+    st.session_state.room2_processor = proc
+    core_quantum.publish_window1_rejection_overlay(fault_text)
+    st.session_state.room2_quantum_report = fault_text
+    st.session_state.room2_chart_coupling = st.session_state.get("room2_chart_coupling") or {
+        "passed": False,
+        "trashed": True,
+    }
     st.session_state.matrix_satellites_ready = True
     st.session_state.matrix_cascade_active = False
     return "failed"
@@ -2651,6 +2730,17 @@ def _advance_room2_processor() -> str:
                 start_norm=start_norm,
                 end_norm=end_norm,
             )
+            charts_html = core_quantum.build_window1_visual_charts_html(
+                data_stream,
+                ticker=ticker,
+                timeframe_resolution=timeframe_resolution,
+                start_date=start_date,
+                start_time=start_time,
+                end_date=end_date,
+                end_time=end_time,
+            )
+            if charts_html:
+                core_quantum.publish_window1_visual_charts(charts_html)
             proc["data_stream"] = data_stream
             proc["start_norm"] = start_norm
             proc["end_norm"] = end_norm
@@ -2679,19 +2769,24 @@ def _advance_room2_processor() -> str:
             st.session_state.room2_chart_coupling = chart_coupling
 
             if not chart_coupling.get("passed"):
-                reasons = ", ".join(chart_coupling.get("rejection_reasons") or ["chart_failed"])
-                return _halt_room2_processor(
-                    fault_text=(
-                        f"🗑️ PRE-STORAGE TRASH — Chart coupling failed ({reasons}). "
+                reasons = chart_coupling.get("rejection_reasons") or ["chart_failed"]
+                if "no_volume_ignition" in reasons:
+                    trash_text = (
+                        "🗑️ PRE-STORAGE TRASH — Chart coupling failed (no_volume_ignition)"
+                    )
+                else:
+                    reasons_label = ", ".join(reasons)
+                    trash_text = (
+                        f"🗑️ PRE-STORAGE TRASH — Chart coupling failed ({reasons_label}). "
                         "Market data lane blocked — SEC/vault writes halted."
                     )
-                )
+                return _halt_room2_processor_with_charts(fault_text=trash_text)
             if not quality.get("passed"):
                 floor_pct = quality.get("floor_pct", 1.0)
                 move_pct = quality.get("structural_move_pct", 0.0)
                 net = quality.get("net_margin_pct", move_pct)
                 friction = quality.get("execution_friction_buffer_pct", 0.0)
-                return _halt_room2_processor(
+                return _halt_room2_processor_with_charts(
                     fault_text=(
                         f"🗑️ PRE-STORAGE TRASH — Net margin {net:.2f}% failed "
                         f"{floor_pct:.1f}% strict alpha floor for {timeframe_resolution} "
@@ -2783,7 +2878,7 @@ def _advance_room2_processor() -> str:
             )
 
             if not (st.session_state.get("room2_chart_coupling") or {}).get("passed"):
-                return _halt_room2_processor(
+                return _halt_room2_processor_with_charts(
                     fault_text=(
                         "🗑️ PRE-STORAGE TRASH — Chart coupling lock tripped. "
                         "Supabase write blocked."
@@ -2871,7 +2966,7 @@ def _advance_room2_processor() -> str:
 
 
 def _render_matrix_window1_panel() -> None:
-    """Window 1 — live processing heartbeat or finalized institutional readout."""
+    """Window 1 — hybrid chart stream, live heartbeat, or critical fault readout."""
     status = _advance_room2_processor()
 
     st.markdown(
@@ -2879,15 +2974,47 @@ def _render_matrix_window1_panel() -> None:
         unsafe_allow_html=True,
     )
 
-    if st.session_state.get("matrix_processing_active") or status == "running":
+    charts_html = str(st.session_state.get("matrix_window1_charts_html") or "").strip()
+    rejection = str(st.session_state.get("matrix_window1_rejection_text") or "").strip()
+    processing = bool(
+        st.session_state.get("matrix_processing_active") or status == "running"
+    )
+    terminal_text = _coerce_quantum_summary_to_text(st.session_state.quantum_terminal_output)
+
+    if charts_html:
+        st.markdown(charts_html, unsafe_allow_html=True)
+        if processing:
+            st.markdown(_build_processing_heartbeat_html(), unsafe_allow_html=True)
+            if status == "running":
+                st.rerun()
+            return
+        if rejection:
+            st.markdown(
+                f'<div class="w1-rejection-overlay">{escape(rejection)}</div>',
+                unsafe_allow_html=True,
+            )
+            return
+        if terminal_text and status == "complete":
+            st.markdown(
+                f'<div class="room2-matrix-box">{escape(terminal_text)}</div>',
+                unsafe_allow_html=True,
+            )
+            return
+        if status == "running":
+            st.rerun()
+        return
+
+    if processing:
         st.markdown(_build_processing_heartbeat_html(), unsafe_allow_html=True)
         if status == "running":
             st.rerun()
         return
 
-    terminal_text = _coerce_quantum_summary_to_text(st.session_state.quantum_terminal_output)
+    fault_class = "room2-matrix-box"
+    if core_quantum.is_critical_window1_fault(terminal_text):
+        fault_class = "room2-matrix-box w1-critical-fault"
     st.markdown(
-        f'<div class="room2-matrix-box">{escape(terminal_text)}</div>',
+        f'<div class="{fault_class}">{escape(terminal_text)}</div>',
         unsafe_allow_html=True,
     )
 
