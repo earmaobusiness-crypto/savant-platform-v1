@@ -11,6 +11,8 @@ from xml.etree import ElementTree
 import requests
 import streamlit as st
 
+import cloud_offload
+
 try:
     import pandas as pd
 except ImportError:
@@ -410,9 +412,16 @@ def resample_ohlcv_bars(frame_1m, rule: str):
 
 
 def _resolve_track_from_1m(frame_1m, timeframe_resolution: str):
-    rule = RESAMPLE_RULES.get(timeframe_resolution, "15min")
     if timeframe_resolution == "1-Minute":
         return frame_1m
+    remote = cloud_offload.remote_resample_track(frame_1m, timeframe_resolution)
+    if remote is not None and is_usable_data_stream(remote):
+        st.session_state.r2_resample_lane = "cloud_compute"
+        return remote
+    if cloud_offload.cloud_offload_strict() and cloud_offload.cloud_compute_enabled():
+        return None
+    rule = RESAMPLE_RULES.get(timeframe_resolution, "15min")
+    st.session_state.r2_resample_lane = "local_fallback"
     return resample_ohlcv_bars(frame_1m, rule)
 
 
@@ -598,7 +607,7 @@ def compute_metric_envelopes(
 ) -> dict:
     """
     Flexible std-dev envelopes for cold metrics — volume, velocity, spread.
-    Maps zones like 25M–35M volume instead of a single rigid threshold.
+    Offloaded to cloud compute when CLOUD_COMPUTE_URL is configured.
     """
     frame = _ensure_dataframe(data_stream)
     if frame is None or end_dt is None:
@@ -609,6 +618,20 @@ def compute_metric_envelopes(
         else:
             window = frame[frame.index <= end_dt]
         if not isinstance(window, pd.DataFrame) or window.empty:
+            return {}
+
+        start_iso = (
+            lookback_start_dt.isoformat() if lookback_start_dt is not None else None
+        )
+        end_iso = end_dt.isoformat() if end_dt is not None else None
+        remote = cloud_offload.remote_metric_envelopes(
+            window,
+            lookback_start=start_iso,
+            end_dt=end_iso,
+        )
+        if remote:
+            return remote
+        if cloud_offload.cloud_offload_strict() and cloud_offload.cloud_compute_enabled():
             return {}
 
         envelopes: dict = {}
@@ -656,47 +679,13 @@ def compute_metric_envelopes(
 
 @st.cache_resource(show_spinner=False)
 def _get_finbert_pipeline():
-    """Local Hugging Face FinBERT — free SEC/headline sentiment, no paid API keys."""
-    try:
-        from transformers import pipeline
-
-        return pipeline(
-            "sentiment-analysis",
-            model=FINBERT_MODEL_ID,
-            tokenizer=FINBERT_MODEL_ID,
-            truncation=True,
-            max_length=512,
-        )
-    except Exception:
-        return None
+    """Deprecated — local FinBERT removed in v3.4 cloud migration."""
+    return None
 
 
 def finbert_sentiment_score(text: str) -> float:
-    """
-    Hard numeric sentiment: Positive probability minus Negative probability ∈ [-1, +1].
-    """
-    clean = str(text or "").strip()
-    if not clean:
-        return 0.0
-    pipe = _get_finbert_pipeline()
-    if pipe is None:
-        return 0.0
-    try:
-        raw = pipe(clean, top_k=None)
-        rows = raw[0] if raw and isinstance(raw[0], list) else raw
-        if not isinstance(rows, list):
-            rows = [rows]
-        pos = neg = 0.0
-        for row in rows:
-            label = str(row.get("label", "")).lower()
-            prob = float(row.get("score", 0.0))
-            if "positive" in label:
-                pos = prob
-            elif "negative" in label:
-                neg = prob
-        return round(max(-1.0, min(1.0, pos - neg)), 4)
-    except Exception:
-        return 0.0
+    """Serverless FinBERT coordinate via Hugging Face Inference API."""
+    return cloud_offload.hf_sentiment_score(text)
 
 
 def score_semantic_catalyst_stream(
@@ -704,7 +693,7 @@ def score_semantic_catalyst_stream(
     filing_texts: list[str] | None = None,
 ) -> dict:
     """
-    Local FinBERT sentiment core — SEC EDGAR headers + public headline strings.
+    SEC / headline text-to-vector lane — Hugging Face Serverless inference only.
     """
     clean_headlines = [str(h).strip() for h in headlines if str(h).strip()]
     clean_filings = [str(f).strip() for f in (filing_texts or []) if str(f).strip()]
@@ -715,11 +704,11 @@ def score_semantic_catalyst_stream(
             "message_velocity": 0.0,
             "audience_scale": 0.0,
             "impact_weight": 0.0,
-            "semantic_mode": "finbert_local",
+            "semantic_mode": "hf_serverless",
             "headline_count": 0,
             "filing_count": 0,
         }
-    scores = [finbert_sentiment_score(t) for t in all_texts]
+    scores = cloud_offload.hf_sentiment_batch(all_texts)
     aggregate = round(sum(scores) / len(scores), 4) if scores else 0.0
     headline_scores = scores[: len(clean_headlines)]
     filing_scores = scores[len(clean_headlines) :]
@@ -728,6 +717,7 @@ def score_semantic_catalyst_stream(
     )
     audience_scale = round(statistics.mean([len(h) for h in all_texts]), 2)
     impact_weight = round(abs(aggregate) * (1.0 + math.log1p(message_velocity)), 4)
+    mode = "hf_serverless" if cloud_offload.huggingface_enabled() else "hf_unconfigured"
     return {
         "finbert_sentiment_score": aggregate,
         "headline_sentiment_scores": headline_scores,
@@ -735,7 +725,7 @@ def score_semantic_catalyst_stream(
         "message_velocity": message_velocity,
         "audience_scale": audience_scale,
         "impact_weight": impact_weight,
-        "semantic_mode": "finbert_local",
+        "semantic_mode": mode,
         "headline_count": len(clean_headlines),
         "filing_count": len(clean_filings),
     }
@@ -1454,29 +1444,30 @@ def extract_master_signature_vector(
     library: list[dict] | None = None,
 ) -> dict:
     """
-    Genetic cross-reference — high overlap merges into a unified Master Signature;
-    non-matching noise is discarded to keep the layout DNA pure.
+    Genetic cross-reference — high overlap merges via Supabase RPC on database servers.
     """
-    library = library or list(st.session_state.get("layout_master_matrix_index", []))
-    spatial = compute_spatial_layout_match(snapshot_vec, library)
+    _ = library
+    spatial = compute_spatial_layout_match(snapshot_vec)
     overlap = max(int(spatial_match_pct or 0), int(spatial.get("spatial_match_pct") or 0))
-    nearest = str(spatial.get("nearest_layout_id") or "NEW_LAYOUT")
+
+    merged = cloud_offload.rpc_merge_layout_signature(
+        snapshot_vec,
+        match_threshold=LAYOUT_SIGNATURE_MATCH_THRESHOLD / 100.0,
+        noise_epsilon=NOISE_DIM_EPSILON,
+    )
+    if merged and isinstance(merged.get("master_signature"), list):
+        sig = [float(x) for x in merged["master_signature"]]
+        return {
+            "master_signature": sig,
+            "layout_id": str(merged.get("layout_id") or "PURGATORY_PENDING"),
+            "overlap_pct": int(merged.get("overlap_pct") or overlap),
+            "noise_discarded": bool(merged.get("noise_discarded")),
+            "dimensions_trashed": int(merged.get("dimensions_trashed") or 0),
+            "pure_overlap_dims": int(merged.get("pure_overlap_dims") or 0),
+        }
 
     if overlap >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
-        for entry in library:
-            if str(entry.get("layout_id")) != nearest:
-                continue
-            stored = entry.get("vector") or []
-            if len(stored) == len(snapshot_vec):
-                merged, discarded = _purge_non_overlapping_dimensions(snapshot_vec, stored)
-                return {
-                    "master_signature": merged,
-                    "layout_id": nearest,
-                    "overlap_pct": overlap,
-                    "noise_discarded": True,
-                    "dimensions_trashed": discarded,
-                    "pure_overlap_dims": len(stored) - discarded,
-                }
+        nearest = str(spatial.get("nearest_layout_id") or "NEW_LAYOUT")
         return {
             "master_signature": snapshot_vec,
             "layout_id": nearest,
@@ -3092,13 +3083,30 @@ def compute_spatial_layout_match(
     snapshot_vec: list[float],
     library: list[dict] | None = None,
 ) -> dict:
-    """Cosine/Euclidean spatial clustering vs compressed master matrix index."""
-    library = library or list(st.session_state.get("layout_master_matrix_index", []))
+    """Cosine spatial clustering — executed on Supabase, not in local RAM."""
+    _ = library
+    remote = cloud_offload.rpc_match_layout_spatial(snapshot_vec)
+    if remote:
+        st.session_state.r2_spatial_lane = "supabase_rpc"
+        return remote
+
+    if cloud_offload.cloud_offload_strict() and cloud_offload.supabase_configured():
+        return {
+            "spatial_match_pct": 0,
+            "cosine_similarity": 0.0,
+            "euclidean_distance": 999.0,
+            "nearest_layout_id": "NEW_LAYOUT",
+        }
+
+    st.session_state.r2_spatial_lane = "local_fallback"
+    index = list(st.session_state.get("layout_master_matrix_index") or [])
     best_cosine = 0.0
     best_euclidean = 999.0
     nearest_layout = "NEW_LAYOUT"
-    for entry in library:
+    for entry in index:
         stored = entry.get("vector") or []
+        if not stored:
+            continue
         cos = _cosine_similarity(snapshot_vec, stored)
         euc = _euclidean_distance(snapshot_vec, stored)
         if cos > best_cosine:
@@ -3121,13 +3129,13 @@ def register_layout_vector_in_master_index(
     ticker: str,
     timeframe_resolution: str,
 ) -> None:
-    """Ultra-compressed master matrix index — prevents layout token amnesia."""
+    """Layout registry metadata only — vectors persist in Supabase vault, not local RAM."""
+    _ = vector
     index = list(st.session_state.get("layout_master_matrix_index", []))
     index.insert(
         0,
         {
             "layout_id": layout_id,
-            "vector": vector,
             "ticker": str(ticker).upper(),
             "timeframe_resolution": timeframe_resolution,
         },
@@ -3204,8 +3212,7 @@ def hydrate_layout_library_from_vault() -> int:
     seen: set[str] = set()
     for row in rows:
         layout_id = str(row.get("macro_weather_layout") or "").strip()
-        vector = _parse_master_signature_from_row(row)
-        if not layout_id or not vector:
+        if not layout_id:
             continue
         dedupe = f"{layout_id}|{row.get('timeframe_resolution')}|{row.get('ticker')}"
         if dedupe in seen:
@@ -3214,7 +3221,6 @@ def hydrate_layout_library_from_vault() -> int:
         index.append(
             {
                 "layout_id": layout_id,
-                "vector": vector,
                 "ticker": str(row.get("ticker") or "").upper(),
                 "timeframe_resolution": str(row.get("timeframe_resolution") or ""),
                 "structural_move_pct": float(row.get("structural_move_pct") or 0.0),
@@ -3222,6 +3228,7 @@ def hydrate_layout_library_from_vault() -> int:
         )
 
     st.session_state.layout_master_matrix_index = index[:256]
+    st.session_state.layout_library_hydrated_cloud = True
     return len(index)
 
 
@@ -3301,7 +3308,7 @@ def fetch_readonly_vault_reference_map() -> dict:
     Supabase access is GET-only — zero writes.
     """
     hydrate_layout_library_from_vault()
-    layout_vectors = list(st.session_state.get("layout_master_matrix_index") or [])
+    layout_count = len(st.session_state.get("layout_master_matrix_index") or [])
     table = _supabase_table_name()
     try:
         supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
@@ -3341,8 +3348,8 @@ def fetch_readonly_vault_reference_map() -> dict:
         )
     return {
         "readonly": True,
-        "layout_vector_count": len(layout_vectors),
-        "layout_vectors": layout_vectors[:48],
+        "layout_vector_count": layout_count,
+        "layout_registry": (st.session_state.get("layout_master_matrix_index") or [])[:48],
         "strategy_profiles": profiles[:48],
     }
 
@@ -3412,7 +3419,6 @@ def run_room1_strategic_audit_dragnet(ticker: str, user_query: str = "") -> dict
     """
     ticker_clean = str(ticker).strip().upper()
     vault_map = fetch_readonly_vault_reference_map()
-    library = vault_map.get("layout_vectors") or []
 
     data_stream = get_historical_interval_data(
         ticker_clean,
@@ -3433,25 +3439,28 @@ def run_room1_strategic_audit_dragnet(ticker: str, user_query: str = "") -> dict
     finbert_score = float(semantic.get("finbert_sentiment_score") or 0.0)
 
     live_vec = extract_forensic_feature_vector(velocity, math_block, finbert_score)
-    spatial = compute_spatial_layout_match(live_vec, library)
+    spatial = compute_spatial_layout_match(live_vec)
 
-    alignments: list[dict] = []
-    for entry in library[:32]:
-        stored = entry.get("vector") or []
-        if not stored or len(stored) != len(live_vec):
-            continue
-        cos = _cosine_similarity(live_vec, stored)
-        alignments.append(
-            {
-                "layout_id": entry.get("layout_id"),
-                "timeframe_resolution": entry.get("timeframe_resolution"),
-                "reference_ticker": entry.get("ticker"),
-                "cosine_similarity": round(cos, 4),
-                "spatial_match_pct": int(round(cos * 100)),
-            }
-        )
-    alignments.sort(key=lambda row: row.get("cosine_similarity", 0), reverse=True)
-    top_alignments = alignments[:5]
+    top_alignments = cloud_offload.rpc_top_layout_alignments(live_vec, limit=5)
+    if not top_alignments and not cloud_offload.cloud_offload_strict():
+        library = vault_map.get("layout_registry") or []
+        alignments: list[dict] = []
+        for entry in library[:32]:
+            stored = entry.get("vector") or []
+            if not stored or len(stored) != len(live_vec):
+                continue
+            cos = _cosine_similarity(live_vec, stored)
+            alignments.append(
+                {
+                    "layout_id": entry.get("layout_id"),
+                    "timeframe_resolution": entry.get("timeframe_resolution"),
+                    "reference_ticker": entry.get("ticker"),
+                    "cosine_similarity": round(cos, 4),
+                    "spatial_match_pct": int(round(cos * 100)),
+                }
+            )
+        alignments.sort(key=lambda row: row.get("cosine_similarity", 0), reverse=True)
+        top_alignments = alignments[:5]
 
     nearest_profile = None
     for profile in vault_map.get("strategy_profiles") or []:
@@ -4121,6 +4130,12 @@ def build_window1_visual_charts_html(
         end_time=end_time,
     )
     envelope = _three_hour_baseline_envelope(baseline)
+    if baseline is not None and not _dataframe_is_empty(baseline):
+        remote_env = cloud_offload.remote_volume_envelope(
+            cloud_offload.dataframe_to_bars(baseline)
+        )
+        if remote_env:
+            envelope = remote_env
 
     closes = frame["Close"].astype(float).tolist()
     if "VWAP" in frame.columns:

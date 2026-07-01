@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 from html import escape
 from xml.etree import ElementTree
 
+import cloud_offload
 import core_quantum
 import self_surgery
 import requests
@@ -697,9 +698,8 @@ def _room1_readonly_layout_context() -> str:
             "layout_id": entry.get("layout_id"),
             "timeframe_resolution": entry.get("timeframe_resolution"),
             "ticker": entry.get("ticker"),
-            "vector_dims": len(entry.get("vector") or []),
         }
-        for entry in (vault_map.get("layout_vectors") or [])[:32]
+        for entry in (vault_map.get("layout_registry") or [])[:32]
     ]
     return (
         f"[READONLY_LAYOUT_LIBRARY]{json.dumps(preview, default=str)}"
@@ -3347,6 +3347,24 @@ def render_room2_forensic_lab():
         f"☁️ **Winning-DNA Memory (cloud-synced):** {active_count} active layouts · "
         f"{trash_count} in {RESCUE_VAULT_RETENTION_DAYS}-day Trash Vault."
     )
+    offload = cloud_offload.offload_status()
+    lanes = []
+    if offload.get("cloud_compute"):
+        lanes.append("Compute")
+    if offload.get("hf_serverless"):
+        lanes.append("HF Inference")
+    if offload.get("supabase_rpc"):
+        lanes.append("Supabase RPC")
+    if lanes:
+        st.caption(
+            f"🛰️ **Distributed offload active:** {' · '.join(lanes)} — "
+            "local terminal is a lightweight viewer."
+        )
+    elif offload.get("strict_mode"):
+        st.warning(
+            "Cloud offload not fully configured — set CLOUD_COMPUTE_URL, "
+            "HUGGINGFACE_API_TOKEN, and Supabase keys in secrets."
+        )
     _render_dynamic_layout_registry()
     decay_status = st.session_state.get("room2_alpha_decay_status")
     if decay_status:
