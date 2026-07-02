@@ -1,3 +1,10 @@
+"""
+Savant Quant Terminal — core ingestion, coupling gates, and cloud-offloaded math.
+
+v4.0: Massive REST-only datalink, fluid regime lookback lanes, hill interceptor,
+Supabase/pgvector spatial clustering, Hugging Face serverless SEC inference.
+"""
+
 import datetime
 import json
 import math
@@ -21,12 +28,14 @@ except ImportError:
 POLYGON_CALLS_PER_MINUTE = 5
 POLYGON_REST_DATA_EMPTY = "POLYGON REST DATA EMPTY"
 MASSIVE_API_BASE = "https://api.massive.com"
-POLYGON_API_BASE = "https://api.polygon.io"
-MASSIVE_API_BASES = (MASSIVE_API_BASE, POLYGON_API_BASE)
+MASSIVE_PUBLIC_HOST = "massive.com"
+MASSIVE_API_BASES = (MASSIVE_API_BASE,)
+MASSIVE_REST_COOLDOWN_SEC = 12
 WEBSOCKET_STREAMING_DISABLED = True
 FIVE_MINUTE_DRAGNET_BARS = 36
 ONE_MINUTE_DRAGNET_BARS = 5
 FIFTEEN_MINUTE_DRAGNET_BARS = 48
+FIVE_MINUTE_SYNTHETIC_SLIPPAGE_PCT = 1.0
 PROCESSING_LANE_BARS = {
     "1-Minute": ONE_MINUTE_DRAGNET_BARS,
     "5-Minute": FIVE_MINUTE_DRAGNET_BARS,
@@ -50,7 +59,7 @@ HILL_BYPASS_LOCAL_BARS = 6
 HILL_MARGIN_SHRINK_MIN_PCT = 0.25
 HILL_DROP_MIN_PCT = 0.35
 LOOKBACK_DELTAS = {
-    "15-Minute": datetime.timedelta(hours=18),
+    "15-Minute": datetime.timedelta(hours=12),
 }
 NOISE_DIM_EPSILON = 0.18
 SEMANTIC_EMBED_DIMS = 32
@@ -277,6 +286,11 @@ def fetch_massive_session_1m_package(
     if not _consume_polygon_call():
         return None, "THROTTLE"
 
+    last_pull = float(st.session_state.get("massive_last_pull_at") or 0.0)
+    elapsed = time.time() - last_pull
+    if last_pull > 0 and elapsed < MASSIVE_REST_COOLDOWN_SEC:
+        time.sleep(MASSIVE_REST_COOLDOWN_SEC - elapsed)
+
     payload: dict | None = None
     last_status = 0
     last_detail = ""
@@ -321,6 +335,7 @@ def fetch_massive_session_1m_package(
 
     results = payload.get("results")
     if isinstance(results, list) and len(results) > 0:
+        st.session_state.massive_last_pull_at = time.time()
         return results, None
 
     status = str(payload.get("status", "")).upper()
@@ -538,6 +553,11 @@ def _dynamic_5m_dragnet_window(data_stream, start_dt: datetime.datetime | None):
     return _dynamic_bar_dragnet_window(data_stream, start_dt, FIVE_MINUTE_DRAGNET_BARS)
 
 
+def _dynamic_15m_dragnet_window(data_stream, start_dt: datetime.datetime | None):
+    """Boundary-less 12-hour / 48-bar lookback on the 15m track from operator Start Time."""
+    return _dynamic_bar_dragnet_window(data_stream, start_dt, FIFTEEN_MINUTE_DRAGNET_BARS)
+
+
 def _calibrated_lookback_start(
     end_dt: datetime.datetime,
     timeframe_resolution: str,
@@ -554,6 +574,10 @@ def _calibrated_lookback_start(
             return lookback_start
     if timeframe_resolution == "5-Minute" and start_dt is not None:
         lookback_start, _ = _dynamic_5m_dragnet_window(data_stream, start_dt)
+        if lookback_start is not None:
+            return lookback_start
+    if timeframe_resolution == "15-Minute" and start_dt is not None:
+        lookback_start, _ = _dynamic_15m_dragnet_window(data_stream, start_dt)
         if lookback_start is not None:
             return lookback_start
     if timeframe_resolution == "1-Minute" and start_dt is not None:
@@ -591,6 +615,10 @@ def _research_dragnet_lookback_start(
             return lookback_start
     if timeframe_resolution == "5-Minute" and start_dt is not None:
         lookback_start, _ = _dynamic_5m_dragnet_window(data_stream, start_dt)
+        if lookback_start is not None:
+            return lookback_start
+    if timeframe_resolution == "15-Minute" and start_dt is not None:
+        lookback_start, _ = _dynamic_15m_dragnet_window(data_stream, start_dt)
         if lookback_start is not None:
             return lookback_start
     if timeframe_resolution == "15-Minute":
@@ -688,9 +716,46 @@ def finbert_sentiment_score(text: str) -> float:
     return cloud_offload.hf_sentiment_score(text)
 
 
+def _parse_iso_timestamp(ts) -> datetime.datetime | None:
+    if ts is None:
+        return None
+    if isinstance(ts, datetime.datetime):
+        return ts
+    try:
+        return datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _catalyst_filing_ignition_gap_minutes(
+    filings: list[dict],
+    volatility_ignition_ts,
+) -> float | None:
+    """Fluid time-gap delta between SEC filing drop and volatility ignition minute."""
+    ignition_dt = _parse_iso_timestamp(volatility_ignition_ts)
+    if ignition_dt is None or not filings:
+        return None
+    best_gap: float | None = None
+    for filing in filings:
+        fd = filing.get("filing_date")
+        if not fd:
+            continue
+        try:
+            filing_dt = datetime.datetime.strptime(str(fd), "%Y-%m-%d")
+        except ValueError:
+            continue
+        gap_min = abs((ignition_dt - filing_dt).total_seconds()) / 60.0
+        if best_gap is None or gap_min < best_gap:
+            best_gap = gap_min
+    return round(best_gap, 2) if best_gap is not None else None
+
+
 def score_semantic_catalyst_stream(
     headlines: list[str],
     filing_texts: list[str] | None = None,
+    *,
+    filing_records: list[dict] | None = None,
+    volatility_ignition_ts=None,
 ) -> dict:
     """
     SEC / headline text-to-vector lane — Hugging Face Serverless inference only.
@@ -707,6 +772,8 @@ def score_semantic_catalyst_stream(
             "semantic_mode": "hf_serverless",
             "headline_count": 0,
             "filing_count": 0,
+            "catalyst_gap_minutes": None,
+            "catalyst_gap_score": 0.0,
         }
     scores = cloud_offload.hf_sentiment_batch(all_texts)
     aggregate = round(sum(scores) / len(scores), 4) if scores else 0.0
@@ -718,6 +785,14 @@ def score_semantic_catalyst_stream(
     audience_scale = round(statistics.mean([len(h) for h in all_texts]), 2)
     impact_weight = round(abs(aggregate) * (1.0 + math.log1p(message_velocity)), 4)
     mode = "hf_serverless" if cloud_offload.huggingface_enabled() else "hf_unconfigured"
+    catalyst_gap_minutes = _catalyst_filing_ignition_gap_minutes(
+        list(filing_records or []),
+        volatility_ignition_ts,
+    )
+    catalyst_gap_score = 0.0
+    if catalyst_gap_minutes is not None:
+        catalyst_gap_score = round(max(0.0, 1.0 - min(catalyst_gap_minutes, 1440.0) / 1440.0), 4)
+        impact_weight = round(impact_weight * (1.0 + catalyst_gap_score), 4)
     return {
         "finbert_sentiment_score": aggregate,
         "headline_sentiment_scores": headline_scores,
@@ -728,6 +803,8 @@ def score_semantic_catalyst_stream(
         "semantic_mode": mode,
         "headline_count": len(clean_headlines),
         "filing_count": len(clean_filings),
+        "catalyst_gap_minutes": catalyst_gap_minutes,
+        "catalyst_gap_score": catalyst_gap_score,
     }
 
 
@@ -1087,25 +1164,33 @@ def _volatility_ignition_anchor(window, search_from_idx=None) -> tuple[object | 
     return None, None
 
 
-def _execution_friction_buffer_pct(window) -> float:
-    """Simulated slippage buffer (0.5%–1.5%) from spread thickness."""
+def _execution_friction_buffer_pct(
+    window,
+    *,
+    timeframe_resolution: str = "",
+) -> float:
+    """Simulated slippage buffer (0.5%–1.5%) from spread thickness; 5m hard 1.0% floor."""
     if window is None or (isinstance(window, pd.DataFrame) and window.empty):
-        return EXECUTION_FRICTION_SLIPPAGE_MIN
-    if not isinstance(window, pd.DataFrame):
-        return EXECUTION_FRICTION_SLIPPAGE_MIN
-    if "High" not in window.columns or "Low" not in window.columns or "Close" not in window.columns:
-        return EXECUTION_FRICTION_SLIPPAGE_MIN
-    spread_pct = (
-        (window["High"].astype(float) - window["Low"].astype(float))
-        / window["Close"].astype(float).replace(0.0, float("nan"))
-        * 100.0
-    )
-    mean_spread = float(spread_pct.mean(skipna=True) or 0.0)
-    lo_sp, hi_sp = 0.05, 1.5
-    t = max(0.0, min(1.0, (mean_spread - lo_sp) / (hi_sp - lo_sp)))
-    return EXECUTION_FRICTION_SLIPPAGE_MIN + t * (
-        EXECUTION_FRICTION_SLIPPAGE_MAX - EXECUTION_FRICTION_SLIPPAGE_MIN
-    )
+        base = EXECUTION_FRICTION_SLIPPAGE_MIN
+    elif not isinstance(window, pd.DataFrame):
+        base = EXECUTION_FRICTION_SLIPPAGE_MIN
+    elif "High" not in window.columns or "Low" not in window.columns or "Close" not in window.columns:
+        base = EXECUTION_FRICTION_SLIPPAGE_MIN
+    else:
+        spread_pct = (
+            (window["High"].astype(float) - window["Low"].astype(float))
+            / window["Close"].astype(float).replace(0.0, float("nan"))
+            * 100.0
+        )
+        mean_spread = float(spread_pct.mean(skipna=True) or 0.0)
+        lo_sp, hi_sp = 0.05, 1.5
+        t = max(0.0, min(1.0, (mean_spread - lo_sp) / (hi_sp - lo_sp)))
+        base = EXECUTION_FRICTION_SLIPPAGE_MIN + t * (
+            EXECUTION_FRICTION_SLIPPAGE_MAX - EXECUTION_FRICTION_SLIPPAGE_MIN
+        )
+    if str(timeframe_resolution).strip() == "5-Minute":
+        return max(float(base), FIVE_MINUTE_SYNTHETIC_SLIPPAGE_PCT)
+    return float(base)
 
 
 def _candidate_manual_anchor(window, manual_entry_dt) -> tuple[object | None, float | None]:
@@ -1624,7 +1709,10 @@ def evaluate_playbook_quality_barrier(
             structural_move_pct = abs((exit_price - ignition_price) / ignition_price * 100)
 
     gate_window = _lookback_window_frame(data_stream, end_dt, anchor_search_start)
-    friction_pct = _execution_friction_buffer_pct(gate_window)
+    friction_pct = _execution_friction_buffer_pct(
+        gate_window,
+        timeframe_resolution=timeframe_resolution,
+    )
     net_margin_pct = round(structural_move_pct - friction_pct, 4)
     passed = net_margin_pct >= floor_pct
     quality = {
@@ -2767,10 +2855,25 @@ def run_deep_internet_research_audit(
         f"SEC {f.get('form', 'FILING')} filed {f.get('filing_date', '')}"
         for f in (sec_dragnet.get("filings") or [])
     ]
-    semantic_catalyst = dragnet_blob.get("semantic_catalyst") or score_semantic_catalyst_stream(
-        news_headlines,
-        filing_texts=filing_texts,
-    )
+    ignition_ts = quality.get("volatility_ignition_timestamp") or quality.get("anchor_timestamp")
+    if st.session_state.get("room2_sentiment_suppressed"):
+        semantic_catalyst = {
+            "finbert_sentiment_score": 0.0,
+            "message_velocity": 0.0,
+            "audience_scale": 0.0,
+            "impact_weight": 0.0,
+            "semantic_mode": "suppressed_chart_coupling_lock",
+            "headline_count": 0,
+            "filing_count": 0,
+            "suppressed": True,
+        }
+    else:
+        semantic_catalyst = dragnet_blob.get("semantic_catalyst") or score_semantic_catalyst_stream(
+            news_headlines,
+            filing_texts=filing_texts,
+            filing_records=sec_dragnet.get("filings") or [],
+            volatility_ignition_ts=ignition_ts,
+        )
     news_sentiment = semantic_catalyst
 
     master_sig = st.session_state.get("room2_master_signature") or {}
@@ -3760,14 +3863,20 @@ def validate_chart_data_coupling(data_stream, quality: dict | None = None) -> di
             reasons.append("zero_volume")
 
     flatline = False
+    zero_velocity = False
     if frame is not None and not frame.empty and "Close" in frame.columns and len(frame) >= 2:
         closes = frame["Close"].astype(float)
         first = float(closes.iloc[0])
         last = float(closes.iloc[-1])
         move_pct = abs((last - first) / first * 100.0) if first else 0.0
+        vel_series = closes.pct_change().fillna(0.0) * 100.0
+        max_vel = float(vel_series.abs().max() or 0.0)
         if move_pct < 0.01 and float(closes.std() or 0.0) < 1e-8:
             flatline = True
             reasons.append("flatline_zero_move")
+        if max_vel < 0.01:
+            zero_velocity = True
+            reasons.append("velocity_flatline_0pct")
 
     ignition = bool(quality.get("liquidity_ignition"))
     if not ignition:
@@ -3786,6 +3895,7 @@ def validate_chart_data_coupling(data_stream, quality: dict | None = None) -> di
         "trashed": not passed,
         "chart_coupling_ok": passed,
         "flatline": flatline,
+        "zero_velocity": zero_velocity,
         "total_volume": round(total_volume, 0),
         "rejection_reasons": reasons,
         "trash_reason": "|".join(reasons) if reasons else None,

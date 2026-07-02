@@ -995,14 +995,14 @@ def get_live_tape_data(ticker):
         vwap_val = float(str(vw_str).replace("$", "")) if vw_str not in ("N/A", "") else 0.0
 
         st.session_state.active_news_wire = _fetch_news_wire(ticker)
-        sector_ctx = _fetch_sector_rotation()
-        corr_ctx = _compute_cross_asset_correlation(ticker)
         vol_ctx, inst_flag = _compute_volatility_engine(ticker, price, raw_vol, vwap_val)
         st.session_state.institutional_accumulation_detected = inst_flag
+        st.session_state.sector_rotation_context = ""
+        st.session_state.cross_asset_correlation_context = ""
         sec_ctx = _fetch_sec_filings(ticker)
         _build_data_payload_string(
             ticker, name, price, pct, vol, vw_str,
-            st.session_state.active_news_wire, sector_ctx, vol_ctx, sec_ctx, corr_ctx,
+            st.session_state.active_news_wire, "", vol_ctx, sec_ctx, "",
         )
         return price, pct, vol, vw_str, name
     except Exception:
@@ -2253,8 +2253,7 @@ def _render_r2_adaptive_buffer_toggles(deck_prefix: str) -> None:
     else:
         st.markdown(
             f'<div class="r2-buffer-readout">☁️ CLOUD STREAM — '
-            f'{escape(_processor_lane_readout(active))} · '
-            f'{MACRO_CAROUSEL_POLL_SEC}s carousel</div>',
+            f'{escape(_processor_lane_readout(active))}</div>',
             unsafe_allow_html=True,
         )
 
@@ -2444,6 +2443,7 @@ def _arm_room2_processor() -> None:
     """Queue a live processing heartbeat run — steps execute from Window 1 on reruns."""
     core_quantum.reset_processing_heartbeat()
     core_quantum.clear_window1_visual_state()
+    st.session_state.room2_sentiment_suppressed = False
     st.session_state.room2_processor = {
         "active": True,
         "step": 0,
@@ -2480,6 +2480,7 @@ def _halt_room2_processor_with_charts(*, fault_text: str) -> str:
     proc = st.session_state.get("room2_processor") or {}
     proc["active"] = False
     st.session_state.room2_processor = proc
+    st.session_state.room2_sentiment_suppressed = True
     core_quantum.publish_window1_rejection_overlay(fault_text)
     st.session_state.room2_quantum_report = fault_text
     st.session_state.room2_chart_coupling = st.session_state.get("room2_chart_coupling") or {
@@ -3094,23 +3095,7 @@ def _render_room2_proxy_telemetry_banners() -> None:
         '<div class="room2-terminal-header">▸ WINDOW 2 & 3 — INSTITUTIONAL SATELLITE TELEMETRY</div>',
         unsafe_allow_html=True,
     )
-    tick = st.session_state.get("macro_carousel_last_tick")
-    if tick and st.session_state.get("r2_timeframe_mode") != "1-Minute":
-        st.caption(f"Macro carousel refresh (UTC): {tick}")
     _render_room2_proxy_telemetry_body()
-
-
-@st.fragment(run_every=timedelta(seconds=MACRO_CAROUSEL_POLL_SEC))
-def _render_room2_proxy_telemetry_live() -> None:
-    mode = st.session_state.get("r2_timeframe_mode", "15-Minute")
-    ticker = str(st.session_state.get("room2_forensic_ticker", "")).strip()
-    if (
-        mode != "1-Minute"
-        and ticker
-        and st.session_state.get("matrix_satellites_ready", True)
-    ):
-        core_quantum.refresh_macro_carousel_telemetry(ticker)
-    _render_room2_proxy_telemetry_banners()
 
 
 def _validate_room2_ticker(ticker: str) -> bool:
@@ -3425,7 +3410,7 @@ def render_room2_forensic_lab():
 
     with col_right:
         _render_matrix_window1_panel()
-        _render_room2_proxy_telemetry_live()
+        _render_room2_proxy_telemetry_banners()
         _render_purgatory_shelf()
 
         st.markdown(

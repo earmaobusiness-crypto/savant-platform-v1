@@ -271,6 +271,15 @@ def rpc_match_layout_spatial(query_vector: list[float]) -> dict | None:
     """Cosine spatial match executed inside Supabase — vectors never cached locally."""
     if not query_vector or not supabase_configured():
         return None
+    body = _supabase_rpc("match_layout_spatial_pgvector", {"query_vector": query_vector})
+    if isinstance(body, dict) and body.get("nearest_layout_id"):
+        return {
+            "spatial_match_pct": int(body.get("spatial_match_pct") or 0),
+            "cosine_similarity": float(body.get("cosine_similarity") or 0.0),
+            "euclidean_distance": float(body.get("euclidean_distance") or 999.0),
+            "nearest_layout_id": str(body.get("nearest_layout_id") or "NEW_LAYOUT"),
+            "engine": "pgvector",
+        }
     body = _supabase_rpc("match_layout_spatial", {"query_vector": query_vector})
     if isinstance(body, dict):
         return {
@@ -278,6 +287,7 @@ def rpc_match_layout_spatial(query_vector: list[float]) -> dict | None:
             "cosine_similarity": float(body.get("cosine_similarity") or 0.0),
             "euclidean_distance": float(body.get("euclidean_distance") or 999.0),
             "nearest_layout_id": str(body.get("nearest_layout_id") or "NEW_LAYOUT"),
+            "engine": str(body.get("engine") or "array_rpc"),
         }
     return None
 
