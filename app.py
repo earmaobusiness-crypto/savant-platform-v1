@@ -49,6 +49,28 @@ TOKEN_GUARD = (
     "[TOKEN PROTOCOL: Process exclusively raw analytics from the payload. "
     "Eliminate conversational fluff, greetings, and filler text. Maximum density output only.]"
 )
+WINDOW4_FORMAT_PROTOCOL = (
+    "[WINDOW 4 DISPLAY PROTOCOL v4.1 — MANDATORY FOR EVERY REPLY]\n"
+    "FORBIDDEN: dense paragraphs, fat text blobs, unformatted number dumps, or multi-sentence walls.\n"
+    "REQUIRED STRUCTURE:\n"
+    "• Lead with 1 short plain-English headline line (what matters right now).\n"
+    "• Break all technical readouts into punchy one-line Markdown bullets (• or -).\n"
+    "• Insert a blank line between every bullet group or section.\n"
+    "• Bold visual anchors on scan terms: **Layout ID**, **Strategy Node**, **Ticker**, "
+    "**Timeframe**, **Match Score**, **Net Margin**, **Vault State**.\n"
+    "VOICE: direct helpful teammate — short sentences, universal English, zero academic filler.\n"
+    "DEPTH: keep full forensic accuracy from the payload; only change how it is packaged.\n"
+    "DEFAULT: ≤12 words per bullet unless the operator explicitly asks for deep detail."
+)
+WINDOW4_ANCHOR_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?<!\*)\b(Layout(?:\s+ID)?\s*#?\s*\d+)\b", re.I), r"**\1**"),
+    (re.compile(r"(?<!\*)\b(Strategy(?:\s+Node)?\s*[\dA-Z]+(?:-[\dmM]+)?)\b", re.I), r"**\1**"),
+    (re.compile(r"(?<!\*)\b(Ticker:\s*[A-Z.$-]{1,6})\b"), r"**\1**"),
+    (re.compile(r"(?<!\*)\b((?:Cosine|Spatial)\s+match[^.\n]{0,40})", re.I), r"**\1**"),
+    (re.compile(r"(?<!\*)\b((?:1|5|15)-Minute\s+(?:track|lane|bin))\b", re.I), r"**\1**"),
+    (re.compile(r"(?<!\*)\b(Net\s+margin[^.\n]{0,30})", re.I), r"**\1**"),
+    (re.compile(r"(?<!\*)\b(Vault\s+state[^.\n]{0,30})", re.I), r"**\1**"),
+]
 PRIMARY_MODEL = "llama-3.3-70b-versatile"
 FALLBACK_MODEL = "llama3-8b-8192"
 MACRO_DRIVERS = [("GC=F", "GOLD"), ("CL=F", "OIL"), ("^TNX", "TNX"), ("SPY", "SPY")]
@@ -541,10 +563,54 @@ st.markdown("""
             color: #CCCCCC;
         }
         .room2-chat-body-expert {
-            font-size: 13px;
+            font-size: 14px;
+            line-height: 1.65;
+            color: #E8E8E8;
+        }
+        .room2-expert-prose {
+            padding: 2px 0 14px 0;
+            border-bottom: 1px solid #141414;
+            margin-bottom: 4px;
+        }
+        .room2-expert-prose p {
+            font-size: 14px;
+            line-height: 1.65;
+            color: #E8E8E8;
+            margin: 0 0 10px 0;
+        }
+        .room2-expert-prose ul, .room2-expert-prose ol {
+            margin: 6px 0 12px 0;
+            padding-left: 20px;
+        }
+        .room2-expert-prose li {
+            font-size: 14px;
             line-height: 1.6;
-            color: #E5E5E5;
-            font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+            color: #E0E0E0;
+            margin-bottom: 8px;
+        }
+        .room2-expert-prose strong {
+            color: #5AC8FA;
+            font-weight: 700;
+        }
+        .room2-expert-prose h3, .room2-expert-prose h4 {
+            font-size: 13px;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: #8E8E93;
+            margin: 14px 0 8px 0;
+        }
+        [data-testid="stChatMessage"] p {
+            font-size: 14px;
+            line-height: 1.65;
+            color: #E8E8E8;
+        }
+        [data-testid="stChatMessage"] li {
+            font-size: 14px;
+            line-height: 1.6;
+            margin-bottom: 8px;
+        }
+        [data-testid="stChatMessage"] strong {
+            color: #5AC8FA;
         }
         .r2-buffer-caption {
             font-size: 10px;
@@ -1220,16 +1286,15 @@ FORENSIC_EXPERT_SYSTEM = (
     "terminal output, spatial cross-correlation telemetry, operator coordinate matrices, "
     "post-mortem retro-analysis, and the live cloud pattern archive injected into context. "
     "Never use human market mood labels (Choppy, Trend, Volatile). Reference only numbered "
-    "Layout blocks, cosine/euclidean match percentages, and forensic vector layers. "
-    "Zero greetings, zero filler, zero generic market commentary unrelated to the forensic payload.\n\n"
+    "Layout blocks, cosine/euclidean match percentages, and forensic vector layers.\n\n"
     f"{SAVANT_COGNITIVE_INJECTION}\n\n"
-    "PLAIN ENGLISH FILTER — MANDATORY:\n"
-    "Eliminate all conversational fluff, overly dense academic gibberish, and long filler sentences. "
-    "If the operator asks for a summary, inventory, or count (e.g., 'what patterns have you found', "
-    "'how many stocks', 'list my saved setups'), you must immediately output a crisp, bulleted, "
-    "numerical breakdown with zero fluff. Keep the language simple, clean, and professional. "
-    "Only go into extreme mathematical or technical depth if the operator explicitly asks you for "
-    "further details."
+    "WINDOW 4 RADAR FORMAT — NON-NEGOTIABLE:\n"
+    "• Never ship a wall of text. Split every answer into short Markdown bullets with blank lines between groups.\n"
+    "• Bold scan anchors: **Layout ID**, **Strategy Node**, **Ticker**, **Match Score**, **Timeframe**.\n"
+    "• Translate backend metrics into plain English a teammate would say out loud — short, direct, helpful.\n"
+    "• One fact per bullet. Numbers get a one-line label (what it means), not a raw dump.\n"
+    "• Zero greetings, zero filler, zero generic market commentary unrelated to the forensic payload.\n"
+    "• Only expand into deep math if the operator explicitly asks for more detail."
 )
 
 PATTERN_STRATEGIST_SYSTEM = (
@@ -1238,13 +1303,10 @@ PATTERN_STRATEGIST_SYSTEM = (
     "Never use Choppy, Trend, Volatile, or mood-based descriptors — only numbered Layout blocks "
     "and spatial match math. Be definitive and concise.\n\n"
     f"{SAVANT_COGNITIVE_INJECTION}\n\n"
-    "PLAIN ENGLISH FILTER — MANDATORY:\n"
-    "Eliminate all conversational fluff, overly dense academic gibberish, and long filler sentences. "
-    "If the operator asks for a summary, inventory, or count (e.g., 'what patterns have you found', "
-    "'how many stocks', 'list my saved setups'), you must immediately output a crisp, bulleted, "
-    "numerical breakdown with zero fluff. Keep the language simple, clean, and professional. "
-    "Only go into extreme mathematical or technical depth if the operator explicitly asks you for "
-    "further details."
+    "WINDOW 4 RADAR FORMAT — NON-NEGOTIABLE:\n"
+    "• Inventory or count questions → immediate bulleted breakdown with bold **Layout ID** / **Ticker** anchors.\n"
+    "• No dense paragraphs. Blank line between sections. ≤12 words per bullet unless asked to go deeper.\n"
+    "• Plain English teammate voice — keep forensic accuracy, lose the machine-readout tone."
 )
 
 TRASH_VAULT_NOTICE = (
@@ -1955,7 +2017,7 @@ def _build_room2_groq_messages(user_text: str) -> list[dict]:
     if text_matrix:
         context_bits.append(f"[TEXT_MATRIX]{text_matrix}[/TEXT_MATRIX]")
     groq_msgs = [
-        {"role": "system", "content": f"{FORENSIC_EXPERT_SYSTEM}\n{TOKEN_GUARD}"},
+        {"role": "system", "content": f"{FORENSIC_EXPERT_SYSTEM}\n{WINDOW4_FORMAT_PROTOCOL}"},
     ]
     prior = st.session_state.room2_chat_history[:-1]
     for msg in prior[-6:]:
@@ -1968,10 +2030,78 @@ def _build_room2_groq_messages(user_text: str) -> list[dict]:
     return groq_msgs
 
 
+def _window4_bold_anchors(text: str) -> str:
+    """Add bold scan anchors on key forensic labels without double-wrapping."""
+    out = str(text or "")
+    for pattern, repl in WINDOW4_ANCHOR_PATTERNS:
+        out = pattern.sub(repl, out)
+    return re.sub(r"\*\*\*\*", "**", out)
+
+
+def _window4_break_dense_blocks(text: str) -> str:
+    """Split fat paragraphs into one-line bullets when the model returns a wall of text."""
+    raw = str(text or "").strip()
+    if not raw:
+        return raw
+    bullet_hits = len(re.findall(r"(?m)^\s*[-•*]\s+", raw))
+    if bullet_hits >= 2:
+        return raw
+
+    sections: list[str] = []
+    for block in re.split(r"\n\s*\n", raw):
+        chunk = block.strip()
+        if not chunk:
+            continue
+        if re.match(r"^[-•*#]", chunk):
+            sections.append(chunk)
+            continue
+        if len(chunk) <= 180 and chunk.count(". ") < 2:
+            sections.append(chunk)
+            continue
+        sentences = re.split(r"(?<=[.!?])\s+", chunk)
+        bullet_lines = [f"- {sent.strip()}" for sent in sentences if sent.strip()]
+        sections.append("\n".join(bullet_lines) if bullet_lines else chunk)
+
+    return "\n\n".join(sections)
+
+
+def _format_window4_response(text: str) -> str:
+    """
+    Window 4 presentation layer — spacing, bullets, and bold anchors only.
+    Does not alter backend math, payloads, or database structures.
+    """
+    polished = _window4_break_dense_blocks(text)
+    polished = _window4_bold_anchors(polished)
+    polished = re.sub(r"\n{3,}", "\n\n", polished)
+    return polished.strip()
+
+
+def _render_window4_chat_message(msg: dict) -> None:
+    """Render a single Window 4 history row with Markdown for expert replies."""
+    speaker = str(msg.get("speaker") or "")
+    body = str(msg.get("text") or "")
+    if speaker == "You":
+        st.markdown(
+            f'<div class="room2-chat-row">'
+            f'<div class="room2-speaker-operator">{escape(speaker)}</div>'
+            f'<div class="room2-chat-body">{escape(body)}</div>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        return
+    display = _format_window4_response(body)
+    with st.chat_message("assistant", avatar="🔬"):
+        st.markdown(
+            '<div class="room2-speaker-expert">Forensic Expert</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(display)
+
+
 def _build_pattern_strategist_messages(user_text: str) -> list[dict]:
     cloud_data = _fetch_live_cloud_patterns()
     return [
-        {"role": "system", "content": f"{PATTERN_STRATEGIST_SYSTEM}\n{TOKEN_GUARD}"},
+        {"role": "system", "content": f"{PATTERN_STRATEGIST_SYSTEM}\n{WINDOW4_FORMAT_PROTOCOL}"},
         {
             "role": "user",
             "content": (
@@ -1997,7 +2127,9 @@ def process_room2_chat_submission():
         restore_msg = _restore_soft_deleted_pattern_from_vault(
             restore_all=_is_room2_restore_all_command(user_text)
         )
-        st.session_state.room2_chat_history.append({"speaker": "Forensic Expert", "text": restore_msg})
+        st.session_state.room2_chat_history.append(
+            {"speaker": "Forensic Expert", "text": _format_window4_response(restore_msg)}
+        )
         st.session_state.room2_text_buffer = ""
         _sync_matrix_chat_to_cloud()
         return
@@ -2009,7 +2141,9 @@ def process_room2_chat_submission():
             trash_msg = _soft_delete_latest_pattern_to_vault()
             st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
             st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
-        st.session_state.room2_chat_history.append({"speaker": "Forensic Expert", "text": trash_msg})
+        st.session_state.room2_chat_history.append(
+            {"speaker": "Forensic Expert", "text": _format_window4_response(trash_msg)}
+        )
         st.session_state.room2_text_buffer = ""
         _sync_matrix_chat_to_cloud()
         return
@@ -2019,7 +2153,9 @@ def process_room2_chat_submission():
     else:
         ai_text = run_groq(_build_room2_groq_messages(user_text))
 
-    st.session_state.room2_chat_history.append({"speaker": "Forensic Expert", "text": ai_text})
+    st.session_state.room2_chat_history.append(
+        {"speaker": "Forensic Expert", "text": _format_window4_response(ai_text)}
+    )
     st.session_state.room2_text_buffer = ""
     _sync_matrix_chat_to_cloud()
 
@@ -2028,7 +2164,7 @@ def purge_room2_conversation_and_cloud() -> None:
     """Soft-delete all active patterns into the Trash Vault and reset local lab chat."""
     trash_msg = _soft_delete_all_patterns_to_vault()
     st.session_state.room2_chat_history = [
-        {"speaker": "Forensic Expert", "text": trash_msg}
+        {"speaker": "Forensic Expert", "text": _format_window4_response(trash_msg)}
     ]
     st.session_state.room2_text_buffer = ""
     _sync_matrix_chat_to_cloud()
@@ -3433,23 +3569,7 @@ def render_room2_forensic_lab():
             st.caption("Lab chat standing by — type plain English below.")
         else:
             for msg in st.session_state.room2_chat_history:
-                safe_text = escape(msg.get("text", ""))
-                if msg["speaker"] == "You":
-                    st.markdown(
-                        f'<div class="room2-chat-row">'
-                        f'<div class="room2-speaker-operator">{msg["speaker"]}</div>'
-                        f'<div class="room2-chat-body">{safe_text}</div>'
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        f'<div class="room2-chat-row">'
-                        f'<div class="room2-speaker-expert">{msg["speaker"]}</div>'
-                        f'<div class="room2-chat-body-expert">{safe_text}</div>'
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+                _render_window4_chat_message(msg)
 
         with st.form("room2_chat_form", clear_on_submit=False):
             st.text_input(
