@@ -50,6 +50,7 @@ LOOKBACK_LANE_ASSERTIONS = {
 }
 FIVE_MINUTE_SYNTHETIC_SLIPPAGE_PCT = 1.0
 LIQUIDITY_IGNITION_MIN_SHARES_PER_MINUTE = 10_000
+REJECTED_DEAD_ZONE = "REJECTED_DEAD_ZONE"
 WINDOW4_SYSTEM_IDLE_MSG = "🚫 SYSTEM IDLE — NO VALID REGIME MATCH"
 REGIME_VIBE_NEWS_DEPTH_DAYS = {
     "1-Minute": 7,
@@ -1261,6 +1262,50 @@ def _volatility_ignition_anchor(window, search_from_idx=None) -> tuple[object | 
         ):
             return idx, float(subset.loc[idx, "Close"])
     return None, None
+
+
+def evaluate_liquidity_ignition_guard(window) -> dict:
+    """
+    Dual-filter liquidity probe — velocity envelope break on sub-10k volume → REJECTED_DEAD_ZONE.
+    """
+    if (
+        window is None
+        or _dataframe_is_empty(window)
+        or "Close" not in window.columns
+        or "Volume" not in window.columns
+    ):
+        return {"status": "NO_SIGNAL", "reason": None}
+    closes = window["Close"].astype(float)
+    vols = window["Volume"].astype(float).fillna(0.0)
+    velocity = closes.pct_change().abs() * 100.0
+    roll = min(5, len(window))
+    vel_mean = velocity.rolling(window=roll, min_periods=1).mean().fillna(0.0)
+    vel_std = velocity.rolling(window=roll, min_periods=1).std().fillna(0.0)
+    vol_mean = vols.rolling(window=roll, min_periods=1).mean().fillna(0.0)
+    vol_std = vols.rolling(window=roll, min_periods=1).std().fillna(0.0)
+    for idx in window.index:
+        v = velocity.loc[idx] if idx in velocity.index else float("nan")
+        if pd.isna(v):
+            continue
+        env_high = float(vel_mean.loc[idx] + vel_std.loc[idx])
+        raw_vol = float(vols.loc[idx])
+        vol_expand = raw_vol >= float(vol_mean.loc[idx] + 0.5 * vol_std.loc[idx])
+        velocity_break = env_high > 0 and float(v) > env_high
+        if velocity_break and vol_expand:
+            if raw_vol < LIQUIDITY_IGNITION_MIN_SHARES_PER_MINUTE:
+                return {
+                    "status": REJECTED_DEAD_ZONE,
+                    "reason": REJECTED_DEAD_ZONE,
+                    "bar_index": idx,
+                    "raw_volume": raw_vol,
+                }
+            return {
+                "status": "IGNITION_CONFIRMED",
+                "reason": None,
+                "bar_index": idx,
+                "raw_volume": raw_vol,
+            }
+    return {"status": "NO_SIGNAL", "reason": None}
 
 
 def _execution_friction_buffer_pct(
