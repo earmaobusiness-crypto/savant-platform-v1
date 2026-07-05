@@ -95,6 +95,10 @@ MATRIX_CHAT_LOG_TICKER = "_LAB_SESSION_"
 MATRIX_CHAT_LOG_CATEGORY = "MATRIX_CHAT_LOG"
 MATRIX_ENGINE_IDLE_MARKER = "ENGINE_IDLE"
 WINDOW4_ENGINE_IDLE_MSG = "🚫 ENGINE_IDLE — WAITING FOR OPERATOR DEPLOY SIGNAL"
+WINDOW4_DATA_ENGINE_IDLE_REPLY = (
+    "The core data engine is currently idle and waiting for a stock deployment. "
+    "No real-time layouts or strategies are active in the database."
+)
 WINDOW4_PLACEHOLDER_LAYOUT_IDS = frozenset({"NEW_LAYOUT", "PURGATORY_PENDING", "NEW"})
 _WINDOW4_TICKER_TOKEN = re.compile(r"\b[A-Z][A-Z0-9.-]{0,6}\b")
 _WINDOW4_TICKER_DENYLIST = frozenset({
@@ -1527,6 +1531,18 @@ FORENSIC_EXPERT_SYSTEM = (
     "• Only expand into deep math if the operator explicitly asks for more detail."
 )
 
+WINDOW4_CONVERSATIONAL_SYSTEM = (
+    "You are the Forensic Lab conversational wire — a helpful, natural teammate on Room 2. "
+    "Respond warmly and briefly to greetings, general questions, and lab orientation chat.\n\n"
+    "STRICT ANTI-HALLUCINATION RULES:\n"
+    "• Never invent Layout IDs, Strategy Nodes, Match Scores, Net Margins, or ticker symbols.\n"
+    "• Never cite fake percentages, cloud pattern counts, or deploy statistics.\n"
+    "• If the operator asks for live market layouts or stock statistics you do not have, say plainly "
+    "that the core data engine is idle and waiting for a stock deployment — do not fabricate data.\n"
+    "• Keep replies conversational — no dense forensic dumps unless verified payload tags are present.\n\n"
+    f"{WINDOW4_FORMAT_PROTOCOL}"
+)
+
 PATTERN_STRATEGIST_SYSTEM = (
     "You are the Savant Pattern-Mining Strategist for Room 2: The Forensic Pattern Lab. "
     "Read the injected live cloud pattern archive and quantum terminal telemetry. "
@@ -2198,6 +2214,97 @@ def _is_pattern_mining_query(text: str) -> bool:
     return any(w in low for w in pattern_words) and any(w in low for w in ask_words)
 
 
+_WINDOW4_GREETING_RE = re.compile(
+    r"^\s*(hi+|hello|hey+|yo+|howdy|good\s+(morning|afternoon|evening)|"
+    r"how\s+are\s+you|what'?s\s+up)[\s!?.]*$",
+    re.I,
+)
+_WINDOW4_TECHNICAL_DATA_MARKERS = (
+    "layout id",
+    "layout #",
+    "strategy node",
+    "match score",
+    "net margin",
+    "spatial match",
+    "pgvector",
+    "cosine match",
+    "structural move",
+    "vault state",
+    "market layout",
+    "real-time layout",
+    "active layout",
+    "active strategy",
+    "winning pattern",
+    "pattern deploy",
+    "deployed pattern",
+    "margin pct",
+    "match percent",
+    "match %",
+    "what layout",
+    "which layout",
+    "show layout",
+    "current layout",
+    "statistics for",
+    "stats for",
+    "stock stat",
+    "price of",
+    "chart for",
+    "layout folder",
+    "execution strategy",
+    "timeframe bin",
+)
+
+
+def _window4_is_technical_data_query(text: str) -> bool:
+    """Hard-gated data track — layouts, metrics, tickers, and live forensic readouts."""
+    low = str(text or "").lower()
+    if any(marker in low for marker in _WINDOW4_TECHNICAL_DATA_MARKERS):
+        return True
+    if _is_pattern_mining_query(text) and any(
+        word in low for word in ("logged", "cloud", "evolving", "machine", "finding", "archive")
+    ):
+        return True
+    if re.search(r"\b[A-Z]{2,5}\b", str(text or "")) and any(
+        word in low for word in ("price", "chart", "stat", "margin", "layout", "pattern for", "ticker")
+    ):
+        return True
+    return False
+
+
+def _window4_is_conversational_message(text: str) -> bool:
+    """Unblocked conversational track — greetings and general lab chat."""
+    clean = str(text or "").strip()
+    if not clean or _window4_vault_command_only(clean):
+        return False
+    if _WINDOW4_GREETING_RE.match(clean):
+        return True
+    low = clean.lower()
+    if any(
+        phrase in low
+        for phrase in (
+            "how are you",
+            "thank you",
+            "thanks",
+            "who are you",
+            "what can you do",
+            "nice to meet",
+            "good to see",
+        )
+    ):
+        return True
+    return not _window4_is_technical_data_query(clean)
+
+
+def _window4_route_message(text: str) -> str:
+    """Dual-track router — conversational vs hard-gated technical data."""
+    clean = str(text or "").strip()
+    if _window4_vault_command_only(clean):
+        return "vault"
+    if _window4_is_technical_data_query(clean):
+        return "data"
+    return "conversational"
+
+
 def _window4_operator_deploy_ticker() -> str:
     """Ticker explicitly entered in the Room 2 Pattern Ticker input field."""
     return str(st.session_state.get("r2_good_ticker") or "").strip().upper()
@@ -2313,6 +2420,19 @@ def _build_room2_groq_messages(user_text: str) -> list[dict]:
     return groq_msgs
 
 
+def _build_window4_conversational_messages(user_text: str) -> list[dict]:
+    """Conversational track — no backend metric injection; natural lab chat only."""
+    groq_msgs = [
+        {"role": "system", "content": WINDOW4_CONVERSATIONAL_SYSTEM},
+    ]
+    prior = st.session_state.room2_chat_history[:-1]
+    for msg in prior[-6:]:
+        role = "user" if msg["speaker"] == "You" else "assistant"
+        groq_msgs.append({"role": role, "content": str(msg.get("text") or "")})
+    groq_msgs.append({"role": "user", "content": str(user_text or "").strip()})
+    return groq_msgs
+
+
 def _window4_bold_anchors(text: str) -> str:
     """Add bold scan anchors on key forensic labels without double-wrapping."""
     out = str(text or "")
@@ -2353,21 +2473,35 @@ def _format_window4_response(
     *,
     vault_safe: bool = False,
     status_safe: bool = False,
+    conversational_safe: bool = False,
+    data_fallback: bool = False,
 ) -> str:
     """
-    Window 4 presentation layer — spacing, bullets, bold anchors, and hallucination scrub.
-    Vault and status replies bypass the verified-stream idle lock.
+    Window 4 presentation layer — dual-track formatting with hallucination scrub.
+    Conversational and data-fallback replies never collapse into the static idle banner string.
     """
-    if not vault_safe and not status_safe and not _window4_has_verified_metric_stream():
-        return WINDOW4_ENGINE_IDLE_MSG
-    if status_safe or vault_safe:
+    if data_fallback:
+        return WINDOW4_DATA_ENGINE_IDLE_REPLY
+    if conversational_safe:
+        polished = _window4_sanitize_display_text(text)
+        if not polished:
+            polished = (
+                "I'm on the lab wire and ready to chat. "
+                "Deploy a winning pattern when you want live forensic readouts."
+            )
+    elif not vault_safe and not status_safe and not _window4_has_verified_metric_stream():
+        return WINDOW4_DATA_ENGINE_IDLE_REPLY
+    elif status_safe or vault_safe:
         polished = str(text or "").strip()
     else:
         polished = _window4_sanitize_display_text(text)
+    if not polished and not (vault_safe or status_safe or conversational_safe):
+        return WINDOW4_DATA_ENGINE_IDLE_REPLY
     if not polished:
-        return WINDOW4_ENGINE_IDLE_MSG if not (vault_safe or status_safe) else polished
+        return polished
     polished = _window4_break_dense_blocks(polished)
-    polished = _window4_bold_anchors(polished)
+    if not conversational_safe and not vault_safe:
+        polished = _window4_bold_anchors(polished)
     polished = re.sub(r"\n{3,}", "\n\n", polished)
     return polished.strip()
 
@@ -2391,10 +2525,12 @@ def _window4_resolve_status_line() -> str:
     return WINDOW4_ENGINE_IDLE_MSG
 
 
-def _window4_groq_worker(*, user_text: str) -> None:
-    """Background Groq worker — keeps the Streamlit UI thread responsive."""
+def _window4_groq_worker(*, user_text: str, track: str) -> None:
+    """Background Groq worker — conversational and data tracks stay off the UI thread."""
     try:
-        if _is_pattern_mining_query(user_text):
+        if track == "conversational":
+            ai_text = run_groq(_build_window4_conversational_messages(user_text))
+        elif _is_pattern_mining_query(user_text):
             ai_text = run_groq(_build_pattern_strategist_messages(user_text))
         else:
             ai_text = run_groq(_build_room2_groq_messages(user_text))
@@ -2411,20 +2547,24 @@ def _window4_groq_worker(*, user_text: str) -> None:
             st.session_state.window4_async_job = job
 
 
-def _window4_start_async_groq(user_text: str) -> None:
+def _window4_start_async_groq(user_text: str, *, track: str) -> None:
     st.session_state.window4_async_job = {
         "user_text": user_text,
+        "track": track,
         "phase": "processing",
         "result": None,
         "error": None,
         "started_at": time.time(),
     }
-    st.session_state.window4_status_line = (
-        "⏳ PROCESSING — forensic expert analyzing verified packets..."
-    )
+    if track == "conversational":
+        st.session_state.window4_status_line = "💬 Conversational wire — composing reply..."
+    else:
+        st.session_state.window4_status_line = (
+            "⏳ PROCESSING — forensic expert analyzing verified packets..."
+        )
     threading.Thread(
         target=_window4_groq_worker,
-        kwargs={"user_text": user_text},
+        kwargs={"user_text": user_text, "track": track},
         name="window4-groq-worker",
         daemon=True,
     ).start()
@@ -2475,37 +2615,44 @@ def _window4_handle_chat_submit(user_text: str) -> None:
         _sync_matrix_chat_to_cloud()
         return
 
-    if not _window4_has_verified_metric_stream():
-        st.session_state.room2_chat_history.append(
-            {
-                "speaker": "Forensic Expert",
-                "text": WINDOW4_ENGINE_IDLE_MSG,
-                "status_reply": True,
-            }
+    route = _window4_route_message(clean)
+
+    if route == "data":
+        if not _window4_has_verified_metric_stream():
+            st.session_state.room2_chat_history.append(
+                {
+                    "speaker": "Forensic Expert",
+                    "text": WINDOW4_DATA_ENGINE_IDLE_REPLY,
+                    "data_fallback": True,
+                    "conversational": True,
+                }
+            )
+            st.session_state.window4_status_line = (
+                "📡 Data track — core engine idle; plain-English fallback delivered."
+            )
+            _sync_matrix_chat_to_cloud()
+            return
+
+        allowed, block_msg = _window4_ai_generation_allowed(
+            clean,
+            source=WINDOW4_SOURCE_OPERATOR,
         )
-        st.session_state.window4_status_line = (
-            "📡 Operator message received — deploy a verified pattern to unlock forensic AI."
-        )
-        _sync_matrix_chat_to_cloud()
+        if not allowed:
+            st.session_state.room2_chat_history.append(
+                {
+                    "speaker": "Forensic Expert",
+                    "text": block_msg,
+                    "status_reply": True,
+                }
+            )
+            st.session_state.window4_status_line = block_msg
+            _sync_matrix_chat_to_cloud()
+            return
+
+        _window4_start_async_groq(clean, track="data")
         return
 
-    allowed, block_msg = _window4_ai_generation_allowed(
-        clean,
-        source=WINDOW4_SOURCE_OPERATOR,
-    )
-    if not allowed:
-        st.session_state.room2_chat_history.append(
-            {
-                "speaker": "Forensic Expert",
-                "text": block_msg,
-                "status_reply": True,
-            }
-        )
-        st.session_state.window4_status_line = block_msg
-        _sync_matrix_chat_to_cloud()
-        return
-
-    _window4_start_async_groq(clean)
+    _window4_start_async_groq(clean, track="conversational")
 
 
 @st.fragment(run_every=timedelta(seconds=1))
@@ -2517,15 +2664,28 @@ def _window4_async_poll_fragment() -> None:
 
     phase = str(job.get("phase") or "")
     if phase == "processing":
-        st.session_state.window4_status_line = _window4_resolve_status_line()
+        job_track = str(job.get("track") or "data")
+        if job_track == "conversational":
+            st.session_state.window4_status_line = (
+                f"💬 Conversational wire — composing reply... "
+                f"({int(time.time() - float(job.get('started_at') or time.time()))}s)"
+            )
+        else:
+            st.session_state.window4_status_line = _window4_resolve_status_line()
         return
 
     if phase == "done":
         ai_text = str(job.get("result") or "")
+        job_track = str(job.get("track") or "data")
         st.session_state.room2_chat_history.append(
             {
                 "speaker": "Forensic Expert",
-                "text": _format_window4_response(ai_text),
+                "text": _format_window4_response(
+                    ai_text,
+                    conversational_safe=(job_track == "conversational"),
+                ),
+                "conversational": job_track == "conversational",
+                "data_reply": job_track == "data",
             }
         )
         st.session_state.window4_async_job = None
@@ -2550,11 +2710,13 @@ def _window4_async_poll_fragment() -> None:
 
 
 def _render_window4_chat_message(msg: dict, *, verified_stream: bool) -> None:
-    """Render a single Window 4 history row — status/vault replies always visible."""
+    """Render a single Window 4 history row — dual-track replies always visible when tagged."""
     speaker = str(msg.get("speaker") or "")
     body = str(msg.get("text") or "")
     vault_safe = bool(msg.get("vault_safe"))
     status_reply = bool(msg.get("status_reply"))
+    conversational = bool(msg.get("conversational"))
+    data_fallback = bool(msg.get("data_fallback"))
     if speaker == "You":
         st.markdown(
             f'<div class="room2-chat-row">'
@@ -2564,18 +2726,28 @@ def _render_window4_chat_message(msg: dict, *, verified_stream: bool) -> None:
             unsafe_allow_html=True,
         )
         return
-    if not verified_stream and not vault_safe and not status_reply:
+    if (
+        not verified_stream
+        and not vault_safe
+        and not status_reply
+        and not conversational
+        and not data_fallback
+    ):
         return
     display = _format_window4_response(
         body,
         vault_safe=vault_safe,
         status_safe=status_reply,
+        conversational_safe=conversational,
+        data_fallback=data_fallback,
     )
     if (
         not vault_safe
         and not status_reply
-        and display == WINDOW4_ENGINE_IDLE_MSG
-        and body.strip() != WINDOW4_ENGINE_IDLE_MSG
+        and not conversational
+        and not data_fallback
+        and display == WINDOW4_DATA_ENGINE_IDLE_REPLY
+        and body.strip() not in (WINDOW4_DATA_ENGINE_IDLE_REPLY, WINDOW4_ENGINE_IDLE_MSG)
     ):
         return
     with st.chat_message("assistant", avatar="🔬"):
@@ -2648,13 +2820,13 @@ def _window4_ai_generation_allowed(
     source: str = WINDOW4_SOURCE_OPERATOR,
 ) -> tuple[bool, str]:
     """
-    Anti-hallucination gate — verified Massive stream required before any generative output.
-    Human-Operator Bypass applies only after a verified deploy stream is active.
+    Hard-gated data track only — verified Massive stream + regime defenses.
+    Conversational messages bypass this gate entirely via dual-track routing.
     """
     if _window4_vault_command_only(user_text):
         return True, ""
     if not _window4_has_verified_metric_stream():
-        return False, WINDOW4_ENGINE_IDLE_MSG
+        return False, WINDOW4_DATA_ENGINE_IDLE_REPLY
     if _window4_is_operator_manual_input(source=source):
         return True, ""
 
@@ -2662,15 +2834,15 @@ def _window4_ai_generation_allowed(
     if fault:
         return False, fault
     if _window4_fake_ticker_automated_block(source=source):
-        return False, WINDOW4_ENGINE_IDLE_MSG
+        return False, WINDOW4_DATA_ENGINE_IDLE_REPLY
     if source == WINDOW4_SOURCE_LAYOUT_LOOP:
         proc = st.session_state.get("room2_processor") or {}
         if proc.get("active") and not core_quantum.window4_regime_gate_open():
-            return False, WINDOW4_ENGINE_IDLE_MSG
+            return False, WINDOW4_DATA_ENGINE_IDLE_REPLY
     if _window4_automated_vault_empty():
-        return False, WINDOW4_ENGINE_IDLE_MSG
+        return False, WINDOW4_DATA_ENGINE_IDLE_REPLY
     if not core_quantum.window4_regime_gate_open():
-        return False, WINDOW4_ENGINE_IDLE_MSG
+        return False, WINDOW4_DATA_ENGINE_IDLE_REPLY
     return True, ""
 
 
