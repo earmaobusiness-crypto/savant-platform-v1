@@ -2326,23 +2326,79 @@ def _window4_vault_command_only(user_text: str) -> bool:
     return _is_room2_restore_command(user_text) or _is_room2_delete_command(user_text)
 
 
-def _window4_ai_generation_allowed(user_text: str) -> tuple[bool, str]:
+WINDOW4_SOURCE_OPERATOR = "operator_chat"
+WINDOW4_SOURCE_AUTOMATED = "automated_system"
+WINDOW4_SOURCE_LAYOUT_LOOP = "layout_generation"
+WINDOW4_SOURCE_FAKE_TICKER = "fake_ticker"
+
+
+def _window4_is_operator_manual_input(*, source: str) -> bool:
+    """True when the payload originates from the Window 4 manual chat form."""
+    return source == WINDOW4_SOURCE_OPERATOR
+
+
+def _window4_automated_vault_empty() -> bool:
+    """Empty-vault guard for automated payloads — not applied to operator chat."""
+    matrix_index = st.session_state.get("layout_master_matrix_index") or []
+    if matrix_index:
+        return False
+    pg_pct = int(st.session_state.get("window4_spatial_match_pct") or 0)
+    return pg_pct < core_quantum.LAYOUT_SIGNATURE_MATCH_THRESHOLD
+
+
+def _window4_fake_ticker_automated_block(*, source: str) -> bool:
+    """Block automated / layout-loop payloads tied to an invalid deploy ticker."""
+    if source not in (
+        WINDOW4_SOURCE_AUTOMATED,
+        WINDOW4_SOURCE_LAYOUT_LOOP,
+        WINDOW4_SOURCE_FAKE_TICKER,
+    ):
+        return False
+    ticker = str(st.session_state.get("r2_good_ticker") or "").strip().upper()
+    if not ticker:
+        return True
+    body = ticker.replace(".", "").replace("-", "")
+    return not body.isalnum() or len(ticker) > 8
+
+
+def _window4_ai_generation_allowed(
+    user_text: str,
+    *,
+    source: str = WINDOW4_SOURCE_OPERATOR,
+) -> tuple[bool, str]:
     """
-    Anti-hallucination gate — block Groq when idle, faulted, or sub-85% pgvector match.
-    Vault restore/delete commands always pass (deterministic, not generative).
+    Anti-hallucination gate — Human-Operator Bypass for manual Window 4 chat.
+    Strict pgvector / empty-vault defense retained for automated system payloads,
+    fake tickers, and background layout-generation loops only.
     """
     if _window4_vault_command_only(user_text):
         return True, ""
+    if _window4_is_operator_manual_input(source=source):
+        return True, ""
+
     fault = core_quantum.window4_instant_fault_text()
     if fault:
         return False, fault
+    if _window4_fake_ticker_automated_block(source=source):
+        return False, core_quantum.WINDOW4_SYSTEM_IDLE_MSG
+    if source == WINDOW4_SOURCE_LAYOUT_LOOP:
+        proc = st.session_state.get("room2_processor") or {}
+        if proc.get("active") and not core_quantum.window4_regime_gate_open():
+            return False, core_quantum.WINDOW4_SYSTEM_IDLE_MSG
+    if _window4_automated_vault_empty():
+        return False, core_quantum.WINDOW4_SYSTEM_IDLE_MSG
     if not core_quantum.window4_regime_gate_open():
         return False, core_quantum.WINDOW4_SYSTEM_IDLE_MSG
     return True, ""
 
 
+def _window4_automated_regime_blocked(user_text: str, *, source: str) -> tuple[bool, str]:
+    """Entry point for non-operator payloads — always runs the strict defense stack."""
+    return _window4_ai_generation_allowed(user_text, source=source)
+
+
 def _render_window4_conversation_wire() -> None:
-    """Window 4 — read-only observational wire; AI blocked unless regime gate is open."""
+    """Window 4 — operator chat bridge; automated regime output gated separately."""
     st.markdown(
         '<div class="room2-wire-title">💬 WINDOW 4 — FORENSIC LAB CONVERSATION WIRE</div>',
         unsafe_allow_html=True,
@@ -2354,41 +2410,25 @@ def _render_window4_conversation_wire() -> None:
             f'<div class="window4-instant-fault">{escape(fault)}</div>',
             unsafe_allow_html=True,
         )
-        st.caption("Instant fault — AI chat halted. Vault restore/delete still available.")
-        with st.form("room2_chat_form", clear_on_submit=False):
-            st.text_input(
-                "Lab Input",
-                key="room2_text_buffer",
-                placeholder="restore all · delete pattern · delete everything",
-                label_visibility="collapsed",
-            )
-            if st.form_submit_button("Send") and st.session_state.room2_text_buffer.strip():
-                st.session_state._pending_room2_chat_submit = True
-                st.rerun()
-        return
+        st.caption("Instant fault on automated subsystem — operator chat bridge stays open.")
 
-    if not core_quantum.window4_regime_gate_open():
+    regime_open = core_quantum.window4_regime_gate_open()
+    if not regime_open and not fault:
         st.markdown(
             f'<div class="window4-system-idle">{escape(core_quantum.WINDOW4_SYSTEM_IDLE_MSG)}</div>',
             unsafe_allow_html=True,
         )
         st.markdown(
-            '<div class="window4-readonly-caption">Observational mode — '
-            "AI output blocked until pgvector match ≥ 85% after a successful deploy. "
-            "Vault restore/delete commands still work.</div>",
+            '<div class="window4-readonly-caption">Automated regime output gated — '
+            "pgvector match & empty-vault checks apply to system data and layout loops only. "
+            "Manual operator messages bypass this filter.</div>",
             unsafe_allow_html=True,
         )
-        with st.form("room2_chat_form", clear_on_submit=False):
-            st.text_input(
-                "Lab Input",
-                key="room2_text_buffer",
-                placeholder="restore all · delete pattern · delete everything",
-                label_visibility="collapsed",
-            )
-            if st.form_submit_button("Send") and st.session_state.room2_text_buffer.strip():
-                st.session_state._pending_room2_chat_submit = True
-                st.rerun()
-        return
+    elif regime_open:
+        match_pct = int(st.session_state.get("window4_spatial_match_pct") or 0)
+        st.caption(
+            f"Regime gate open · pgvector match {match_pct}% · automated + operator context active."
+        )
 
     vault_flash = str(st.session_state.get("room2_vault_flash") or "").strip()
     vault_confirm = str(st.session_state.get("room2_vault_confirmation") or "").strip()
@@ -2403,13 +2443,8 @@ def _render_window4_conversation_wire() -> None:
             unsafe_allow_html=True,
         )
 
-    match_pct = int(st.session_state.get("window4_spatial_match_pct") or 0)
-    st.caption(
-        f"Regime gate open · pgvector match {match_pct}% · read-only forensic context active."
-    )
-
     if not st.session_state.room2_chat_history:
-        st.caption("Lab chat standing by — ask about the last validated deploy only.")
+        st.caption("Lab chat standing by — type a question or vault command below.")
     else:
         for msg in st.session_state.room2_chat_history:
             _render_window4_chat_message(msg)
@@ -2418,7 +2453,7 @@ def _render_window4_conversation_wire() -> None:
         st.text_input(
             "Lab Input",
             key="room2_text_buffer",
-            placeholder="Ask about the last validated pattern deploy...",
+            placeholder="Ask the Forensic Expert · restore all · delete pattern...",
             label_visibility="collapsed",
         )
         if st.form_submit_button("Send") and st.session_state.room2_text_buffer.strip():
@@ -2432,7 +2467,10 @@ def process_room2_chat_submission():
         return
     st.session_state.room2_chat_history.append({"speaker": "You", "text": user_text})
 
-    allowed, block_msg = _window4_ai_generation_allowed(user_text)
+    allowed, block_msg = _window4_ai_generation_allowed(
+        user_text,
+        source=WINDOW4_SOURCE_OPERATOR,
+    )
     if not allowed:
         st.session_state.room2_chat_history.append(
             {"speaker": "Forensic Expert", "text": block_msg}
