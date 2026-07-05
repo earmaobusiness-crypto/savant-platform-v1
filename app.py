@@ -612,6 +612,37 @@ st.markdown("""
         [data-testid="stChatMessage"] strong {
             color: #5AC8FA;
         }
+        .window4-instant-fault {
+            background: #1A0A0A;
+            border: 2px solid #FF3B30;
+            border-radius: 6px;
+            padding: 18px 16px;
+            margin: 12px 0 16px 0;
+            font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+            font-size: 13px;
+            line-height: 1.65;
+            color: #FF6B6B;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .window4-system-idle {
+            background: #0A0A0A;
+            border: 2px solid #3A3A3A;
+            border-radius: 6px;
+            padding: 18px 16px;
+            margin: 12px 0 16px 0;
+            font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            color: #8E8E93;
+            text-align: center;
+        }
+        .window4-readonly-caption {
+            font-size: 11px;
+            color: #666666;
+            margin-bottom: 10px;
+        }
         .r2-buffer-caption {
             font-size: 10px;
             font-weight: 700;
@@ -735,6 +766,8 @@ if "matrix_processing_logs" not in st.session_state: st.session_state.matrix_pro
 if "matrix_window1_charts_html" not in st.session_state: st.session_state.matrix_window1_charts_html = ""
 if "matrix_window1_rejection_text" not in st.session_state: st.session_state.matrix_window1_rejection_text = ""
 if "room2_processor" not in st.session_state: st.session_state.room2_processor = {}
+if "window4_regime_valid" not in st.session_state: st.session_state.window4_regime_valid = False
+if "window4_spatial_match_pct" not in st.session_state: st.session_state.window4_spatial_match_pct = 0
 if "matrix_satellites_ready" not in st.session_state: st.session_state.matrix_satellites_ready = True
 if "r2_data_feed_mode" not in st.session_state: st.session_state.r2_data_feed_mode = DATA_FEED_CAROUSEL
 if "r2_timeframe_mode" not in st.session_state: st.session_state.r2_timeframe_mode = "15-Minute"
@@ -2117,11 +2150,124 @@ def _build_pattern_strategist_messages(user_text: str) -> list[dict]:
     ]
 
 
+def _window4_vault_command_only(user_text: str) -> bool:
+    return _is_room2_restore_command(user_text) or _is_room2_delete_command(user_text)
+
+
+def _window4_ai_generation_allowed(user_text: str) -> tuple[bool, str]:
+    """
+    Anti-hallucination gate — block Groq when idle, faulted, or sub-85% pgvector match.
+    Vault restore/delete commands always pass (deterministic, not generative).
+    """
+    if _window4_vault_command_only(user_text):
+        return True, ""
+    fault = core_quantum.window4_instant_fault_text()
+    if fault:
+        return False, fault
+    if not core_quantum.window4_regime_gate_open():
+        return False, core_quantum.WINDOW4_SYSTEM_IDLE_MSG
+    return True, ""
+
+
+def _render_window4_conversation_wire() -> None:
+    """Window 4 — read-only observational wire; AI blocked unless regime gate is open."""
+    st.markdown(
+        '<div class="room2-wire-title">💬 WINDOW 4 — FORENSIC LAB CONVERSATION WIRE</div>',
+        unsafe_allow_html=True,
+    )
+
+    fault = core_quantum.window4_instant_fault_text()
+    if fault:
+        st.markdown(
+            f'<div class="window4-instant-fault">{escape(fault)}</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Instant fault — AI chat halted. Vault restore/delete still available.")
+        with st.form("room2_chat_form", clear_on_submit=False):
+            st.text_input(
+                "Lab Input",
+                key="room2_text_buffer",
+                placeholder="restore all · delete pattern · delete everything",
+                label_visibility="collapsed",
+            )
+            if st.form_submit_button("Send") and st.session_state.room2_text_buffer.strip():
+                st.session_state._pending_room2_chat_submit = True
+                st.rerun()
+        return
+
+    if not core_quantum.window4_regime_gate_open():
+        st.markdown(
+            f'<div class="window4-system-idle">{escape(core_quantum.WINDOW4_SYSTEM_IDLE_MSG)}</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="window4-readonly-caption">Observational mode — '
+            "AI output blocked until pgvector match ≥ 85% after a successful deploy. "
+            "Vault restore/delete commands still work.</div>",
+            unsafe_allow_html=True,
+        )
+        with st.form("room2_chat_form", clear_on_submit=False):
+            st.text_input(
+                "Lab Input",
+                key="room2_text_buffer",
+                placeholder="restore all · delete pattern · delete everything",
+                label_visibility="collapsed",
+            )
+            if st.form_submit_button("Send") and st.session_state.room2_text_buffer.strip():
+                st.session_state._pending_room2_chat_submit = True
+                st.rerun()
+        return
+
+    vault_flash = str(st.session_state.get("room2_vault_flash") or "").strip()
+    vault_confirm = str(st.session_state.get("room2_vault_confirmation") or "").strip()
+    if vault_confirm:
+        st.markdown(
+            f'<div class="room2-vault-success">{escape(vault_confirm)}</div>',
+            unsafe_allow_html=True,
+        )
+    elif vault_flash:
+        st.markdown(
+            f'<div class="room2-vault-success">{escape(vault_flash)}</div>',
+            unsafe_allow_html=True,
+        )
+
+    match_pct = int(st.session_state.get("window4_spatial_match_pct") or 0)
+    st.caption(
+        f"Regime gate open · pgvector match {match_pct}% · read-only forensic context active."
+    )
+
+    if not st.session_state.room2_chat_history:
+        st.caption("Lab chat standing by — ask about the last validated deploy only.")
+    else:
+        for msg in st.session_state.room2_chat_history:
+            _render_window4_chat_message(msg)
+
+    with st.form("room2_chat_form", clear_on_submit=False):
+        st.text_input(
+            "Lab Input",
+            key="room2_text_buffer",
+            placeholder="Ask about the last validated pattern deploy...",
+            label_visibility="collapsed",
+        )
+        if st.form_submit_button("Send") and st.session_state.room2_text_buffer.strip():
+            st.session_state._pending_room2_chat_submit = True
+            st.rerun()
+
+
 def process_room2_chat_submission():
     user_text = st.session_state.room2_text_buffer.strip()
     if not user_text:
         return
     st.session_state.room2_chat_history.append({"speaker": "You", "text": user_text})
+
+    allowed, block_msg = _window4_ai_generation_allowed(user_text)
+    if not allowed:
+        st.session_state.room2_chat_history.append(
+            {"speaker": "Forensic Expert", "text": block_msg}
+        )
+        st.session_state.room2_text_buffer = ""
+        _sync_matrix_chat_to_cloud()
+        return
 
     if _is_room2_restore_command(user_text):
         restore_msg = _restore_soft_deleted_pattern_from_vault(
@@ -2580,6 +2726,8 @@ def _arm_room2_processor() -> None:
     core_quantum.reset_processing_heartbeat()
     core_quantum.clear_window1_visual_state()
     st.session_state.room2_sentiment_suppressed = False
+    st.session_state.window4_regime_valid = False
+    st.session_state.window4_spatial_match_pct = 0
     st.session_state.room2_processor = {
         "active": True,
         "step": 0,
@@ -2604,6 +2752,8 @@ def _halt_room2_processor(*, fault_text: str) -> str:
     proc = st.session_state.get("room2_processor") or {}
     proc["active"] = False
     st.session_state.room2_processor = proc
+    st.session_state.window4_regime_valid = False
+    st.session_state.window4_spatial_match_pct = 0
     core_quantum.flash_processing_fault(fault_text)
     st.session_state.room2_quantum_report = fault_text
     st.session_state.matrix_satellites_ready = True
@@ -2617,6 +2767,8 @@ def _halt_room2_processor_with_charts(*, fault_text: str) -> str:
     proc["active"] = False
     st.session_state.room2_processor = proc
     st.session_state.room2_sentiment_suppressed = True
+    st.session_state.window4_regime_valid = False
+    st.session_state.window4_spatial_match_pct = 0
     core_quantum.publish_window1_rejection_overlay(fault_text)
     st.session_state.room2_quantum_report = fault_text
     st.session_state.room2_chart_coupling = st.session_state.get("room2_chart_coupling") or {
@@ -2654,6 +2806,15 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
     payload = proc.get("payload") or {}
 
     ok, vault_message = core_quantum.stream_payload_to_vault(payload)
+    if ok:
+        funnel = st.session_state.get("room2_regime_funnel") or {}
+        pg_pct = int(
+            funnel.get("window4_spatial_match_pct")
+            or match_score
+            or 0
+        )
+        pg_valid = pg_pct >= core_quantum.LAYOUT_SIGNATURE_MATCH_THRESHOLD
+        core_quantum._sync_window4_regime_flags(match_pct=pg_pct, valid=pg_valid)
     if ok and pattern_category == "VALIDATED":
         margin_pct = structural_move or abs(
             float(
@@ -3576,38 +3737,7 @@ def render_room2_forensic_lab():
         _render_room2_proxy_telemetry_banners()
         _render_purgatory_shelf()
 
-        st.markdown(
-            '<div class="room2-wire-title">💬 WINDOW 4 — FORENSIC LAB CONVERSATION WIRE</div>',
-            unsafe_allow_html=True,
-        )
-        vault_flash = str(st.session_state.get("room2_vault_flash") or "").strip()
-        vault_confirm = str(st.session_state.get("room2_vault_confirmation") or "").strip()
-        if vault_confirm:
-            st.markdown(
-                f'<div class="room2-vault-success">{escape(vault_confirm)}</div>',
-                unsafe_allow_html=True,
-            )
-        elif vault_flash:
-            st.markdown(
-                f'<div class="room2-vault-success">{escape(vault_flash)}</div>',
-                unsafe_allow_html=True,
-            )
-        if not st.session_state.room2_chat_history:
-            st.caption("Lab chat standing by — type plain English below.")
-        else:
-            for msg in st.session_state.room2_chat_history:
-                _render_window4_chat_message(msg)
-
-        with st.form("room2_chat_form", clear_on_submit=False):
-            st.text_input(
-                "Lab Input",
-                key="room2_text_buffer",
-                placeholder="Ask about patterns, 'delete pattern' / 'delete everything', or 'I didn't mean to delete' / 'restore all'...",
-                label_visibility="collapsed",
-            )
-            if st.form_submit_button("Send") and st.session_state.room2_text_buffer.strip():
-                st.session_state._pending_room2_chat_submit = True
-                st.rerun()
+        _render_window4_conversation_wire()
 
 
 def render_terminal_nav() -> str:

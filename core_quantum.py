@@ -9,8 +9,10 @@ import datetime
 import json
 import math
 import os
+import queue
 import re
 import statistics
+import threading
 import time
 import urllib.parse
 from xml.etree import ElementTree
@@ -47,6 +49,70 @@ LOOKBACK_LANE_ASSERTIONS = {
     "15-Minute": FIFTEEN_MINUTE_DRAGNET_BARS,
 }
 FIVE_MINUTE_SYNTHETIC_SLIPPAGE_PCT = 1.0
+LIQUIDITY_IGNITION_MIN_SHARES_PER_MINUTE = 10_000
+WINDOW4_SYSTEM_IDLE_MSG = "🚫 SYSTEM IDLE — NO VALID REGIME MATCH"
+REGIME_VIBE_NEWS_DEPTH_DAYS = {
+    "1-Minute": 7,
+    "5-Minute": 14,
+    "15-Minute": 30,
+}
+
+
+class _MassiveIngestSerialQueue:
+    """
+    Thread-safe serial queue for Massive REST macro-requests.
+    Enforces a global 12-second cooldown across all submitting threads.
+    """
+
+    def __init__(self) -> None:
+        self._submit_queue: queue.Queue = queue.Queue()
+        self._worker_lock = threading.Lock()
+        self._worker_started = False
+        self._last_pull_monotonic = 0.0
+
+    def _ensure_worker(self) -> None:
+        with self._worker_lock:
+            if self._worker_started:
+                return
+            worker = threading.Thread(
+                target=self._worker_loop,
+                name="massive-ingest-worker",
+                daemon=True,
+            )
+            worker.start()
+            self._worker_started = True
+
+    def _worker_loop(self) -> None:
+        while True:
+            job = self._submit_queue.get()
+            if job is None:
+                self._submit_queue.task_done()
+                break
+            fn, resp_q = job
+            try:
+                elapsed = time.monotonic() - self._last_pull_monotonic
+                if self._last_pull_monotonic > 0 and elapsed < MASSIVE_REST_COOLDOWN_SEC:
+                    time.sleep(MASSIVE_REST_COOLDOWN_SEC - elapsed)
+                result = fn()
+                self._last_pull_monotonic = time.monotonic()
+                resp_q.put((result, None))
+            except Exception as exc:
+                resp_q.put((None, exc))
+            finally:
+                self._submit_queue.task_done()
+
+    def execute(self, fn, *, timeout_sec: float = 180.0):
+        self._ensure_worker()
+        resp_q: queue.Queue = queue.Queue(maxsize=1)
+        self._submit_queue.put((fn, resp_q))
+        result, err = resp_q.get(timeout=timeout_sec)
+        if err is not None:
+            raise err
+        return result
+
+
+_MASSIVE_INGEST_QUEUE = _MassiveIngestSerialQueue()
+
 PROCESSING_LANE_BARS = {
     "1-Minute": ONE_MINUTE_DRAGNET_BARS,
     "5-Minute": FIVE_MINUTE_DRAGNET_BARS,
@@ -297,68 +363,71 @@ def fetch_massive_session_1m_package(
     if not _consume_polygon_call():
         return None, "THROTTLE"
 
-    last_pull = float(st.session_state.get("massive_last_pull_at") or 0.0)
-    elapsed = time.time() - last_pull
-    if last_pull > 0 and elapsed < MASSIVE_REST_COOLDOWN_SEC:
-        time.sleep(MASSIVE_REST_COOLDOWN_SEC - elapsed)
-
-    payload: dict | None = None
-    last_status = 0
-    last_detail = ""
-    for api_key in api_keys:
-        for api_base in MASSIVE_API_BASES:
-            payload, last_status, last_detail = _massive_aggs_request(
-                ticker_clean,
-                start_date=start_date,
-                end_date=end_date,
-                api_key=api_key,
-                api_base=api_base,
-            )
+    def _pull_once() -> tuple[list | None, str | None]:
+        payload: dict | None = None
+        last_status = 0
+        last_detail = ""
+        for api_key in api_keys:
+            for api_base in MASSIVE_API_BASES:
+                payload, last_status, last_detail = _massive_aggs_request(
+                    ticker_clean,
+                    start_date=start_date,
+                    end_date=end_date,
+                    api_key=api_key,
+                    api_base=api_base,
+                )
+                if payload is not None and last_status == 200:
+                    st.session_state.r2_market_data_error = None
+                    st.session_state.r2_market_data_key_source = api_base
+                    break
+                if last_status == 401:
+                    last_detail = "Unknown API Key"
+                    continue
+                if last_status == 429 or (
+                    payload is not None
+                    and str(payload.get("error", "")).lower().find("max requests") >= 0
+                ):
+                    st.session_state.polygon_calls_remaining = 0
+                    st.session_state.polygon_lockout = True
+                    return None, "THROTTLE"
             if payload is not None and last_status == 200:
-                st.session_state.r2_market_data_error = None
-                st.session_state.r2_market_data_key_source = api_base
                 break
-            if last_status == 401:
-                last_detail = "Unknown API Key"
-                continue
-            if last_status == 429 or (
-                payload is not None
-                and str(payload.get("error", "")).lower().find("max requests") >= 0
-            ):
-                st.session_state.polygon_calls_remaining = 0
-                st.session_state.polygon_lockout = True
-                return None, "THROTTLE"
-        if payload is not None and last_status == 200:
-            break
 
-    if payload is None or last_status != 200:
-        if last_status == 401:
-            st.session_state.r2_market_data_error = (
-                "MASSIVE_HTTP_401|Unknown API Key — set MASSIVE_API_KEY in .streamlit/secrets.toml"
-            )
-        else:
-            st.session_state.r2_market_data_error = (
-                f"MASSIVE_HTTP_{last_status}|{last_detail[:80]}"
-                if last_status
-                else f"MASSIVE_FETCH_ERR|{last_detail[:80]}"
-            )
+        if payload is None or last_status != 200:
+            if last_status == 401:
+                st.session_state.r2_market_data_error = (
+                    "MASSIVE_HTTP_401|Unknown API Key — set MASSIVE_API_KEY in "
+                    ".streamlit/secrets.toml"
+                )
+            else:
+                st.session_state.r2_market_data_error = (
+                    f"MASSIVE_HTTP_{last_status}|{last_detail[:80]}"
+                    if last_status
+                    else f"MASSIVE_FETCH_ERR|{last_detail[:80]}"
+                )
+            return None, POLYGON_REST_DATA_EMPTY
+
+        results = payload.get("results")
+        if isinstance(results, list) and len(results) > 0:
+            st.session_state.massive_last_pull_at = time.time()
+            return results, None
+
+        status = str(payload.get("status", "")).upper()
+        error_text = str(payload.get("error") or payload.get("message") or "").lower()
+        if status == "ERROR" and "max requests" in error_text:
+            st.session_state.polygon_calls_remaining = 0
+            st.session_state.polygon_lockout = True
+            return None, "THROTTLE"
+        st.session_state.r2_market_data_error = (
+            str(payload.get("error") or status or "MASSIVE_EMPTY_RESULTS")
+        )
         return None, POLYGON_REST_DATA_EMPTY
 
-    results = payload.get("results")
-    if isinstance(results, list) and len(results) > 0:
-        st.session_state.massive_last_pull_at = time.time()
-        return results, None
-
-    status = str(payload.get("status", "")).upper()
-    error_text = str(payload.get("error") or payload.get("message") or "").lower()
-    if status == "ERROR" and "max requests" in error_text:
-        st.session_state.polygon_calls_remaining = 0
-        st.session_state.polygon_lockout = True
-        return None, "THROTTLE"
-    st.session_state.r2_market_data_error = (
-        str(payload.get("error") or status or "MASSIVE_EMPTY_RESULTS")
-    )
-    return None, POLYGON_REST_DATA_EMPTY
+    try:
+        return _MASSIVE_INGEST_QUEUE.execute(_pull_once)
+    except queue.Empty:
+        st.session_state.r2_market_data_error = "MASSIVE_QUEUE_TIMEOUT"
+        return None, POLYGON_REST_DATA_EMPTY
 
 
 fetch_polygon_session_1m_package = fetch_massive_session_1m_package
@@ -1145,6 +1214,11 @@ def _local_volume_at(window, bar_idx) -> float:
         return 0.0
 
 
+def _passes_absolute_volume_floor(window, bar_idx) -> bool:
+    """Dual-filter guard — raw share volume must clear 10k shares/min institutional floor."""
+    return _local_volume_at(window, bar_idx) >= LIQUIDITY_IGNITION_MIN_SHARES_PER_MINUTE
+
+
 def _volatility_ignition_anchor(window, search_from_idx=None) -> tuple[object | None, float | None]:
     """
     Volatility Ignition — price velocity breaks above std envelope on expanding volume.
@@ -1178,7 +1252,13 @@ def _volatility_ignition_anchor(window, search_from_idx=None) -> tuple[object | 
             continue
         env_high = float(vel_mean.loc[idx] + vel_std.loc[idx])
         vol_expand = float(vols.loc[idx]) >= float(vol_mean.loc[idx] + 0.5 * vol_std.loc[idx])
-        if env_high > 0 and float(v) > env_high and vol_expand:
+        raw_vol = float(vols.loc[idx])
+        if (
+            env_high > 0
+            and float(v) > env_high
+            and vol_expand
+            and raw_vol >= LIQUIDITY_IGNITION_MIN_SHARES_PER_MINUTE
+        ):
             return idx, float(subset.loc[idx, "Close"])
     return None, None
 
@@ -1329,6 +1409,9 @@ def resolve_adaptive_entry_anchor(
             if local_vol < float(baseline_env.get("floor", 0.0)):
                 qualified = False
                 disqualified_reason = "illiquid_dead_zone"
+            elif not _passes_absolute_volume_floor(window, ts):
+                qualified = False
+                disqualified_reason = "below_10k_share_floor"
         scored.append(
             {
                 "id": label,
@@ -1643,6 +1726,13 @@ def apply_temporal_fence_and_lookback(
         if timeframe_resolution == "1-Minute"
         else None,
     }
+    lane_check = validate_regime_lookback_lanes(
+        frame,
+        start_date=start_date,
+        start_time=start_time,
+        timeframe_resolution=timeframe_resolution,
+    )
+    meta["lookback_lane"] = lane_check
     return frame, meta
 
 
@@ -4712,13 +4802,22 @@ def validate_regime_lookback_lanes(
 ) -> dict:
     """
     Strict lookback lane assertions — 1m=5, 5m=36, 15m=48 bars backward from Start Time.
-    Failures flag PRE-STORAGE TRASH before vault or sentiment loops run.
+    Hard assert len(lookback) before any database pass; failures → PRE-STORAGE TRASH.
     """
     required = int(LOOKBACK_LANE_ASSERTIONS.get(timeframe_resolution, ONE_MINUTE_DRAGNET_BARS))
     start_dt = _parse_session_datetime(start_date, start_time)
     _, window = _lookback_lane_dragnet(data_stream, start_dt, timeframe_resolution)
-    actual = len(window) if isinstance(window, pd.DataFrame) and not window.empty else 0
-    passed = actual == required
+    actual = 0
+    passed = False
+    try:
+        if not isinstance(window, pd.DataFrame) or window.empty:
+            raise AssertionError(f"lookback_lane_empty|tf={timeframe_resolution}")
+        lookback = window
+        actual = len(lookback)
+        assert len(lookback) == required
+        passed = True
+    except AssertionError:
+        passed = False
     return {
         "passed": passed,
         "trashed": not passed,
@@ -4728,6 +4827,72 @@ def validate_regime_lookback_lanes(
         "rejection_reasons": [] if passed else [f"lookback_lane_assert_{required}_fail"],
         "trash_reason": None if passed else f"LOOKBACK_LANE|need={required}|got={actual}|tf={timeframe_resolution}",
     }
+
+
+def validate_pgvector_regime_match(query_vector: list[float] | None = None) -> dict:
+    """
+    Hard-coded pgvector cosine gate — Window 4 requires >= 85% and non-flatlined dataset.
+    """
+    vec = [float(x) for x in (query_vector or []) if x is not None]
+    if not vec:
+        return {
+            "valid": False,
+            "spatial_match_pct": 0,
+            "cosine_similarity": 0.0,
+            "flatlined": True,
+            "reason": "empty_vector",
+        }
+    remote = cloud_offload.rpc_match_layout_spatial(vec) or {}
+    pct = int(remote.get("spatial_match_pct") or 0)
+    cos = float(remote.get("cosine_similarity") or 0.0)
+    flatlined = pct <= 0 and cos <= 0.001
+    valid = (not flatlined) and pct >= LAYOUT_SIGNATURE_MATCH_THRESHOLD
+    return {
+        "valid": valid,
+        "spatial_match_pct": pct,
+        "cosine_similarity": round(cos, 4),
+        "flatlined": flatlined,
+        "nearest_layout_id": str(remote.get("nearest_layout_id") or "NEW_LAYOUT"),
+        "engine": str(remote.get("engine") or "array_rpc"),
+        "reason": None if valid else ("flatlined_dataset" if flatlined else "below_85pct_match"),
+    }
+
+
+def window4_instant_fault_text() -> str | None:
+    """Raw fault string for instant Window 4 / processor flash — no AI paraphrase."""
+    api_err = str(st.session_state.get("r2_market_data_error") or "").strip()
+    report = str(st.session_state.get("room2_quantum_report") or "").strip()
+    rejection = str(st.session_state.get("matrix_window1_rejection_text") or "").strip()
+    if "MASSIVE_HTTP_401" in api_err:
+        return api_err
+    if "[PROCESSOR FAULT]" in report or "PROCESSOR FAULT" in report:
+        return report
+    if rejection and ("PRE-STORAGE TRASH" in rejection or "no_volume_ignition" in rejection):
+        return rejection
+    if api_err and api_err.startswith("MASSIVE_HTTP_"):
+        return api_err
+    return None
+
+
+def window4_regime_gate_open() -> bool:
+    """True only after a validated deploy with pgvector match >= 85% and no active fault."""
+    if window4_instant_fault_text():
+        return False
+    proc = st.session_state.get("room2_processor") or {}
+    if proc.get("active"):
+        return False
+    if not st.session_state.get("window4_regime_valid"):
+        return False
+    return int(st.session_state.get("window4_spatial_match_pct") or 0) >= LAYOUT_SIGNATURE_MATCH_THRESHOLD
+
+
+def _sync_window4_regime_flags(
+    *,
+    match_pct: int,
+    valid: bool,
+) -> None:
+    st.session_state.window4_spatial_match_pct = int(match_pct)
+    st.session_state.window4_regime_valid = bool(valid) and int(match_pct) >= LAYOUT_SIGNATURE_MATCH_THRESHOLD
 
 
 def fetch_layout_shell_strategies(
@@ -4830,11 +4995,16 @@ def run_global_vibe_check(
     else:
         vibe = "neutral"
 
+    news_depth_days = int(REGIME_VIBE_NEWS_DEPTH_DAYS.get(timeframe_resolution, 7))
+    scaled_lookback_hours = round(3.0 * scale, 2)
+
     return {
         "stage": "global_vibe_check",
         "master_layout_container": layout_id,
         "vibe_profile": vibe,
         "lookback_scale": scale,
+        "scaled_lookback_hours": scaled_lookback_hours,
+        "news_depth_days": news_depth_days,
         "news_depth_scale": round(scale * 1.5, 2),
         "feature_vector": feature_vec,
         "spatial": spatial,
@@ -5010,6 +5180,7 @@ def run_regime_switching_funnel(
         timeframe_resolution=timeframe_resolution,
     )
     if not lane.get("passed"):
+        _sync_window4_regime_flags(match_pct=0, valid=False)
         return {
             "funnel_version": REGIME_FUNNEL_VERSION,
             "trashed": True,
@@ -5048,6 +5219,16 @@ def run_regime_switching_funnel(
         end_time=end_time,
     )
 
+    pg_gate = validate_pgvector_regime_match(stage1["feature_vector"])
+    match_pct = int(
+        pg_gate.get("spatial_match_pct")
+        or stage2.get("shell_match_pct")
+        or stage1.get("spatial_match_pct")
+        or 0
+    )
+    regime_valid = bool(pg_gate.get("valid")) and bool(stage3.get("passed_alpha_floor"))
+    _sync_window4_regime_flags(match_pct=match_pct, valid=regime_valid)
+
     result = {
         "funnel_version": REGIME_FUNNEL_VERSION,
         "ticker": str(ticker or "").upper(),
@@ -5055,6 +5236,7 @@ def run_regime_switching_funnel(
         "stage1_vibe": stage1,
         "stage2_shell": stage2,
         "stage3_judgement": stage3,
+        "pgvector_gate": pg_gate,
         "master_layout_container": stage1["master_layout_container"],
         "execution_strategy": stage3["selected_strategy"],
         "action_mechanic": stage3["action_mechanic"],
@@ -5062,6 +5244,8 @@ def run_regime_switching_funnel(
         "spatial": stage1["spatial"],
         "trashed": bool(stage3.get("trashed")),
         "trash_message": stage3.get("trash_reason"),
+        "window4_regime_valid": regime_valid,
+        "window4_spatial_match_pct": match_pct,
     }
     st.session_state.room2_regime_funnel = result
     emit_processing_heartbeat(
