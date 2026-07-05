@@ -1,6 +1,7 @@
 import os
 import re
 import statistics
+import threading
 import time
 import urllib.parse
 import json
@@ -784,6 +785,8 @@ if "matrix_window1_rejection_text" not in st.session_state: st.session_state.mat
 if "room2_processor" not in st.session_state: st.session_state.room2_processor = {}
 if "window4_regime_valid" not in st.session_state: st.session_state.window4_regime_valid = False
 if "window4_spatial_match_pct" not in st.session_state: st.session_state.window4_spatial_match_pct = 0
+if "window4_async_job" not in st.session_state: st.session_state.window4_async_job = None
+if "window4_status_line" not in st.session_state: st.session_state.window4_status_line = WINDOW4_ENGINE_IDLE_MSG
 if "matrix_satellites_ready" not in st.session_state: st.session_state.matrix_satellites_ready = True
 if "r2_data_feed_mode" not in st.session_state: st.session_state.r2_data_feed_mode = DATA_FEED_CAROUSEL
 if "r2_timeframe_mode" not in st.session_state: st.session_state.r2_timeframe_mode = "15-Minute"
@@ -2345,27 +2348,214 @@ def _window4_break_dense_blocks(text: str) -> str:
     return "\n\n".join(sections)
 
 
-def _format_window4_response(text: str, *, vault_safe: bool = False) -> str:
+def _format_window4_response(
+    text: str,
+    *,
+    vault_safe: bool = False,
+    status_safe: bool = False,
+) -> str:
     """
     Window 4 presentation layer — spacing, bullets, bold anchors, and hallucination scrub.
-    Vault command replies bypass the verified-stream idle lock.
+    Vault and status replies bypass the verified-stream idle lock.
     """
-    if not vault_safe and not _window4_has_verified_metric_stream():
+    if not vault_safe and not status_safe and not _window4_has_verified_metric_stream():
         return WINDOW4_ENGINE_IDLE_MSG
-    polished = _window4_sanitize_display_text(text) if not vault_safe else str(text or "").strip()
+    if status_safe or vault_safe:
+        polished = str(text or "").strip()
+    else:
+        polished = _window4_sanitize_display_text(text)
     if not polished:
-        return WINDOW4_ENGINE_IDLE_MSG if not vault_safe else polished
+        return WINDOW4_ENGINE_IDLE_MSG if not (vault_safe or status_safe) else polished
     polished = _window4_break_dense_blocks(polished)
     polished = _window4_bold_anchors(polished)
     polished = re.sub(r"\n{3,}", "\n\n", polished)
     return polished.strip()
 
 
+def _window4_resolve_status_line() -> str:
+    """Dynamic status banner — never leaves the wire stuck on a static idle string."""
+    job = st.session_state.get("window4_async_job")
+    if isinstance(job, dict) and job.get("phase") == "processing":
+        elapsed = int(time.time() - float(job.get("started_at") or time.time()))
+        return (
+            f"⏳ PROCESSING — forensic expert analyzing verified packets... ({elapsed}s)"
+        )
+    proc = st.session_state.get("room2_processor") or {}
+    if proc.get("active"):
+        return f"⚙️ Deploy processor running — step {int(proc.get('step') or 0)}..."
+    if _window4_has_verified_metric_stream():
+        return "✅ Verified Massive stream active — forensic chat ready."
+    custom = str(st.session_state.get("window4_status_line") or "").strip()
+    if custom and custom != WINDOW4_ENGINE_IDLE_MSG:
+        return custom
+    return WINDOW4_ENGINE_IDLE_MSG
+
+
+def _window4_groq_worker(*, user_text: str) -> None:
+    """Background Groq worker — keeps the Streamlit UI thread responsive."""
+    try:
+        if _is_pattern_mining_query(user_text):
+            ai_text = run_groq(_build_pattern_strategist_messages(user_text))
+        else:
+            ai_text = run_groq(_build_room2_groq_messages(user_text))
+        job = st.session_state.get("window4_async_job") or {}
+        if job.get("user_text") == user_text and job.get("phase") == "processing":
+            job["result"] = ai_text
+            job["phase"] = "done"
+            st.session_state.window4_async_job = job
+    except Exception as exc:
+        job = st.session_state.get("window4_async_job") or {}
+        if job.get("user_text") == user_text:
+            job["error"] = str(exc)
+            job["phase"] = "failed"
+            st.session_state.window4_async_job = job
+
+
+def _window4_start_async_groq(user_text: str) -> None:
+    st.session_state.window4_async_job = {
+        "user_text": user_text,
+        "phase": "processing",
+        "result": None,
+        "error": None,
+        "started_at": time.time(),
+    }
+    st.session_state.window4_status_line = (
+        "⏳ PROCESSING — forensic expert analyzing verified packets..."
+    )
+    threading.Thread(
+        target=_window4_groq_worker,
+        kwargs={"user_text": user_text},
+        name="window4-groq-worker",
+        daemon=True,
+    ).start()
+
+
+def _window4_handle_chat_submit(user_text: str) -> None:
+    """Instant operator echo + async forensic reply — UI thread never blocks on Groq."""
+    clean = str(user_text or "").strip()
+    if not clean:
+        return
+
+    st.session_state.room2_chat_history.append({"speaker": "You", "text": clean})
+    st.session_state.room2_text_buffer = ""
+
+    if _is_room2_restore_command(clean):
+        restore_msg = _restore_soft_deleted_pattern_from_vault(
+            restore_all=_is_room2_restore_all_command(clean)
+        )
+        st.session_state.room2_chat_history.append(
+            {
+                "speaker": "Forensic Expert",
+                "text": _format_window4_response(restore_msg, vault_safe=True),
+                "vault_safe": True,
+            }
+        )
+        st.session_state.window4_status_line = "✅ Vault restore command processed."
+        _sync_matrix_chat_to_cloud()
+        return
+
+    if _is_room2_delete_command(clean):
+        if _is_room2_delete_all_command(clean):
+            trash_msg = _soft_delete_all_patterns_to_vault()
+        else:
+            trash_msg = _soft_delete_latest_pattern_to_vault()
+            st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(
+                trash_only=False
+            )
+            st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(
+                trash_only=True
+            )
+        st.session_state.room2_chat_history.append(
+            {
+                "speaker": "Forensic Expert",
+                "text": _format_window4_response(trash_msg, vault_safe=True),
+                "vault_safe": True,
+            }
+        )
+        st.session_state.window4_status_line = "✅ Vault delete command processed."
+        _sync_matrix_chat_to_cloud()
+        return
+
+    if not _window4_has_verified_metric_stream():
+        st.session_state.room2_chat_history.append(
+            {
+                "speaker": "Forensic Expert",
+                "text": WINDOW4_ENGINE_IDLE_MSG,
+                "status_reply": True,
+            }
+        )
+        st.session_state.window4_status_line = (
+            "📡 Operator message received — deploy a verified pattern to unlock forensic AI."
+        )
+        _sync_matrix_chat_to_cloud()
+        return
+
+    allowed, block_msg = _window4_ai_generation_allowed(
+        clean,
+        source=WINDOW4_SOURCE_OPERATOR,
+    )
+    if not allowed:
+        st.session_state.room2_chat_history.append(
+            {
+                "speaker": "Forensic Expert",
+                "text": block_msg,
+                "status_reply": True,
+            }
+        )
+        st.session_state.window4_status_line = block_msg
+        _sync_matrix_chat_to_cloud()
+        return
+
+    _window4_start_async_groq(clean)
+
+
+@st.fragment(run_every=timedelta(seconds=1))
+def _window4_async_poll_fragment() -> None:
+    """Responsive async loop — drains Groq worker results without freezing the glass."""
+    job = st.session_state.get("window4_async_job")
+    if not isinstance(job, dict):
+        return
+
+    phase = str(job.get("phase") or "")
+    if phase == "processing":
+        st.session_state.window4_status_line = _window4_resolve_status_line()
+        return
+
+    if phase == "done":
+        ai_text = str(job.get("result") or "")
+        st.session_state.room2_chat_history.append(
+            {
+                "speaker": "Forensic Expert",
+                "text": _format_window4_response(ai_text),
+            }
+        )
+        st.session_state.window4_async_job = None
+        st.session_state.window4_status_line = _window4_resolve_status_line()
+        _sync_matrix_chat_to_cloud()
+        st.rerun()
+        return
+
+    if phase == "failed":
+        err = str(job.get("error") or "Unknown forensic chat fault.")
+        st.session_state.room2_chat_history.append(
+            {
+                "speaker": "Forensic Expert",
+                "text": f"⚠️ Forensic chat fault: {err}",
+                "status_reply": True,
+            }
+        )
+        st.session_state.window4_async_job = None
+        st.session_state.window4_status_line = "⚠️ Forensic chat fault — ready for next command."
+        _sync_matrix_chat_to_cloud()
+        st.rerun()
+
+
 def _render_window4_chat_message(msg: dict, *, verified_stream: bool) -> None:
-    """Render a single Window 4 history row — expert blocks suppressed when idle."""
+    """Render a single Window 4 history row — status/vault replies always visible."""
     speaker = str(msg.get("speaker") or "")
     body = str(msg.get("text") or "")
     vault_safe = bool(msg.get("vault_safe"))
+    status_reply = bool(msg.get("status_reply"))
     if speaker == "You":
         st.markdown(
             f'<div class="room2-chat-row">'
@@ -2375,11 +2565,16 @@ def _render_window4_chat_message(msg: dict, *, verified_stream: bool) -> None:
             unsafe_allow_html=True,
         )
         return
-    if not verified_stream and not vault_safe:
+    if not verified_stream and not vault_safe and not status_reply:
         return
-    display = _format_window4_response(body, vault_safe=vault_safe)
+    display = _format_window4_response(
+        body,
+        vault_safe=vault_safe,
+        status_safe=status_reply,
+    )
     if (
         not vault_safe
+        and not status_reply
         and display == WINDOW4_ENGINE_IDLE_MSG
         and body.strip() != WINDOW4_ENGINE_IDLE_MSG
     ):
@@ -2486,13 +2681,20 @@ def _window4_automated_regime_blocked(user_text: str, *, source: str) -> tuple[b
 
 
 def _render_window4_conversation_wire() -> None:
-    """Window 4 — strict input mirroring; idle until verified Massive metric stream."""
+    """Window 4 — responsive async wire; operator input never blocks the UI thread."""
+    _window4_async_poll_fragment()
+
     st.markdown(
         '<div class="room2-wire-title">💬 WINDOW 4 — FORENSIC LAB CONVERSATION WIRE</div>',
         unsafe_allow_html=True,
     )
 
     verified_stream = _window4_has_verified_metric_stream()
+    status_line = _window4_resolve_status_line()
+    st.markdown(
+        f'<div class="window4-system-idle">{escape(status_line)}</div>',
+        unsafe_allow_html=True,
+    )
 
     vault_flash = str(st.session_state.get("room2_vault_flash") or "").strip()
     vault_confirm = str(st.session_state.get("room2_vault_confirmation") or "").strip()
@@ -2507,90 +2709,42 @@ def _render_window4_conversation_wire() -> None:
             unsafe_allow_html=True,
         )
 
-    if not verified_stream:
-        st.markdown(
-            f'<div class="window4-system-idle">{escape(WINDOW4_ENGINE_IDLE_MSG)}</div>',
-            unsafe_allow_html=True,
-        )
-        for msg in st.session_state.room2_chat_history:
-            _render_window4_chat_message(msg, verified_stream=False)
-    else:
-        for msg in st.session_state.room2_chat_history:
-            _render_window4_chat_message(msg, verified_stream=True)
+    if not st.session_state.room2_chat_history:
+        st.caption("Type a command below — your message appears instantly on send.")
+    for msg in st.session_state.room2_chat_history:
+        _render_window4_chat_message(msg, verified_stream=verified_stream)
 
     with st.form("room2_chat_form", clear_on_submit=False):
         st.text_input(
             "Lab Input",
             key="room2_text_buffer",
-            placeholder="Deploy a pattern first · restore all · delete pattern...",
+            placeholder="Ask the Forensic Expert · restore all · delete pattern...",
             label_visibility="collapsed",
         )
-        if st.form_submit_button("Send") and st.session_state.room2_text_buffer.strip():
-            st.session_state._pending_room2_chat_submit = True
+        submitted = st.form_submit_button("Send")
+        if submitted and st.session_state.room2_text_buffer.strip():
+            active_job = st.session_state.get("window4_async_job")
+            if isinstance(active_job, dict) and active_job.get("phase") == "processing":
+                st.session_state.room2_chat_history.append(
+                    {
+                        "speaker": "You",
+                        "text": st.session_state.room2_text_buffer.strip(),
+                    }
+                )
+                st.session_state.room2_text_buffer = ""
+                st.session_state.window4_status_line = (
+                    "⏳ Prior forensic reply still processing — message queued on wire."
+                )
+            else:
+                _window4_handle_chat_submit(st.session_state.room2_text_buffer.strip())
             st.rerun()
 
 
 def process_room2_chat_submission():
+    """Legacy entry — redirects to the non-blocking Window 4 handler."""
     user_text = st.session_state.room2_text_buffer.strip()
-    if not user_text:
-        return
-    st.session_state.room2_chat_history.append({"speaker": "You", "text": user_text})
-
-    allowed, block_msg = _window4_ai_generation_allowed(
-        user_text,
-        source=WINDOW4_SOURCE_OPERATOR,
-    )
-    if not allowed:
-        st.session_state.room2_chat_history.append(
-            {"speaker": "Forensic Expert", "text": block_msg}
-        )
-        st.session_state.room2_text_buffer = ""
-        _sync_matrix_chat_to_cloud()
-        return
-
-    if _is_room2_restore_command(user_text):
-        restore_msg = _restore_soft_deleted_pattern_from_vault(
-            restore_all=_is_room2_restore_all_command(user_text)
-        )
-        st.session_state.room2_chat_history.append(
-            {
-                "speaker": "Forensic Expert",
-                "text": _format_window4_response(restore_msg, vault_safe=True),
-                "vault_safe": True,
-            }
-        )
-        st.session_state.room2_text_buffer = ""
-        _sync_matrix_chat_to_cloud()
-        return
-
-    if _is_room2_delete_command(user_text):
-        if _is_room2_delete_all_command(user_text):
-            trash_msg = _soft_delete_all_patterns_to_vault()
-        else:
-            trash_msg = _soft_delete_latest_pattern_to_vault()
-            st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
-            st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
-        st.session_state.room2_chat_history.append(
-            {
-                "speaker": "Forensic Expert",
-                "text": _format_window4_response(trash_msg, vault_safe=True),
-                "vault_safe": True,
-            }
-        )
-        st.session_state.room2_text_buffer = ""
-        _sync_matrix_chat_to_cloud()
-        return
-
-    if _is_pattern_mining_query(user_text):
-        ai_text = run_groq(_build_pattern_strategist_messages(user_text))
-    else:
-        ai_text = run_groq(_build_room2_groq_messages(user_text))
-
-    st.session_state.room2_chat_history.append(
-        {"speaker": "Forensic Expert", "text": _format_window4_response(ai_text)}
-    )
-    st.session_state.room2_text_buffer = ""
-    _sync_matrix_chat_to_cloud()
+    if user_text:
+        _window4_handle_chat_submit(user_text)
 
 
 def purge_room2_conversation_and_cloud() -> None:
@@ -4102,10 +4256,6 @@ if st.session_state.pop("_pending_chat_submit", False):
             process_chat_submission()
     else:
         st.session_state.room1_memory_locked = True
-
-if st.session_state.pop("_pending_room2_chat_submit", False):
-    with st.spinner("Forensic Pattern Research Expert processing..."):
-        process_room2_chat_submission()
 
 terminal_hub = render_terminal_nav()
 
