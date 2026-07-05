@@ -1,7 +1,6 @@
 import os
 import re
 import statistics
-import threading
 import time
 import urllib.parse
 import json
@@ -790,6 +789,7 @@ if "room2_processor" not in st.session_state: st.session_state.room2_processor =
 if "window4_regime_valid" not in st.session_state: st.session_state.window4_regime_valid = False
 if "window4_spatial_match_pct" not in st.session_state: st.session_state.window4_spatial_match_pct = 0
 if "window4_async_job" not in st.session_state: st.session_state.window4_async_job = None
+if "window4_groq_pending" not in st.session_state: st.session_state.window4_groq_pending = None
 if "window4_status_line" not in st.session_state: st.session_state.window4_status_line = WINDOW4_ENGINE_IDLE_MSG
 if "matrix_satellites_ready" not in st.session_state: st.session_state.matrix_satellites_ready = True
 if "r2_data_feed_mode" not in st.session_state: st.session_state.r2_data_feed_mode = DATA_FEED_CAROUSEL
@@ -2507,13 +2507,9 @@ def _format_window4_response(
 
 
 def _window4_resolve_status_line() -> str:
-    """Dynamic status banner — never leaves the wire stuck on a static idle string."""
-    job = st.session_state.get("window4_async_job")
-    if isinstance(job, dict) and job.get("phase") == "processing":
-        elapsed = int(time.time() - float(job.get("started_at") or time.time()))
-        return (
-            f"⏳ PROCESSING — forensic expert analyzing verified packets... ({elapsed}s)"
-        )
+    """Dynamic status banner — reflects pending Groq work on the main thread."""
+    if isinstance(st.session_state.get("window4_groq_pending"), dict):
+        return "⏳ PROCESSING — forensic expert replying..."
     proc = st.session_state.get("room2_processor") or {}
     if proc.get("active"):
         return f"⚙️ Deploy processor running — step {int(proc.get('step') or 0)}..."
@@ -2525,49 +2521,52 @@ def _window4_resolve_status_line() -> str:
     return WINDOW4_ENGINE_IDLE_MSG
 
 
-def _window4_groq_worker(*, user_text: str, track: str) -> None:
-    """Background Groq worker — conversational and data tracks stay off the UI thread."""
+def _window4_execute_groq_pending(pending: dict) -> None:
+    """Main-thread Groq execution — reliable on Streamlit Cloud (no background threads)."""
+    user_text = str(pending.get("user_text") or "").strip()
+    track = str(pending.get("track") or "conversational")
+    if not user_text:
+        return
     try:
         if track == "conversational":
             ai_text = run_groq(_build_window4_conversational_messages(user_text))
+            st.session_state.room2_chat_history.append(
+                {
+                    "speaker": "Forensic Expert",
+                    "text": _format_window4_response(ai_text, conversational_safe=True),
+                    "conversational": True,
+                }
+            )
         elif _is_pattern_mining_query(user_text):
             ai_text = run_groq(_build_pattern_strategist_messages(user_text))
+            st.session_state.room2_chat_history.append(
+                {
+                    "speaker": "Forensic Expert",
+                    "text": _format_window4_response(ai_text),
+                    "data_reply": True,
+                }
+            )
         else:
             ai_text = run_groq(_build_room2_groq_messages(user_text))
-        job = st.session_state.get("window4_async_job") or {}
-        if job.get("user_text") == user_text and job.get("phase") == "processing":
-            job["result"] = ai_text
-            job["phase"] = "done"
-            st.session_state.window4_async_job = job
+            st.session_state.room2_chat_history.append(
+                {
+                    "speaker": "Forensic Expert",
+                    "text": _format_window4_response(ai_text),
+                    "data_reply": True,
+                }
+            )
     except Exception as exc:
-        job = st.session_state.get("window4_async_job") or {}
-        if job.get("user_text") == user_text:
-            job["error"] = str(exc)
-            job["phase"] = "failed"
-            st.session_state.window4_async_job = job
-
-
-def _window4_start_async_groq(user_text: str, *, track: str) -> None:
-    st.session_state.window4_async_job = {
-        "user_text": user_text,
-        "track": track,
-        "phase": "processing",
-        "result": None,
-        "error": None,
-        "started_at": time.time(),
-    }
-    if track == "conversational":
-        st.session_state.window4_status_line = "💬 Conversational wire — composing reply..."
-    else:
-        st.session_state.window4_status_line = (
-            "⏳ PROCESSING — forensic expert analyzing verified packets..."
+        st.session_state.room2_chat_history.append(
+            {
+                "speaker": "Forensic Expert",
+                "text": f"⚠️ Forensic chat fault: {exc}",
+                "status_reply": True,
+            }
         )
-    threading.Thread(
-        target=_window4_groq_worker,
-        kwargs={"user_text": user_text, "track": track},
-        name="window4-groq-worker",
-        daemon=True,
-    ).start()
+    finally:
+        st.session_state.window4_groq_pending = None
+        st.session_state.window4_status_line = _window4_resolve_status_line()
+        _sync_matrix_chat_to_cloud()
 
 
 def _window4_handle_chat_submit(user_text: str) -> None:
@@ -2649,64 +2648,24 @@ def _window4_handle_chat_submit(user_text: str) -> None:
             _sync_matrix_chat_to_cloud()
             return
 
-        _window4_start_async_groq(clean, track="data")
+        _window4_start_pending_groq(clean, track="data")
         return
 
-    _window4_start_async_groq(clean, track="conversational")
+    _window4_start_pending_groq(clean, track="conversational")
 
 
-@st.fragment(run_every=timedelta(seconds=1))
-def _window4_async_poll_fragment() -> None:
-    """Responsive async loop — drains Groq worker results without freezing the glass."""
-    job = st.session_state.get("window4_async_job")
-    if not isinstance(job, dict):
-        return
-
-    phase = str(job.get("phase") or "")
-    if phase == "processing":
-        job_track = str(job.get("track") or "data")
-        if job_track == "conversational":
-            st.session_state.window4_status_line = (
-                f"💬 Conversational wire — composing reply... "
-                f"({int(time.time() - float(job.get('started_at') or time.time()))}s)"
-            )
-        else:
-            st.session_state.window4_status_line = _window4_resolve_status_line()
-        return
-
-    if phase == "done":
-        ai_text = str(job.get("result") or "")
-        job_track = str(job.get("track") or "data")
-        st.session_state.room2_chat_history.append(
-            {
-                "speaker": "Forensic Expert",
-                "text": _format_window4_response(
-                    ai_text,
-                    conversational_safe=(job_track == "conversational"),
-                ),
-                "conversational": job_track == "conversational",
-                "data_reply": job_track == "data",
-            }
+def _window4_start_pending_groq(user_text: str, *, track: str) -> None:
+    """Queue Groq for the next main-thread drain — operator echo is already in history."""
+    st.session_state.window4_groq_pending = {
+        "user_text": user_text,
+        "track": track,
+    }
+    if track == "conversational":
+        st.session_state.window4_status_line = "💬 Conversational wire — composing reply..."
+    else:
+        st.session_state.window4_status_line = (
+            "⏳ PROCESSING — forensic expert analyzing verified packets..."
         )
-        st.session_state.window4_async_job = None
-        st.session_state.window4_status_line = _window4_resolve_status_line()
-        _sync_matrix_chat_to_cloud()
-        st.rerun()
-        return
-
-    if phase == "failed":
-        err = str(job.get("error") or "Unknown forensic chat fault.")
-        st.session_state.room2_chat_history.append(
-            {
-                "speaker": "Forensic Expert",
-                "text": f"⚠️ Forensic chat fault: {err}",
-                "status_reply": True,
-            }
-        )
-        st.session_state.window4_async_job = None
-        st.session_state.window4_status_line = "⚠️ Forensic chat fault — ready for next command."
-        _sync_matrix_chat_to_cloud()
-        st.rerun()
 
 
 def _render_window4_chat_message(msg: dict, *, verified_stream: bool) -> None:
@@ -2852,9 +2811,7 @@ def _window4_automated_regime_blocked(user_text: str, *, source: str) -> tuple[b
 
 
 def _render_window4_conversation_wire() -> None:
-    """Window 4 — responsive async wire; operator input never blocks the UI thread."""
-    _window4_async_poll_fragment()
-
+    """Window 4 — two-phase wire: instant operator echo, then main-thread Groq drain."""
     if st.session_state.pop("_clear_room2_text_buffer", False):
         st.session_state.pop("room2_text_buffer", None)
 
@@ -2888,6 +2845,12 @@ def _render_window4_conversation_wire() -> None:
     for msg in st.session_state.room2_chat_history:
         _render_window4_chat_message(msg, verified_stream=verified_stream)
 
+    pending = st.session_state.get("window4_groq_pending")
+    if isinstance(pending, dict):
+        with st.spinner("Forensic Expert replying..."):
+            _window4_execute_groq_pending(pending)
+        st.rerun()
+
     with st.form("room2_chat_form", clear_on_submit=True):
         st.text_input(
             "Lab Input",
@@ -2898,17 +2861,18 @@ def _render_window4_conversation_wire() -> None:
         submitted = st.form_submit_button("Send")
         if submitted:
             user_text = str(st.session_state.get("room2_text_buffer") or "").strip()
-            if user_text:
-                active_job = st.session_state.get("window4_async_job")
-                if isinstance(active_job, dict) and active_job.get("phase") == "processing":
-                    st.session_state.room2_chat_history.append(
-                        {"speaker": "You", "text": user_text}
-                    )
-                    st.session_state.window4_status_line = (
-                        "⏳ Prior forensic reply still processing — message queued on wire."
-                    )
-                else:
-                    _window4_handle_chat_submit(user_text)
+            if not user_text:
+                return
+            if isinstance(st.session_state.get("window4_groq_pending"), dict):
+                st.session_state.room2_chat_history.append(
+                    {"speaker": "You", "text": user_text}
+                )
+                st.session_state.window4_status_line = (
+                    "⏳ Prior reply still processing — message logged on wire."
+                )
+                _sync_matrix_chat_to_cloud()
+            else:
+                _window4_handle_chat_submit(user_text)
             st.rerun()
 
 
