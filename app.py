@@ -2437,7 +2437,6 @@ def _window4_handle_chat_submit(user_text: str) -> None:
         return
 
     st.session_state.room2_chat_history.append({"speaker": "You", "text": clean})
-    st.session_state.room2_text_buffer = ""
 
     if _is_room2_restore_command(clean):
         restore_msg = _restore_soft_deleted_pattern_from_vault(
@@ -2684,6 +2683,9 @@ def _render_window4_conversation_wire() -> None:
     """Window 4 — responsive async wire; operator input never blocks the UI thread."""
     _window4_async_poll_fragment()
 
+    if st.session_state.pop("_clear_room2_text_buffer", False):
+        st.session_state.pop("room2_text_buffer", None)
+
     st.markdown(
         '<div class="room2-wire-title">💬 WINDOW 4 — FORENSIC LAB CONVERSATION WIRE</div>',
         unsafe_allow_html=True,
@@ -2714,7 +2716,7 @@ def _render_window4_conversation_wire() -> None:
     for msg in st.session_state.room2_chat_history:
         _render_window4_chat_message(msg, verified_stream=verified_stream)
 
-    with st.form("room2_chat_form", clear_on_submit=False):
+    with st.form("room2_chat_form", clear_on_submit=True):
         st.text_input(
             "Lab Input",
             key="room2_text_buffer",
@@ -2722,21 +2724,19 @@ def _render_window4_conversation_wire() -> None:
             label_visibility="collapsed",
         )
         submitted = st.form_submit_button("Send")
-        if submitted and st.session_state.room2_text_buffer.strip():
-            active_job = st.session_state.get("window4_async_job")
-            if isinstance(active_job, dict) and active_job.get("phase") == "processing":
-                st.session_state.room2_chat_history.append(
-                    {
-                        "speaker": "You",
-                        "text": st.session_state.room2_text_buffer.strip(),
-                    }
-                )
-                st.session_state.room2_text_buffer = ""
-                st.session_state.window4_status_line = (
-                    "⏳ Prior forensic reply still processing — message queued on wire."
-                )
-            else:
-                _window4_handle_chat_submit(st.session_state.room2_text_buffer.strip())
+        if submitted:
+            user_text = str(st.session_state.get("room2_text_buffer") or "").strip()
+            if user_text:
+                active_job = st.session_state.get("window4_async_job")
+                if isinstance(active_job, dict) and active_job.get("phase") == "processing":
+                    st.session_state.room2_chat_history.append(
+                        {"speaker": "You", "text": user_text}
+                    )
+                    st.session_state.window4_status_line = (
+                        "⏳ Prior forensic reply still processing — message queued on wire."
+                    )
+                else:
+                    _window4_handle_chat_submit(user_text)
             st.rerun()
 
 
@@ -2757,7 +2757,7 @@ def purge_room2_conversation_and_cloud() -> None:
             "vault_safe": True,
         }
     ]
-    st.session_state.room2_text_buffer = ""
+    st.session_state._clear_room2_text_buffer = True
     _sync_matrix_chat_to_cloud()
 
 
