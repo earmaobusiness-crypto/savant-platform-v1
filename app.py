@@ -93,6 +93,28 @@ DATA_FEED_CAROUSEL = "carousel_15s"
 MATRIX_CHAT_LOG_TICKER = "_LAB_SESSION_"
 MATRIX_CHAT_LOG_CATEGORY = "MATRIX_CHAT_LOG"
 MATRIX_ENGINE_IDLE_MARKER = "ENGINE_IDLE"
+WINDOW4_ENGINE_IDLE_MSG = "🚫 ENGINE_IDLE — WAITING FOR OPERATOR DEPLOY SIGNAL"
+WINDOW4_PLACEHOLDER_LAYOUT_IDS = frozenset({"NEW_LAYOUT", "PURGATORY_PENDING", "NEW"})
+_WINDOW4_TICKER_TOKEN = re.compile(r"\b[A-Z][A-Z0-9.-]{0,6}\b")
+_WINDOW4_TICKER_DENYLIST = frozenset({
+    "AM", "PM", "API", "REST", "TRUE", "FALSE", "HTTP", "HTTPS", "USD", "SEC", "EDGAR",
+    "THE", "AND", "FOR", "YOU", "ALL", "DELETE", "RESTORE", "PATTERN", "LAYOUT", "VAULT",
+    "ENGINE", "IDLE", "WAITING", "OPERATOR", "DEPLOY", "SIGNAL", "NEW", "OLD", "LAB",
+    "ROOM", "WINDOW", "GROQ", "JSON", "HTML", "FORM", "DATA", "FEED", "CLOUD", "MACRO",
+    "MINUTE", "TRACK", "LANE", "BIN", "NODE", "MATCH", "SCORE", "NET", "MARGIN", "STATE",
+    "TRUE", "NULL", "NONE", "SEND", "ASK", "SAY", "GET", "SET", "RUN", "LOG", "RAM",
+})
+_WINDOW4_HALLUCINATION_SCRUBBERS = (
+    re.compile(r"\bNEW_LAYOUT\b", re.I),
+    re.compile(r"\bNEW[A-Z]\b"),
+    re.compile(r"carousel_15s", re.I),
+    re.compile(r"websocket_subsecond", re.I),
+    re.compile(r"\[(?:DATA_FEED|PROCESSOR_LANE|SPATIAL_MATCH|MACRO_LAYOUT|EXECUTION_STRATEGY)\][^\n\[]*", re.I),
+    re.compile(r"(?:pgvector|spatial|cosine)\s*match[^.\n|]{0,48}", re.I),
+    re.compile(r"\b\d{1,3}\s*%\s*(?:match|similarity|overlap)\b", re.I),
+    re.compile(r"\bMatch\s+Score[^.\n]{0,40}", re.I),
+    re.compile(r"\bStrategy\s+Node\s*[\dA-Z]+(?:-[\dmM]+)?\b", re.I),
+)
 MATRIX_CASCADE_DURATION_SEC = 2.0
 MATRIX_CASCADE_LINES = (
     "⚡ CORE_PROCESSOR: ENGAGING MATRIX CRAWL... RECONSTRUCTING COVARIANCE FREQUENCY ARRAYS...",
@@ -2173,54 +2195,107 @@ def _is_pattern_mining_query(text: str) -> bool:
     return any(w in low for w in pattern_words) and any(w in low for w in ask_words)
 
 
+def _window4_operator_deploy_ticker() -> str:
+    """Ticker explicitly entered in the Room 2 Pattern Ticker input field."""
+    return str(st.session_state.get("r2_good_ticker") or "").strip().upper()
+
+
+def _window4_has_verified_metric_stream() -> bool:
+    """
+    True only when Massive-backed metric packets are active for the operator deploy ticker.
+    """
+    ticker = _window4_operator_deploy_ticker()
+    if not ticker:
+        return False
+    if core_quantum.window4_instant_fault_text():
+        return False
+    proc = st.session_state.get("room2_processor") or {}
+    if proc.get("active"):
+        snap = proc.get("snapshot") or {}
+        proc_ticker = str(snap.get("ticker") or "").strip().upper()
+        return (
+            proc_ticker == ticker
+            and core_quantum.is_usable_data_stream(proc.get("data_stream"))
+        )
+    report = str(st.session_state.get("room2_quantum_report") or "").strip()
+    if not report or "PRE-STORAGE TRASH" in report or MATRIX_ENGINE_IDLE_MARKER in report:
+        return False
+    if not core_quantum.is_usable_data_stream(st.session_state.get("r2_polygon_1m_ram")):
+        return False
+    math_block = st.session_state.get("room2_last_math_block") or {}
+    has_metrics = bool(
+        math_block.get("structural_move_pct") is not None
+        or math_block.get("match_probability")
+    )
+    return has_metrics or core_quantum.window4_regime_gate_open()
+
+
+def _window4_scrub_hallucinated_fragments(text: str) -> str:
+    """Remove placeholder layouts, fake nodes, feed labels, and unverified match percentages."""
+    out = str(text or "")
+    for pattern in _WINDOW4_HALLUCINATION_SCRUBBERS:
+        out = pattern.sub("", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def _window4_mirror_tickers_only(text: str) -> str:
+    """Strip ticker symbols unless they match the operator Pattern Ticker field exactly."""
+    allowed = _window4_operator_deploy_ticker()
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if token in _WINDOW4_TICKER_DENYLIST:
+            return token
+        if allowed and token == allowed:
+            return token
+        return ""
+
+    return _WINDOW4_TICKER_TOKEN.sub(_replace, str(text or ""))
+
+
+def _window4_sanitize_display_text(text: str) -> str:
+    """Presentation firewall — no fake metrics or unauthorized tickers on the glass."""
+    cleaned = _window4_scrub_hallucinated_fragments(text)
+    cleaned = _window4_mirror_tickers_only(cleaned)
+    cleaned = re.sub(r"\s+\|", " |", cleaned)
+    cleaned = re.sub(r"\|\s+", "| ", cleaned)
+    return cleaned.strip()
+
+
+def _window4_build_verified_context_bits() -> list[str]:
+    """Inject only verified backend packets — never placeholder or carousel scaffolding."""
+    if not _window4_has_verified_metric_stream():
+        return []
+    bits: list[str] = []
+    terminal = str(st.session_state.get("quantum_terminal_output") or "").strip()
+    if terminal and MATRIX_ENGINE_IDLE_MARKER not in terminal:
+        bits.append(f"[QUANTUM_TERMINAL]{terminal}[/QUANTUM_TERMINAL]")
+    ticker = _window4_operator_deploy_ticker()
+    if ticker:
+        bits.append(f"[GOOD_TICKER]{ticker}[/GOOD_TICKER]")
+    tf = str(st.session_state.get("r2_timeframe_mode") or "15-Minute").strip()
+    if tf:
+        bits.append(f"[TIMEFRAME_BIN]{tf}[/TIMEFRAME_BIN]")
+    if core_quantum.window4_regime_gate_open():
+        layout = str(_resolve_auto_layout_id() or "").strip()
+        if layout and layout not in WINDOW4_PLACEHOLDER_LAYOUT_IDS:
+            bits.append(f"[MACRO_LAYOUT]{layout}[/MACRO_LAYOUT]")
+        strategy = str(_resolve_auto_strategy_id() or "").strip()
+        if strategy and not re.fullmatch(r"NEW[A-Z]?", strategy, flags=re.I):
+            bits.append(f"[EXECUTION_STRATEGY]{strategy}[/EXECUTION_STRATEGY]")
+        match_pct = int(st.session_state.get("window4_spatial_match_pct") or 0)
+        if match_pct >= core_quantum.LAYOUT_SIGNATURE_MATCH_THRESHOLD:
+            bits.append(f"[SPATIAL_MATCH]match={match_pct}%[/SPATIAL_MATCH]")
+    text_matrix = str(st.session_state.get("room2_text_matrix_string") or "").strip()
+    if text_matrix and MATRIX_ENGINE_IDLE_MARKER not in text_matrix:
+        bits.append(f"[TEXT_MATRIX]{text_matrix}[/TEXT_MATRIX]")
+    return bits
+
+
 def _build_room2_groq_messages(user_text: str) -> list[dict]:
-    context_bits = []
-    if st.session_state.quantum_terminal_output:
-        context_bits.append(
-            f"[QUANTUM_TERMINAL]{st.session_state.quantum_terminal_output}[/QUANTUM_TERMINAL]"
-        )
-    context_bits.append(
-        f"[TIMEFRAME_BIN]{st.session_state.get('r2_timeframe_mode', '15-Minute')} | "
-        f"BUFFER:{st.session_state.get('r2_buffer_context_window', '')}[/TIMEFRAME_BIN]"
-    )
-    context_bits.append(
-        f"[MACRO_LAYOUT]{_resolve_auto_layout_id()} | "
-        f"[EXECUTION_STRATEGY]{_resolve_auto_strategy_id()}[/MACRO_LAYOUT]"
-    )
-    if st.session_state.get("purgatory_shelf_active"):
-        context_bits.append(
-            f"[INCUBATION]{st.session_state.get('purgatory_shelf_message', '')}[/INCUBATION]"
-        )
-    context_bits.append(
-        f"[PROCESSOR_LANE]{st.session_state.get('r2_processor_lane', core_quantum.PROCESSOR_LANE_CLOUD)}[/PROCESSOR_LANE]"
-    )
-    context_bits.append(
-        f"[DATA_FEED]{st.session_state.get('r2_data_feed_mode', core_quantum.DATA_FEED_CLOUD_MACRO)}[/DATA_FEED]"
-    )
-    if st.session_state.r2_good_ticker:
-        context_bits.append(f"[GOOD_TICKER]{st.session_state.r2_good_ticker}[/GOOD_TICKER]")
-    if st.session_state.get("room2_live_execution_halted"):
-        context_bits.append("[EXECUTION_HALTED]TRUE[/EXECUTION_HALTED]")
-    retro = st.session_state.get("room2_alpha_decay_status") or {}
-    if retro.get("root_cause"):
-        action = retro.get("recommended_action") or ""
-        label = retro.get("strategy_label") or _resolve_auto_strategy_id()
-        context_bits.append(
-            f"[POST_MORTEM]strategy={label}|cause={retro.get('root_cause')}|action={action}[/POST_MORTEM]"
-        )
-    spatial = st.session_state.get("room2_spatial_cluster") or {}
-    if spatial:
-        context_bits.append(
-            f"[SPATIAL_MATCH]cosine={spatial.get('cosine_similarity', 0)}|"
-            f"match={spatial.get('spatial_match_pct', 0)}%|"
-            f"nearest={spatial.get('nearest_layout_id', 'NEW')}[/SPATIAL_MATCH]"
-        )
-    matrix_index = st.session_state.get("layout_master_matrix_index") or []
-    if matrix_index:
-        context_bits.append(f"[LAYOUT_MATRIX_INDEX]count={len(matrix_index)}[/LAYOUT_MATRIX_INDEX]")
-    text_matrix = st.session_state.get("room2_text_matrix_string", "")
-    if text_matrix:
-        context_bits.append(f"[TEXT_MATRIX]{text_matrix}[/TEXT_MATRIX]")
+    context_bits = _window4_build_verified_context_bits()
     groq_msgs = [
         {"role": "system", "content": f"{FORENSIC_EXPERT_SYSTEM}\n{WINDOW4_FORMAT_PROTOCOL}"},
     ]
@@ -2270,21 +2345,27 @@ def _window4_break_dense_blocks(text: str) -> str:
     return "\n\n".join(sections)
 
 
-def _format_window4_response(text: str) -> str:
+def _format_window4_response(text: str, *, vault_safe: bool = False) -> str:
     """
-    Window 4 presentation layer — spacing, bullets, and bold anchors only.
-    Does not alter backend math, payloads, or database structures.
+    Window 4 presentation layer — spacing, bullets, bold anchors, and hallucination scrub.
+    Vault command replies bypass the verified-stream idle lock.
     """
-    polished = _window4_break_dense_blocks(text)
+    if not vault_safe and not _window4_has_verified_metric_stream():
+        return WINDOW4_ENGINE_IDLE_MSG
+    polished = _window4_sanitize_display_text(text) if not vault_safe else str(text or "").strip()
+    if not polished:
+        return WINDOW4_ENGINE_IDLE_MSG if not vault_safe else polished
+    polished = _window4_break_dense_blocks(polished)
     polished = _window4_bold_anchors(polished)
     polished = re.sub(r"\n{3,}", "\n\n", polished)
     return polished.strip()
 
 
-def _render_window4_chat_message(msg: dict) -> None:
-    """Render a single Window 4 history row with Markdown for expert replies."""
+def _render_window4_chat_message(msg: dict, *, verified_stream: bool) -> None:
+    """Render a single Window 4 history row — expert blocks suppressed when idle."""
     speaker = str(msg.get("speaker") or "")
     body = str(msg.get("text") or "")
+    vault_safe = bool(msg.get("vault_safe"))
     if speaker == "You":
         st.markdown(
             f'<div class="room2-chat-row">'
@@ -2294,7 +2375,15 @@ def _render_window4_chat_message(msg: dict) -> None:
             unsafe_allow_html=True,
         )
         return
-    display = _format_window4_response(body)
+    if not verified_stream and not vault_safe:
+        return
+    display = _format_window4_response(body, vault_safe=vault_safe)
+    if (
+        not vault_safe
+        and display == WINDOW4_ENGINE_IDLE_MSG
+        and body.strip() != WINDOW4_ENGINE_IDLE_MSG
+    ):
+        return
     with st.chat_message("assistant", avatar="🔬"):
         st.markdown(
             '<div class="room2-speaker-expert">Forensic Expert</div>',
@@ -2305,18 +2394,16 @@ def _render_window4_chat_message(msg: dict) -> None:
 
 def _build_pattern_strategist_messages(user_text: str) -> list[dict]:
     cloud_data = _fetch_live_cloud_patterns()
+    context_bits = _window4_build_verified_context_bits()
+    verified_blob = "\n".join(context_bits)
     return [
         {"role": "system", "content": f"{PATTERN_STRATEGIST_SYSTEM}\n{WINDOW4_FORMAT_PROTOCOL}"},
         {
             "role": "user",
             "content": (
                 f"{user_text}\n"
-                f"[CLOUD_PATTERNS]{cloud_data}[/CLOUD_PATTERNS]\n"
-                f"[QUANTUM_TERMINAL]{st.session_state.quantum_terminal_output}[/QUANTUM_TERMINAL]\n"
-                f"[TIMEFRAME_BIN]{st.session_state.get('r2_timeframe_mode', '15-Minute')} | "
-                f"BUFFER:{st.session_state.get('r2_buffer_context_window', '')}[/TIMEFRAME_BIN]\n"
-                f"[MACRO_LAYOUT]{_resolve_auto_layout_id()} | "
-                f"[EXECUTION_STRATEGY]{_resolve_auto_strategy_id()}"
+                f"[CLOUD_PATTERNS]{cloud_data if verified_blob else 'CLOUD:GATED'}[/CLOUD_PATTERNS]\n"
+                f"{verified_blob}"
             ),
         },
     ]
@@ -2367,12 +2454,13 @@ def _window4_ai_generation_allowed(
     source: str = WINDOW4_SOURCE_OPERATOR,
 ) -> tuple[bool, str]:
     """
-    Anti-hallucination gate — Human-Operator Bypass for manual Window 4 chat.
-    Strict pgvector / empty-vault defense retained for automated system payloads,
-    fake tickers, and background layout-generation loops only.
+    Anti-hallucination gate — verified Massive stream required before any generative output.
+    Human-Operator Bypass applies only after a verified deploy stream is active.
     """
     if _window4_vault_command_only(user_text):
         return True, ""
+    if not _window4_has_verified_metric_stream():
+        return False, WINDOW4_ENGINE_IDLE_MSG
     if _window4_is_operator_manual_input(source=source):
         return True, ""
 
@@ -2380,15 +2468,15 @@ def _window4_ai_generation_allowed(
     if fault:
         return False, fault
     if _window4_fake_ticker_automated_block(source=source):
-        return False, core_quantum.WINDOW4_SYSTEM_IDLE_MSG
+        return False, WINDOW4_ENGINE_IDLE_MSG
     if source == WINDOW4_SOURCE_LAYOUT_LOOP:
         proc = st.session_state.get("room2_processor") or {}
         if proc.get("active") and not core_quantum.window4_regime_gate_open():
-            return False, core_quantum.WINDOW4_SYSTEM_IDLE_MSG
+            return False, WINDOW4_ENGINE_IDLE_MSG
     if _window4_automated_vault_empty():
-        return False, core_quantum.WINDOW4_SYSTEM_IDLE_MSG
+        return False, WINDOW4_ENGINE_IDLE_MSG
     if not core_quantum.window4_regime_gate_open():
-        return False, core_quantum.WINDOW4_SYSTEM_IDLE_MSG
+        return False, WINDOW4_ENGINE_IDLE_MSG
     return True, ""
 
 
@@ -2398,37 +2486,13 @@ def _window4_automated_regime_blocked(user_text: str, *, source: str) -> tuple[b
 
 
 def _render_window4_conversation_wire() -> None:
-    """Window 4 — operator chat bridge; automated regime output gated separately."""
+    """Window 4 — strict input mirroring; idle until verified Massive metric stream."""
     st.markdown(
         '<div class="room2-wire-title">💬 WINDOW 4 — FORENSIC LAB CONVERSATION WIRE</div>',
         unsafe_allow_html=True,
     )
 
-    fault = core_quantum.window4_instant_fault_text()
-    if fault:
-        st.markdown(
-            f'<div class="window4-instant-fault">{escape(fault)}</div>',
-            unsafe_allow_html=True,
-        )
-        st.caption("Instant fault on automated subsystem — operator chat bridge stays open.")
-
-    regime_open = core_quantum.window4_regime_gate_open()
-    if not regime_open and not fault:
-        st.markdown(
-            f'<div class="window4-system-idle">{escape(core_quantum.WINDOW4_SYSTEM_IDLE_MSG)}</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<div class="window4-readonly-caption">Automated regime output gated — '
-            "pgvector match & empty-vault checks apply to system data and layout loops only. "
-            "Manual operator messages bypass this filter.</div>",
-            unsafe_allow_html=True,
-        )
-    elif regime_open:
-        match_pct = int(st.session_state.get("window4_spatial_match_pct") or 0)
-        st.caption(
-            f"Regime gate open · pgvector match {match_pct}% · automated + operator context active."
-        )
+    verified_stream = _window4_has_verified_metric_stream()
 
     vault_flash = str(st.session_state.get("room2_vault_flash") or "").strip()
     vault_confirm = str(st.session_state.get("room2_vault_confirmation") or "").strip()
@@ -2443,17 +2507,22 @@ def _render_window4_conversation_wire() -> None:
             unsafe_allow_html=True,
         )
 
-    if not st.session_state.room2_chat_history:
-        st.caption("Lab chat standing by — type a question or vault command below.")
+    if not verified_stream:
+        st.markdown(
+            f'<div class="window4-system-idle">{escape(WINDOW4_ENGINE_IDLE_MSG)}</div>',
+            unsafe_allow_html=True,
+        )
+        for msg in st.session_state.room2_chat_history:
+            _render_window4_chat_message(msg, verified_stream=False)
     else:
         for msg in st.session_state.room2_chat_history:
-            _render_window4_chat_message(msg)
+            _render_window4_chat_message(msg, verified_stream=True)
 
     with st.form("room2_chat_form", clear_on_submit=False):
         st.text_input(
             "Lab Input",
             key="room2_text_buffer",
-            placeholder="Ask the Forensic Expert · restore all · delete pattern...",
+            placeholder="Deploy a pattern first · restore all · delete pattern...",
             label_visibility="collapsed",
         )
         if st.form_submit_button("Send") and st.session_state.room2_text_buffer.strip():
@@ -2484,7 +2553,11 @@ def process_room2_chat_submission():
             restore_all=_is_room2_restore_all_command(user_text)
         )
         st.session_state.room2_chat_history.append(
-            {"speaker": "Forensic Expert", "text": _format_window4_response(restore_msg)}
+            {
+                "speaker": "Forensic Expert",
+                "text": _format_window4_response(restore_msg, vault_safe=True),
+                "vault_safe": True,
+            }
         )
         st.session_state.room2_text_buffer = ""
         _sync_matrix_chat_to_cloud()
@@ -2498,7 +2571,11 @@ def process_room2_chat_submission():
             st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
             st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
         st.session_state.room2_chat_history.append(
-            {"speaker": "Forensic Expert", "text": _format_window4_response(trash_msg)}
+            {
+                "speaker": "Forensic Expert",
+                "text": _format_window4_response(trash_msg, vault_safe=True),
+                "vault_safe": True,
+            }
         )
         st.session_state.room2_text_buffer = ""
         _sync_matrix_chat_to_cloud()
@@ -2520,7 +2597,11 @@ def purge_room2_conversation_and_cloud() -> None:
     """Soft-delete all active patterns into the Trash Vault and reset local lab chat."""
     trash_msg = _soft_delete_all_patterns_to_vault()
     st.session_state.room2_chat_history = [
-        {"speaker": "Forensic Expert", "text": _format_window4_response(trash_msg)}
+        {
+            "speaker": "Forensic Expert",
+            "text": _format_window4_response(trash_msg, vault_safe=True),
+            "vault_safe": True,
+        }
     ]
     st.session_state.room2_text_buffer = ""
     _sync_matrix_chat_to_cloud()
