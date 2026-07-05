@@ -112,34 +112,28 @@ R2_COMMIT_WINDOW_SEC = 60
 R2_COMMIT_MAX_PER_WINDOW = 3
 R2_COMMIT_THROTTLE_BANNER = "POLYGON API THROTTLE PROTECTION ACTIVE."
 ROOM1_SYSTEM_PROMPT = (
-    "You are Savant, an unrestricted elite real-time financial intelligence engine. Definitive authority only. "
-    "Zero corporate safe-talk, zero generic greetings, zero introductions, zero pre-formulated conclusions, zero filler.\n\n"
-    "ROOM 1 — VOLATILE LOCAL RAM ONLY: Never persist, log, or reference writing conversation text to cloud storage. "
-    "Supabase layout vectors injected below are read-only comparison math from Room 2 forensic vaults.\n\n"
-    "SPLIT-INTELLIGENCE ROUTING — classify every user message before responding:\n\n"
-    "RULE A — THE CORE STOCK SETUP (single explicit ticker only):\n"
-    "Trigger ONLY when the user submits one clear equity ticker symbol for a single-name setup "
-    "(e.g., MLGO, AAPL, $TSLA) with intent to analyze that one stock — not indices, not multi-asset compares, not vague macro.\n"
-    "Enforce this exact un-sugarcoated 6-bullet quantitative deep-dive in order. FORMATTING IS MANDATORY:\n"
-    "• Insert a full blank line (double line break) between every bullet so each point starts on a fresh isolated line — never a dense wall of text.\n"
-    "• Under each bullet, write significantly shorter, sharper, punchier copy — crisp focused sentences with high-density signals only.\n"
-    "• SAVANT TREND DETERMINATION: State definitively ROCKETING UP, CRASHING DOWN, or SIDELINED IN CONSOLIDATION.\n\n"
-    "• THE MACRO STORIES & DRIVERS: Single catalyst driving the active directional trend.\n\n"
-    "• MAIN BUSINESS OF THE COMPANY: Tight snapshot of technology layers, software frameworks, or products.\n\n"
-    "• SOCIAL SENTIMENT MATRIX: Retail psychology, Stocktwits momentum, community volume velocity.\n\n"
-    "• TOMORROW'S SESSION EXPECTATION: Data-backed next-session projection.\n\n"
-    "• CRITICAL TRADER BULLET NOTES: Volume spikes, float traps, squeeze signals, anomalies.\n\n"
-    "After all six bullets, insert one full blank line, then ONE highly detailed comprehensive executive summary paragraph "
-    "at the absolute bottom. No bullets or headers after the six bullets except that final paragraph.\n\n"
-    "RULE B — THE BROAD CONTEXT SHIFT (everything else):\n"
-    "Instantly DROP the 6-bullet framework for: broad market questions, general updates, index or macro queries "
-    "(e.g., S&P 500, RSI, sector rotation), comparative analysis (two or more symbols), follow-up causality "
-    "(e.g., why did it move like that), technical deep-dives without a fresh single-ticker setup, jokes, or casual chat.\n"
-    "Respond with sophisticated multi-paragraph macro-quantitative prose. Never force general topics into the 6-bullet slots. "
-    "Address math, indicator trends, correlations, and cross-asset context naturally with institutional-grade complexity.\n\n"
-    "MULTI-ASSET SWITCHING: When the user pivots from Rule A to Rule B (or back) in the same thread, switch modes immediately — "
-    "do not carry the bullet template into Rule B and do not use Rule B prose when a new single-ticker setup is requested.\n"
-    "Use injected 12L payload data when present; never invent prices or filings."
+    "You are Savant — Room 1 Global Research Desk. Definitive, data-grounded analysis only. "
+    "Zero greetings, zero filler, zero generic warnings, zero pre-trained price memory.\n\n"
+    "DATA CONTRACT — MANDATORY:\n"
+    "• You MUST build every single-stock answer exclusively from injected live payloads: "
+    "[ROOM1_LIVE_DRAGNET], [12L_DATA_PAYLOAD], [QUERY_INTENT], [TERMINOLOGY_MAP], [RESPONSE_DIRECTIVE].\n"
+    "• Never cite training-data prices, dates, or filings. If a field is missing, state the exact missing lane — do not guess.\n"
+    "• Sources are Massive REST (3-hour 36-bar 5m lane + 12-hour 48-bar 15m lane) and SEC EDGAR only.\n\n"
+    "FLUID CONTEXTUAL FRAMEWORK — NO FIXED BULLET TEMPLATE:\n"
+    "• Read [QUERY_INTENT] and [RESPONSE_DIRECTIVE] and shape the entire reply around the operator's actual question.\n"
+    "• layer1_velocity → lead with price velocity, peak/mean bar velocity, acceleration; cite 5m lane stats only.\n"
+    "• layer3_vwap_macro → lead with native VWAP bias, 48-bar 15m structural context, macro lane envelopes.\n"
+    "• layer2_volume_envelope → lead with volume σ envelopes, institutional block signals, share-per-minute floors.\n"
+    "• layer4_ignition_structure → lead with Candidate C structural lows, volatility ignition thresholds, hill-interceptor logic.\n"
+    "• adaptive_general → concise adaptive prose; pick the 1–2 most relevant layers for the question — never a canned 6-bullet list.\n\n"
+    "TERMINOLOGY COMPREHENSION:\n"
+    "• Translate operator slang ONLY through [TERMINOLOGY_MAP] bindings to our architecture (never generic textbook definitions).\n"
+    "• 'Institutional buying' = Volume Std Dev Envelopes + block-flow baseline.\n"
+    "• 'Support' = Candidate C structural low.\n"
+    "• 'Breakout' = Volatility Ignition threshold breach.\n\n"
+    "MACRO / MULTI-ASSET (no single-ticker live dragnet):\n"
+    "• Use vault read-only context when present; stay qualitative on indices unless live data is injected.\n"
+    "• Never force single-stock lane data into macro answers."
 )
 
 st.set_page_config(
@@ -814,6 +808,165 @@ def _is_room1_strategic_audit_query(user_text: str, ticker: str | None) -> bool:
     return core_quantum.is_room1_strategic_audit_query(user_text, ticker)
 
 
+ROOM1_TERMINOLOGY_BINDINGS: list[tuple[re.Pattern[str], str, str]] = [
+    (
+        re.compile(
+            r"institutional\s+(?:buying|accumulation|flow)|block\s+flow|whale|smart\s+money",
+            re.I,
+        ),
+        "Volume Standard Deviation Envelopes",
+        "layer2_volume_envelope",
+    ),
+    (
+        re.compile(r"support\s+level|support\s+zone|floor|held\s+support|structural\s+low", re.I),
+        "Candidate C structural low (hill-interceptor baseline)",
+        "layer4_ignition_structure",
+    ),
+    (
+        re.compile(
+            r"break\s*out|breakout|velocity\s+spike|momentum\s+burst|ignition",
+            re.I,
+        ),
+        "Volatility Ignition threshold + velocity spike anchor",
+        "layer4_ignition_structure",
+    ),
+    (
+        re.compile(r"vwap|volume[\s-]weighted|fair\s+value", re.I),
+        "Layer 3 native Massive VWAP anchor (15m 48-bar lane)",
+        "layer3_vwap_macro",
+    ),
+    (
+        re.compile(r"velocity|momentum|speed|acceleration|move(?:ment)?", re.I),
+        "Layer 1 price velocity primitives (5m 36-bar lane)",
+        "layer1_velocity",
+    ),
+    (
+        re.compile(r"volume\s+spike|volume\s+surge|unusual\s+volume|sigma|envelope", re.I),
+        "Volume σ breakout envelopes",
+        "layer2_volume_envelope",
+    ),
+]
+
+
+def classify_room1_query_intent(user_text: str) -> str:
+    """Route response layout to the layer best matching the operator question."""
+    low = str(user_text or "").lower()
+    scores = {
+        "layer1_velocity": 0,
+        "layer2_volume_envelope": 0,
+        "layer3_vwap_macro": 0,
+        "layer4_ignition_structure": 0,
+    }
+    for pattern, _arch, layer in ROOM1_TERMINOLOGY_BINDINGS:
+        if pattern.search(user_text or ""):
+            scores[layer] = scores.get(layer, 0) + 2
+    if any(w in low for w in ("velocity", "momentum", "speed", "acceleration", "how fast")):
+        scores["layer1_velocity"] += 3
+    if any(w in low for w in ("vwap", "macro", "trend", "12-hour", "12 hour", "48-bar", "48 bar", "structural")):
+        scores["layer3_vwap_macro"] += 3
+    if any(w in low for w in ("volume", "institutional", "order flow", "accumulation", "liquidity")):
+        scores["layer2_volume_envelope"] += 3
+    if any(w in low for w in ("breakout", "break out", "ignition", "entry", "support", "resistance")):
+        scores["layer4_ignition_structure"] += 3
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else "adaptive_general"
+
+
+def map_room1_trading_terminology(user_text: str) -> list[dict]:
+    """Map operator trading slang to core architectural functions."""
+    mapped: list[dict] = []
+    seen: set[str] = set()
+    for pattern, arch_fn, layer in ROOM1_TERMINOLOGY_BINDINGS:
+        match = pattern.search(user_text or "")
+        if not match or arch_fn in seen:
+            continue
+        seen.add(arch_fn)
+        mapped.append(
+            {
+                "operator_phrase": match.group(0),
+                "architecture_function": arch_fn,
+                "primary_layer": layer,
+            }
+        )
+    return mapped
+
+
+def _room1_response_directive(intent: str) -> str:
+    directives = {
+        "layer1_velocity": (
+            "Focus entirely on Layer 1 — 5m/36-bar lane price velocity, peak/mean bar velocity, "
+            "and session amplitude. Do not lead with business narrative or social sentiment."
+        ),
+        "layer3_vwap_macro": (
+            "Focus entirely on Layer 3 — native Massive VWAP on the 15m/48-bar lane, VWAP bias %, "
+            "and macro-structural position vs the 12-hour window."
+        ),
+        "layer2_volume_envelope": (
+            "Focus entirely on Layer 2 — volume σ envelopes, share-per-minute baselines, "
+            "and institutional block-flow signals from live lanes."
+        ),
+        "layer4_ignition_structure": (
+            "Focus entirely on Layer 4 — Candidate C structural lows, volatility ignition "
+            "thresholds, and hill-interceptor entry logic."
+        ),
+        "adaptive_general": (
+            "Adapt structure to the exact question. Use only the most relevant 1–2 layers from "
+            "the live dragnet payload — never a fixed bullet template."
+        ),
+    }
+    return directives.get(intent, directives["adaptive_general"])
+
+
+def _is_room1_macro_only_query(user_text: str) -> bool:
+    """Broad market / index questions without a single-name equity setup."""
+    low = str(user_text or "").lower()
+    macro_markers = (
+        "s&p", "s and p", "nasdaq", "dow", "russell", "market overall", "broad market",
+        "sector rotation", "fed ", "fomc", "cpi ", "inflation print", "treasury yield",
+    )
+    if not any(m in low for m in macro_markers):
+        return False
+    ticker = extract_ticker(user_text)
+    if ticker and ticker not in {"SPY", "QQQ", "DIA", "IWM", "VTI"}:
+        return False
+    return True
+
+
+def _is_room1_single_stock_inquiry(user_text: str, ticker: str | None) -> bool:
+    if not ticker:
+        return False
+    if _is_room1_macro_only_query(user_text):
+        return False
+    symbols = re.findall(r"\$?[A-Z]{1,5}\b", user_text.upper())
+    symbols = [s.lstrip("$") for s in symbols if s.lstrip("$") not in {"I", "A"}]
+    if len(set(symbols)) > 2:
+        return False
+    return True
+
+
+def _build_room1_live_payload(
+    dragnet: dict,
+    *,
+    user_text: str,
+    intent: str,
+    terminology: list[dict],
+) -> str:
+    """Assemble Groq context blocks from live Massive + SEC dragnet."""
+    blocks = [
+        str(dragnet.get("payload_string") or ""),
+        f"[QUERY_INTENT]{intent}[/QUERY_INTENT]",
+        f"[TERMINOLOGY_MAP]{json.dumps(terminology, default=str)}[/TERMINOLOGY_MAP]",
+        f"[RESPONSE_DIRECTIVE]{_room1_response_directive(intent)}[/RESPONSE_DIRECTIVE]",
+    ]
+    report = str(dragnet.get("report_block") or "").strip()
+    if report:
+        blocks.append(f"[ROOM1_LIVE_DRAGNET]{report}[/ROOM1_LIVE_DRAGNET]")
+    vault_ctx = _room1_readonly_layout_context()
+    if vault_ctx:
+        blocks.append(vault_ctx)
+    return "\n".join(b for b in blocks if b)
+
+
 def _room1_reset_volatile_memory() -> None:
     """Wipe Room 1 volatile RAM — no cloud persistence."""
     st.session_state.messages = [{"role": "system", "content": ROOM1_SYSTEM_PROMPT}]
@@ -825,6 +978,7 @@ def _room1_reset_volatile_memory() -> None:
     st.session_state.institutional_accumulation_detected = False
     st.session_state.data_payload_string = ""
     st.session_state.pop("room1_last_strategic_audit", None)
+    st.session_state.pop("room1_live_dragnet", None)
     st.session_state.pop("room1_memory_locked", None)
 
 
@@ -1189,7 +1343,7 @@ def _build_groq_message_stack(live_payload: str = "") -> list[dict]:
 
 
 def process_chat_submission():
-    """Room 1 chat — volatile st.session_state.messages only; never writes to Supabase."""
+    """Room 1 chat — live Massive/SEC dragnet for single-stock; volatile RAM only."""
     user_text = st.session_state.text_field_buffer.strip()
     if not user_text:
         return
@@ -1210,14 +1364,32 @@ def process_chat_submission():
 
     payload = ""
     audit_ticker = new_ticker or st.session_state.current_ticker
-    if audit_ticker:
+    intent = classify_room1_query_intent(user_text)
+    terminology = map_room1_trading_terminology(user_text)
+
+    if audit_ticker and _is_room1_single_stock_inquiry(user_text, audit_ticker):
+        dragnet = core_quantum.run_room1_live_massive_dragnet(
+            audit_ticker,
+            user_query=user_text,
+        )
+        st.session_state.room1_live_dragnet = dragnet
+        if dragnet.get("ok"):
+            st.session_state.data_payload_string = str(dragnet.get("payload_string") or "")
+            st.session_state.active_news_wire = list(dragnet.get("headlines") or [])
+        payload = _build_room1_live_payload(
+            dragnet,
+            user_text=user_text,
+            intent=intent,
+            terminology=terminology,
+        )
+    elif audit_ticker:
         get_live_tape_data(audit_ticker)
         payload = st.session_state.data_payload_string
-        if _is_room1_strategic_audit_query(user_text, audit_ticker):
-            audit = core_quantum.run_room1_strategic_audit_dragnet(audit_ticker, user_text)
-            report_block = str(audit.get("report_block") or "").strip()
-            if report_block:
-                payload = f"{payload}\n[ROOM1_STRATEGIC_AUDIT]{report_block}[/ROOM1_STRATEGIC_AUDIT]"
+        payload = (
+            f"{payload}\n[QUERY_INTENT]{intent}[/QUERY_INTENT]\n"
+            f"[TERMINOLOGY_MAP]{json.dumps(terminology, default=str)}[/TERMINOLOGY_MAP]\n"
+            f"[RESPONSE_DIRECTIVE]{_room1_response_directive(intent)}[/RESPONSE_DIRECTIVE]"
+        )
 
     groq_msgs = _build_groq_message_stack(payload)
     ai_text = run_groq(groq_msgs)
@@ -2385,13 +2557,24 @@ def _render_room1_forensic_front_desk():
                 st.rerun()
 
         if st.session_state.current_ticker:
-            p, pct, v, vw, name = _fetch_tape_metrics(st.session_state.current_ticker)
+            tk = st.session_state.current_ticker
+            dragnet = st.session_state.get("room1_live_dragnet") or {}
+            if dragnet.get("ok") and str(dragnet.get("ticker")) == tk:
+                p = float(dragnet.get("price") or 0.0)
+                pct = float(dragnet.get("pct_change") or 0.0)
+                raw_v = int(dragnet.get("volume") or 0)
+                v = f"{raw_v:,}" if raw_v else "N/A"
+                vw_native = float(dragnet.get("vwap_native") or 0.0)
+                vw = f"${vw_native:,.2f}" if vw_native else "N/A"
+                name = tk
+            else:
+                p, pct, v, vw, name = _fetch_tape_metrics(tk)
             color_choice = "#34C759" if pct >= 0 else "#FF3B30"
             st.markdown(
                 f"""
                 <div style="background:#111;padding:12px;border-radius:6px;border:1px solid #1F1F1F;margin-bottom:15px;">
                     <div class="metric-label" style="font-size:10px;color:#555;font-weight:700;">
-                        Exchange Tape Metrics — {name} ({st.session_state.current_ticker})
+                        Live Massive Tape — {name} ({tk})
                     </div>
                     <div class="metric-grid">
                         <div class="metric-card"><div class="metric-label">Price</div>

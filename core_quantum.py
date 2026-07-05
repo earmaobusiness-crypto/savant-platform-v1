@@ -3620,6 +3620,167 @@ def is_room1_strategic_audit_query(user_text: str, ticker: str | None) -> bool:
     return len(low.split()) <= 8
 
 
+def _room1_lane_tail(frame, bar_count: int):
+    """Return the trailing N-bar lane window from a resampled frame."""
+    lane = _ensure_dataframe(frame)
+    if lane is None or lane.empty or bar_count <= 0:
+        return None
+    return lane.tail(bar_count)
+
+
+def run_room1_live_massive_dragnet(ticker: str, user_query: str = "") -> dict:
+    """
+    Room 1 live backend — Massive REST 3-hour (36×5m) and 12-hour (48×15m) lanes + SEC EDGAR.
+    Replaces static AI training-data reliance for single-stock inquiries.
+    """
+    ticker_clean = str(ticker).strip().upper()
+    today = datetime.date.today()
+    empty = {
+        "ok": False,
+        "ticker": ticker_clean,
+        "payload_string": f"12L|TK:{ticker_clean}|MASSIVE:EMPTY|SEC:UNAVAILABLE",
+        "report_block": f"ROOM1_LIVE_DRAGNET|TK:{ticker_clean}|STATUS:MASSIVE_EMPTY",
+        "headlines": [],
+    }
+
+    frame_1m = get_historical_interval_data(
+        ticker_clean,
+        interval="1m",
+        update_institutional_tracker=False,
+        start_date=today,
+        end_date=today,
+        timeframe_resolution="1-Minute",
+    )
+    if is_pipeline_signal(frame_1m, "THROTTLE", POLYGON_REST_DATA_EMPTY):
+        err = str(st.session_state.get("r2_market_data_error") or "MASSIVE_THROTTLE")
+        empty["report_block"] = f"ROOM1_LIVE_DRAGNET|TK:{ticker_clean}|FAULT:{err}"
+        return empty
+    if not is_usable_data_stream(frame_1m):
+        return empty
+
+    frame_5m = resample_ohlcv_bars(frame_1m, "5min")
+    frame_15m = resample_ohlcv_bars(frame_1m, "15min")
+    lane_5m = _room1_lane_tail(frame_5m, FIVE_MINUTE_DRAGNET_BARS)
+    lane_15m = _room1_lane_tail(frame_15m, FIFTEEN_MINUTE_DRAGNET_BARS)
+
+    end_5m = lane_5m.index[-1] if lane_5m is not None and not lane_5m.empty else None
+    start_5m = lane_5m.index[0] if lane_5m is not None and not lane_5m.empty else None
+    end_15m = lane_15m.index[-1] if lane_15m is not None and not lane_15m.empty else None
+    start_15m = lane_15m.index[0] if lane_15m is not None and not lane_15m.empty else None
+
+    env_5m = compute_metric_envelopes(lane_5m, end_5m, start_5m) if lane_5m is not None else {}
+    env_15m = compute_metric_envelopes(lane_15m, end_15m, start_15m) if lane_15m is not None else {}
+    velocity_5m = _compute_price_velocity_metrics(lane_5m if lane_5m is not None else frame_1m)
+    velocity_15m = _compute_price_velocity_metrics(lane_15m if lane_15m is not None else frame_1m)
+
+    price = float(frame_1m["Close"].iloc[-1])
+    prev = float(frame_1m["Close"].iloc[-2]) if len(frame_1m) > 1 else price
+    pct = ((price - prev) / prev * 100.0) if prev else 0.0
+    raw_vol = int(float(frame_1m["Volume"].iloc[-1] or 0))
+    vwap_native = float(frame_1m["VWAP"].iloc[-1]) if "VWAP" in frame_1m.columns else 0.0
+    if not vwap_native and "High" in frame_1m.columns and "Low" in frame_1m.columns:
+        vwap_native = (float(frame_1m["High"].iloc[-1]) + float(frame_1m["Low"].iloc[-1]) + price) / 3.0
+    vwap_15m = (
+        float(lane_15m["VWAP"].iloc[-1])
+        if lane_15m is not None and "VWAP" in lane_15m.columns
+        else vwap_native
+    )
+    vwap_bias_pct = ((price - vwap_15m) / vwap_15m * 100.0) if vwap_15m else 0.0
+
+    vol_sigma_5m = float((env_5m.get("volume") or {}).get("sigma") or 0.0)
+    vol_sigma_15m = float((env_15m.get("volume") or {}).get("sigma") or 0.0)
+
+    struct_low_price = None
+    ignition_price = None
+    if lane_5m is not None and not lane_5m.empty:
+        vol_idx, _ = _candidate_volume_std_anchor(lane_5m)
+        struct_idx, struct_price = _candidate_structure_baseline(lane_5m, vol_idx)
+        if struct_price is not None:
+            struct_low_price = round(float(struct_price), 4)
+        ign_idx, ign_px = _volatility_ignition_anchor(lane_5m, struct_idx or vol_idx)
+        if ign_px is not None:
+            ignition_price = round(float(ign_px), 4)
+
+    sec_dragnet = _scrape_sec_regulatory_dragnet(ticker_clean, days=30)
+    form4 = _scrape_form4_insider_buys(ticker_clean)
+    headlines = _fetch_research_news_headlines(ticker_clean, limit=6)
+    filing_texts = [
+        f"SEC {f.get('form', 'FILING')} filed {f.get('filing_date', '')}"
+        for f in (sec_dragnet.get("filings") or [])
+    ]
+    semantic = score_semantic_catalyst_stream(headlines, filing_texts=filing_texts)
+    finbert_score = float(semantic.get("finbert_sentiment_score") or 0.0)
+
+    sec_preview = ", ".join(
+        f"{f.get('form')}@{f.get('filing_date')}" for f in (sec_dragnet.get("filings") or [])[:5]
+    ) or "NONE"
+    headline_preview = " | ".join(headlines[:4]) if headlines else "NONE"
+
+    bars_5m = len(lane_5m) if lane_5m is not None else 0
+    bars_15m = len(lane_15m) if lane_15m is not None else 0
+
+    payload_string = (
+        f"12L|TK:{ticker_clean}|SRC:MASSIVE_REST+SEC_EDGAR|"
+        f"P:{price:.2f}|CHG:{pct:+.2f}%|V:{raw_vol:,}|VW:{vwap_native:.2f}|"
+        f"LANE_5M_BARS:{bars_5m}|LANE_15M_BARS:{bars_15m}|"
+        f"L1_VEL_5M:{velocity_5m.get('session_velocity_pct')}%|"
+        f"L1_PEAK_VEL:{velocity_5m.get('peak_bar_velocity_pct')}%|"
+        f"L2_VOL_SIGMA_5M:{vol_sigma_5m:.4f}|L2_VOL_SIGMA_15M:{vol_sigma_15m:.4f}|"
+        f"L3_VWAP_15M:{vwap_15m:.2f}|L3_VWAP_BIAS:{vwap_bias_pct:+.2f}%|"
+        f"L4_STRUCT_LOW:{struct_low_price}|L4_IGNITION:{ignition_price}|"
+        f"FINBERT:{finbert_score}|SEC:{sec_preview}|WIRE:{headline_preview}|"
+        f"FORM4:{form4.get('form4_summary', 'N/A')}"
+    )
+
+    report_lines = [
+        f"ROOM1_LIVE_DRAGNET|TK:{ticker_clean}|SRC:massive.com+SEC_EDGAR",
+        f"LANE_5M:{bars_5m}/{FIVE_MINUTE_DRAGNET_BARS}_bars_3h",
+        f"LANE_15M:{bars_15m}/{FIFTEEN_MINUTE_DRAGNET_BARS}_bars_12h",
+        f"L1_SESSION_VEL_5M:{velocity_5m.get('session_velocity_pct')}%",
+        f"L1_PEAK_VEL_5M:{velocity_5m.get('peak_bar_velocity_pct')}%",
+        f"L1_SESSION_VEL_15M:{velocity_15m.get('session_velocity_pct')}%",
+        f"L2_VOL_SIGMA_5M:{vol_sigma_5m}",
+        f"L2_VOL_SIGMA_15M:{vol_sigma_15m}",
+        f"L3_VWAP_15M:{vwap_15m:.4f}",
+        f"L3_VWAP_BIAS_PCT:{vwap_bias_pct:.4f}",
+        f"L4_CANDIDATE_C_LOW:{struct_low_price}",
+        f"L4_VOLATILITY_IGNITION:{ignition_price}",
+        f"FINBERT_SEC_COORD:{finbert_score}",
+        f"SEC_TIMELINE:{sec_preview}",
+        f"FORM4:{form4.get('form4_summary', 'N/A')}",
+        f"LIVE_HEADLINES:{headline_preview}",
+    ]
+    if user_query.strip():
+        report_lines.append(f"OPERATOR_QUERY:{user_query.strip()[:240]}")
+
+    report_block = " | ".join(report_lines)
+    result = {
+        "ok": True,
+        "ticker": ticker_clean,
+        "payload_string": payload_string,
+        "report_block": report_block,
+        "headlines": headlines,
+        "lane_5m_bars": bars_5m,
+        "lane_15m_bars": bars_15m,
+        "velocity_5m": velocity_5m,
+        "velocity_15m": velocity_15m,
+        "metric_envelopes_5m": env_5m,
+        "metric_envelopes_15m": env_15m,
+        "vwap_bias_pct": round(vwap_bias_pct, 4),
+        "candidate_c_low": struct_low_price,
+        "volatility_ignition_price": ignition_price,
+        "sec_dragnet": sec_dragnet,
+        "form4": form4,
+        "semantic": semantic,
+        "price": price,
+        "pct_change": round(pct, 4),
+        "volume": raw_vol,
+        "vwap_native": round(vwap_native, 4),
+    }
+    st.session_state.room1_live_dragnet = result
+    return result
+
+
 def _room1_quick_math_block(data_stream) -> dict:
     """Lightweight live physics block for Room 1 cross-reference — no cloud writes."""
     series = _series_from_data_stream(data_stream)
@@ -3654,9 +3815,10 @@ def _room1_quick_math_block(data_stream) -> dict:
 def run_room1_strategic_audit_dragnet(ticker: str, user_query: str = "") -> dict:
     """
     Deep external internet reporting + read-only vault cross-reference on local RAM.
-    Combines live headlines, SEC timelines, and layout signature matching.
+    Delegates live price physics to Massive 3h/12h lanes before vault spatial match.
     """
     ticker_clean = str(ticker).strip().upper()
+    live = run_room1_live_massive_dragnet(ticker_clean, user_query=user_query)
     vault_map = fetch_readonly_vault_reference_map()
 
     data_stream = get_historical_interval_data(
@@ -3664,17 +3826,22 @@ def run_room1_strategic_audit_dragnet(ticker: str, user_query: str = "") -> dict
         interval="15m",
         update_institutional_tracker=False,
     )
-    velocity = _compute_price_velocity_metrics(data_stream)
+    if live.get("ok"):
+        velocity = live.get("velocity_15m") or live.get("velocity_5m") or {}
+    else:
+        velocity = _compute_price_velocity_metrics(data_stream)
     math_block = _room1_quick_math_block(data_stream)
 
-    headlines = _fetch_research_news_headlines(ticker_clean, limit=8)
-    sec_dragnet = _scrape_sec_regulatory_dragnet(ticker_clean)
-    form4 = _scrape_form4_insider_buys(ticker_clean)
-    filing_texts = [
-        f"SEC {f.get('form', 'FILING')} filed {f.get('filing_date', '')}"
-        for f in (sec_dragnet.get("filings") or [])
-    ]
-    semantic = score_semantic_catalyst_stream(headlines, filing_texts=filing_texts)
+    headlines = live.get("headlines") or _fetch_research_news_headlines(ticker_clean, limit=8)
+    sec_dragnet = live.get("sec_dragnet") or _scrape_sec_regulatory_dragnet(ticker_clean)
+    form4 = live.get("form4") or _scrape_form4_insider_buys(ticker_clean)
+    semantic = live.get("semantic") or score_semantic_catalyst_stream(
+        headlines,
+        filing_texts=[
+            f"SEC {f.get('form', 'FILING')} filed {f.get('filing_date', '')}"
+            for f in (sec_dragnet.get("filings") or [])
+        ],
+    )
     finbert_score = float(semantic.get("finbert_sentiment_score") or 0.0)
 
     live_vec = extract_forensic_feature_vector(velocity, math_block, finbert_score)
@@ -3714,6 +3881,7 @@ def run_room1_strategic_audit_dragnet(ticker: str, user_query: str = "") -> dict
 
     report_lines = [
         f"ROOM1_STRATEGIC_AUDIT|TK:{ticker_clean}",
+        live.get("report_block", "") if live.get("ok") else "LIVE_DRAGNET:FAILED",
         f"VAULT_REF_VECTORS:{vault_map.get('layout_vector_count', 0)}",
         f"NEAREST_LAYOUT:{spatial.get('nearest_layout_id')}",
         f"SPATIAL_MATCH:{spatial.get('spatial_match_pct')}%",
