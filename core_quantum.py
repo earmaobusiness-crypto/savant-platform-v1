@@ -1,8 +1,8 @@
 """
 Savant Quant Terminal — core ingestion, coupling gates, and cloud-offloaded math.
 
-v4.0: Massive REST-only datalink, fluid regime lookback lanes, hill interceptor,
-Supabase/pgvector spatial clustering, Hugging Face serverless SEC inference.
+v6.0: Regime-switching shell-cracking funnel (vibe → pgvector shell → strategy judge),
+Massive REST-only datalink, fluid lookback lane assertions, 4-layer feature vector.
 """
 
 import datetime
@@ -32,9 +32,20 @@ MASSIVE_PUBLIC_HOST = "massive.com"
 MASSIVE_API_BASES = (MASSIVE_API_BASE,)
 MASSIVE_REST_COOLDOWN_SEC = 12
 WEBSOCKET_STREAMING_DISABLED = True
+REGIME_FUNNEL_VERSION = "6.0"
 FIVE_MINUTE_DRAGNET_BARS = 36
 ONE_MINUTE_DRAGNET_BARS = 5
 FIFTEEN_MINUTE_DRAGNET_BARS = 48
+REGIME_VIBE_LOOKBACK_SCALE = {
+    "1-Minute": 1.0,
+    "5-Minute": 2.5,
+    "15-Minute": 4.0,
+}
+LOOKBACK_LANE_ASSERTIONS = {
+    "1-Minute": ONE_MINUTE_DRAGNET_BARS,
+    "5-Minute": FIVE_MINUTE_DRAGNET_BARS,
+    "15-Minute": FIFTEEN_MINUTE_DRAGNET_BARS,
+}
 FIVE_MINUTE_SYNTHETIC_SLIPPAGE_PCT = 1.0
 PROCESSING_LANE_BARS = {
     "1-Minute": ONE_MINUTE_DRAGNET_BARS,
@@ -358,9 +369,17 @@ def _strip_dataframe_index_timezone(frame):
     if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
         return frame
     out = frame.copy()
-    idx = out.index
-    if getattr(idx, "tz", None) is not None:
-        out.index = idx.tz_convert("America/New_York").tz_localize(None)
+    try:
+        idx = out.index
+        if getattr(idx, "tz", None) is not None:
+            out.index = idx.tz_convert("America/New_York").tz_localize(None)
+        else:
+            out.index = out.index.tz_localize(None)
+    except (TypeError, ValueError, AttributeError):
+        try:
+            out.index = out.index.tz_localize(None)
+        except (TypeError, ValueError, AttributeError):
+            pass
     return out
 
 
@@ -3147,22 +3166,49 @@ def _analyze_5m_micro_traps(data_5m, ticker: str) -> dict:
     }
 
 
-def extract_forensic_feature_vector(
+def build_four_layer_feature_vector(
     velocity: dict,
-    math_block: dict,
-    finbert_sentiment: float = 0.0,
+    metric_envelopes: dict | None,
+    *,
+    vwap_bias_pct: float = 0.0,
+    sec_coordinate: float = 0.0,
+    math_block: dict | None = None,
 ) -> list[float]:
-    """Snapshot vector for spatial cross-correlation — includes FinBERT sentiment axis."""
+    """
+    4-Layer Feature Vector — Price Velocity, Volume σ Envelopes, native VWAP, SEC coordinate.
+    SEC / FinBERT axis hard-clamped to [-1.0, +1.0].
+    """
+    env = metric_envelopes or {}
+    vol_env = env.get("volume") or env.get("Volume") or {}
+    mb = math_block or {}
+    sec = max(-1.0, min(1.0, float(sec_coordinate)))
     return [
         float(velocity.get("session_velocity_pct", 0.0)),
         float(velocity.get("peak_bar_velocity_pct", 0.0)),
         float(velocity.get("mean_bar_velocity_pct", 0.0)),
-        float(velocity.get("window_amplitude_pct", 0.0)),
-        float(math_block.get("pearson_r", 0.0)),
-        float(math_block.get("wave_amplitude_pct", 0.0)),
-        min(float(math_block.get("bar_count", 0)) / 100.0, 10.0),
-        float(finbert_sentiment),
+        float(vol_env.get("sigma") or vol_env.get("std") or 0.0),
+        float(vol_env.get("z_score") or vol_env.get("z") or 0.0),
+        round(float(vwap_bias_pct), 4),
+        sec,
+        float(mb.get("pearson_r", 0.0)),
     ]
+
+
+def extract_forensic_feature_vector(
+    velocity: dict,
+    math_block: dict,
+    finbert_sentiment: float = 0.0,
+    metric_envelopes: dict | None = None,
+    vwap_bias_pct: float = 0.0,
+) -> list[float]:
+    """Snapshot vector for spatial cross-correlation — 4-layer fusion for pgvector shell match."""
+    return build_four_layer_feature_vector(
+        velocity,
+        metric_envelopes,
+        vwap_bias_pct=vwap_bias_pct,
+        sec_coordinate=finbert_sentiment,
+        math_block=math_block,
+    )
 
 
 def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
@@ -3422,7 +3468,7 @@ def fetch_readonly_vault_reference_map() -> dict:
             "&vault_track=eq.track_1_validated"
             "&or=(state.is.null,state.eq.active)"
             "&order=timestamp.desc&limit=120",
-            headers=headers,
+            headers=_supabase_rest_headers(),
             timeout=20,
         )
         strategy_rows = resp.json() if resp.ok and isinstance(resp.json(), list) else []
@@ -4638,6 +4684,399 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
         return False, f"Vault upload failed: {exc}"
 
 
+def _lookback_lane_dragnet(
+    data_stream,
+    start_dt: datetime.datetime | None,
+    timeframe_resolution: str,
+):
+    """Resolve the strict bar dragnet for the active timeframe lane."""
+    if timeframe_resolution == "1-Minute":
+        return _dynamic_1m_dragnet_window(data_stream, start_dt)
+    if timeframe_resolution == "5-Minute":
+        return _dynamic_5m_dragnet_window(data_stream, start_dt)
+    if timeframe_resolution == "15-Minute":
+        return _dynamic_15m_dragnet_window(data_stream, start_dt)
+    return _dynamic_bar_dragnet_window(
+        data_stream,
+        start_dt,
+        LOOKBACK_LANE_ASSERTIONS.get(timeframe_resolution, ONE_MINUTE_DRAGNET_BARS),
+    )
+
+
+def validate_regime_lookback_lanes(
+    data_stream,
+    *,
+    start_date,
+    start_time: str,
+    timeframe_resolution: str,
+) -> dict:
+    """
+    Strict lookback lane assertions — 1m=5, 5m=36, 15m=48 bars backward from Start Time.
+    Failures flag PRE-STORAGE TRASH before vault or sentiment loops run.
+    """
+    required = int(LOOKBACK_LANE_ASSERTIONS.get(timeframe_resolution, ONE_MINUTE_DRAGNET_BARS))
+    start_dt = _parse_session_datetime(start_date, start_time)
+    _, window = _lookback_lane_dragnet(data_stream, start_dt, timeframe_resolution)
+    actual = len(window) if isinstance(window, pd.DataFrame) and not window.empty else 0
+    passed = actual == required
+    return {
+        "passed": passed,
+        "trashed": not passed,
+        "required_bars": required,
+        "actual_bars": actual,
+        "timeframe_resolution": timeframe_resolution,
+        "rejection_reasons": [] if passed else [f"lookback_lane_assert_{required}_fail"],
+        "trash_reason": None if passed else f"LOOKBACK_LANE|need={required}|got={actual}|tf={timeframe_resolution}",
+    }
+
+
+def fetch_layout_shell_strategies(
+    layout_id: str,
+    *,
+    timeframe_resolution: str = "",
+) -> list[dict]:
+    """Query cloud vault for all strategies inside a Master Layout Container shell."""
+    layout_clean = str(layout_id or "").strip()
+    if not layout_clean or layout_clean in ("NEW_LAYOUT", "PURGATORY_PENDING"):
+        return []
+    headers = _supabase_rest_headers()
+    if not headers:
+        return []
+    table = _supabase_table_name()
+    params: dict = {
+        "select": (
+            "id,ticker,macro_weather_layout,execution_strategy,timeframe_resolution,"
+            "structural_move_pct,master_signature_json,entry_coordinate,exit_coordinate,state"
+        ),
+        "macro_weather_layout": f"eq.{layout_clean}",
+        "vault_track": "eq.track_1_validated",
+        "or": "(state.is.null,state.eq.active)",
+        "order": "timestamp.desc",
+        "limit": "64",
+    }
+    if timeframe_resolution:
+        params["timeframe_resolution"] = f"eq.{timeframe_resolution}"
+    try:
+        supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+        resp = requests.get(
+            f"{supabase_url}/rest/v1/{table}",
+            headers=headers,
+            params=params,
+            timeout=20,
+        )
+        if resp.ok and isinstance(resp.json(), list):
+            return resp.json()
+    except Exception:
+        pass
+    return []
+
+
+def run_global_vibe_check(
+    data_stream,
+    *,
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+    timeframe_resolution: str,
+    research_audit: dict | None = None,
+    math_block: dict | None = None,
+) -> dict:
+    """
+    Stage 1 — Global Vibe Check: scale lookback/news depth by timeframe, map Master Layout.
+    """
+    end_dt = _parse_session_datetime(end_date, end_time)
+    start_dt = _parse_session_datetime(start_date, start_time)
+    scale = float(REGIME_VIBE_LOOKBACK_SCALE.get(timeframe_resolution, 1.0))
+    velocity = _compute_price_velocity_metrics(data_stream)
+    lookback_start = _calibrated_lookback_start(
+        end_dt,
+        timeframe_resolution,
+        start_dt=start_dt,
+        data_stream=data_stream,
+    )
+    metric_envelopes = compute_metric_envelopes(data_stream, end_dt, lookback_start)
+    vwap_bias_pct = 0.0
+    frame = _ensure_dataframe(data_stream)
+    if frame is not None and not frame.empty and "VWAP" in frame.columns and "Close" in frame.columns:
+        last_vw = float(frame["VWAP"].iloc[-1] or 0.0)
+        last_close = float(frame["Close"].iloc[-1] or 0.0)
+        if last_vw:
+            vwap_bias_pct = (last_close - last_vw) / last_vw * 100.0
+
+    audit = research_audit or st.session_state.get("room2_deep_research_audit") or {}
+    semantic = audit.get("semantic_catalyst") or {}
+    sec_coord = max(-1.0, min(1.0, float(semantic.get("finbert_sentiment_score") or 0.0)))
+    mb = math_block or st.session_state.get("room2_last_math_block") or {}
+
+    feature_vec = build_four_layer_feature_vector(
+        velocity,
+        metric_envelopes,
+        vwap_bias_pct=vwap_bias_pct,
+        sec_coordinate=sec_coord,
+        math_block=mb,
+    )
+    spatial = compute_spatial_layout_match(feature_vec)
+    layout_id = str(spatial.get("nearest_layout_id") or "NEW_LAYOUT")
+    match_pct = int(spatial.get("spatial_match_pct") or 0)
+    if match_pct < LAYOUT_SIGNATURE_MATCH_THRESHOLD and layout_id == "NEW_LAYOUT":
+        layout_id = "PURGATORY_PENDING"
+
+    vol_sigma = float((metric_envelopes.get("volume") or {}).get("sigma") or 0.0)
+    if vol_sigma >= 2.0:
+        vibe = "expansion"
+    elif vol_sigma <= 0.35:
+        vibe = "compressed"
+    else:
+        vibe = "neutral"
+
+    return {
+        "stage": "global_vibe_check",
+        "master_layout_container": layout_id,
+        "vibe_profile": vibe,
+        "lookback_scale": scale,
+        "news_depth_scale": round(scale * 1.5, 2),
+        "feature_vector": feature_vec,
+        "spatial": spatial,
+        "metric_envelopes": metric_envelopes,
+        "velocity": velocity,
+        "sec_coordinate": sec_coord,
+        "vwap_bias_pct": round(vwap_bias_pct, 4),
+        "spatial_match_pct": match_pct,
+    }
+
+
+def crack_layout_shell(
+    layout_id: str,
+    snapshot_vec: list[float],
+    *,
+    timeframe_resolution: str,
+) -> dict:
+    """
+    Stage 2 — Crack the Shell: pgvector cosine match + internal strategy library reveal.
+    """
+    shell_match = cloud_offload.rpc_match_layout_spatial(snapshot_vec) or compute_spatial_layout_match(
+        snapshot_vec
+    )
+    resolved_layout = str(layout_id or shell_match.get("nearest_layout_id") or "NEW_LAYOUT")
+    rows = fetch_layout_shell_strategies(resolved_layout, timeframe_resolution=timeframe_resolution)
+    if not rows and timeframe_resolution:
+        rows = fetch_layout_shell_strategies(resolved_layout, timeframe_resolution="")
+
+    internal_library: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        strategy = str(row.get("execution_strategy") or "").strip()
+        tf = str(row.get("timeframe_resolution") or "").strip()
+        if not strategy:
+            continue
+        key = f"{strategy}|{tf}"
+        if key in seen:
+            continue
+        seen.add(key)
+        stored_vec = _parse_master_signature_from_row(row)
+        cos = _cosine_similarity(snapshot_vec, stored_vec) if stored_vec else 0.0
+        internal_library.append(
+            {
+                "strategy_label": strategy,
+                "timeframe_resolution": tf,
+                "structural_move_pct": float(row.get("structural_move_pct") or 0.0),
+                "cosine_to_live": round(cos, 4),
+                "reference_ticker": str(row.get("ticker") or "").upper(),
+                "entry_coordinate": row.get("entry_coordinate"),
+                "exit_coordinate": row.get("exit_coordinate"),
+                "row_id": row.get("id"),
+            }
+        )
+
+    return {
+        "stage": "shell_crack",
+        "shell_layout_id": resolved_layout,
+        "shell_cosine": float(shell_match.get("cosine_similarity") or 0.0),
+        "shell_match_pct": int(shell_match.get("spatial_match_pct") or 0),
+        "internal_strategies": internal_library,
+        "strategy_count": len(internal_library),
+        "pgvector_engine": shell_match.get("engine", "array_rpc"),
+    }
+
+
+def judge_layout_strategies(
+    shell: dict,
+    *,
+    data_stream,
+    quality: dict,
+    timeframe_resolution: str,
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+) -> dict:
+    """
+    Stage 3 — Strategy Filtering & Judgement: discard misaligned shell strategies,
+    lock onto hill-interceptor / liquidity-ignition action, enforce alpha floor.
+    """
+    floor_pct = timeframe_margin_floor(timeframe_resolution)
+    live_quality = dict(quality or {})
+    net_margin = float(
+        live_quality.get("net_margin_pct")
+        or live_quality.get("structural_move_pct")
+        or 0.0
+    )
+    entry_opt = live_quality.get("entry_optimizer") or st.session_state.get("room2_entry_optimizer") or {}
+
+    if entry_opt.get("hill_bypass_rewind") or live_quality.get("hill_bypass_rewind"):
+        action_mechanic = "over_the_hill_interceptor_candidate_c"
+    elif entry_opt.get("liquidity_ignition") or live_quality.get("liquidity_ignition"):
+        action_mechanic = "liquidity_ignition_guard"
+    else:
+        action_mechanic = str(entry_opt.get("selected_candidate") or "structure_baseline")
+
+    scored: list[dict] = []
+    for candidate in shell.get("internal_strategies") or []:
+        row = dict(candidate)
+        tf = str(row.get("timeframe_resolution") or "")
+        if tf and tf != timeframe_resolution:
+            row["judgement"] = "discarded_timeframe_isolation"
+            row["score"] = 0.0
+            scored.append(row)
+            continue
+        hist_move = float(row.get("structural_move_pct") or 0.0)
+        if hist_move < floor_pct * 0.85:
+            row["judgement"] = "discarded_macro_misalignment"
+            row["score"] = 0.0
+            scored.append(row)
+            continue
+        if net_margin < floor_pct:
+            row["judgement"] = "discarded_live_alpha_floor"
+            row["score"] = 0.0
+            scored.append(row)
+            continue
+        cos = float(row.get("cosine_to_live") or 0.0)
+        row["score"] = round(cos * 0.55 + min(net_margin / 100.0, 1.0) * 0.45, 4)
+        row["judgement"] = "qualified"
+        scored.append(row)
+
+    qualified = [row for row in scored if row.get("judgement") == "qualified"]
+    shell_layout = str(shell.get("shell_layout_id") or "NEW_LAYOUT")
+    shell_match_pct = int(shell.get("shell_match_pct") or 0)
+
+    if qualified:
+        winner = max(qualified, key=lambda row: float(row.get("score") or 0.0))
+        selected_strategy = str(winner.get("strategy_label") or "")
+    else:
+        selected_strategy = resolve_matrix_strategy_id(
+            layout_id=shell_layout,
+            timeframe_resolution=timeframe_resolution,
+            spatial_match_pct=shell_match_pct,
+        )
+
+    passed_alpha = net_margin >= floor_pct
+    return {
+        "stage": "strategy_judgement",
+        "selected_strategy": selected_strategy,
+        "action_mechanic": action_mechanic,
+        "alpha_floor_pct": floor_pct,
+        "net_margin_pct": round(net_margin, 4),
+        "passed_alpha_floor": passed_alpha,
+        "candidates_evaluated": len(scored),
+        "candidates_qualified": len(qualified),
+        "judgement_log": scored,
+        "trashed": not passed_alpha,
+        "trash_reason": None if passed_alpha else f"BELOW_ALPHA_FLOOR_{floor_pct}|net={net_margin:.4f}",
+    }
+
+
+def run_regime_switching_funnel(
+    data_stream,
+    *,
+    ticker: str,
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+    timeframe_resolution: str,
+    quality: dict | None = None,
+    research_audit: dict | None = None,
+    math_block: dict | None = None,
+) -> dict:
+    """
+    v6.0 Master Controller — three-stage regime-switching shell-cracking funnel.
+    Replaces the legacy linear layout→save loop for strategy selection.
+    """
+    lane = validate_regime_lookback_lanes(
+        data_stream,
+        start_date=start_date,
+        start_time=start_time,
+        timeframe_resolution=timeframe_resolution,
+    )
+    if not lane.get("passed"):
+        return {
+            "funnel_version": REGIME_FUNNEL_VERSION,
+            "trashed": True,
+            "trash_message": (
+                f"🗑️ PRE-STORAGE TRASH — Lookback lane failed: need "
+                f"{lane.get('required_bars')} bars, got {lane.get('actual_bars')} "
+                f"on {timeframe_resolution} track."
+            ),
+            "lane_validation": lane,
+        }
+
+    quality = dict(quality or st.session_state.get("room2_playbook_quality") or {})
+    stage1 = run_global_vibe_check(
+        data_stream,
+        start_date=start_date,
+        start_time=start_time,
+        end_date=end_date,
+        end_time=end_time,
+        timeframe_resolution=timeframe_resolution,
+        research_audit=research_audit,
+        math_block=math_block,
+    )
+    stage2 = crack_layout_shell(
+        stage1["master_layout_container"],
+        stage1["feature_vector"],
+        timeframe_resolution=timeframe_resolution,
+    )
+    stage3 = judge_layout_strategies(
+        stage2,
+        data_stream=data_stream,
+        quality=quality,
+        timeframe_resolution=timeframe_resolution,
+        start_date=start_date,
+        start_time=start_time,
+        end_date=end_date,
+        end_time=end_time,
+    )
+
+    result = {
+        "funnel_version": REGIME_FUNNEL_VERSION,
+        "ticker": str(ticker or "").upper(),
+        "lane_validation": lane,
+        "stage1_vibe": stage1,
+        "stage2_shell": stage2,
+        "stage3_judgement": stage3,
+        "master_layout_container": stage1["master_layout_container"],
+        "execution_strategy": stage3["selected_strategy"],
+        "action_mechanic": stage3["action_mechanic"],
+        "feature_vector": stage1["feature_vector"],
+        "spatial": stage1["spatial"],
+        "trashed": bool(stage3.get("trashed")),
+        "trash_message": stage3.get("trash_reason"),
+    }
+    st.session_state.room2_regime_funnel = result
+    emit_processing_heartbeat(
+        "🧭 REGIME FUNNEL v6.0 — Global vibe mapped · shell cracked · strategy judged",
+        detail=(
+            f"Layout={result['master_layout_container']} · "
+            f"Vibe={stage1.get('vibe_profile')} · "
+            f"Shell={stage2.get('strategy_count', 0)} strategies · "
+            f"Winner={result['execution_strategy']} · "
+            f"Mechanic={result['action_mechanic']}"
+        ),
+    )
+    return result
+
+
 def calculate_quantum_frequencies(
     data_stream,
     pattern_category="",
@@ -4754,38 +5193,92 @@ def calculate_quantum_frequencies(
     )
     st.session_state.room2_last_math_block = math_block
 
-    snapshot_vec = extract_forensic_feature_vector(
-        velocity,
-        math_block,
-        float(
-            (st.session_state.get("room2_deep_research_audit") or {})
-            .get("semantic_catalyst", {})
-            .get("finbert_sentiment_score", 0.0)
-        ),
-    )
-    spatial = compute_spatial_layout_match(snapshot_vec)
-    blended_match = max(int(math_block.get("match_probability") or 0), spatial["spatial_match_pct"])
+    timeframe_resolution = str(st.session_state.get("r2_timeframe_mode", "15-Minute"))
+    research_audit = st.session_state.get("room2_deep_research_audit") or {}
     finbert_score = float(
-        (st.session_state.get("room2_deep_research_audit") or {})
-        .get("semantic_catalyst", {})
-        .get("finbert_sentiment_score", 0.0)
+        (research_audit.get("semantic_catalyst") or {}).get("finbert_sentiment_score", 0.0)
+    )
+    lookback_start = _calibrated_lookback_start(
+        end_dt,
+        timeframe_resolution,
+        start_dt=start_dt,
+        data_stream=data_stream,
+    )
+    metric_envelopes = compute_metric_envelopes(data_stream, end_dt, lookback_start)
+    vwap_bias_pct = 0.0
+    frame = _ensure_dataframe(data_stream)
+    if frame is not None and not frame.empty and "VWAP" in frame.columns and "Close" in frame.columns:
+        last_vw = float(frame["VWAP"].iloc[-1] or 0.0)
+        last_close = float(frame["Close"].iloc[-1] or 0.0)
+        if last_vw:
+            vwap_bias_pct = (last_close - last_vw) / last_vw * 100.0
+
+    funnel = run_regime_switching_funnel(
+        data_stream,
+        ticker=resolved_ticker,
+        start_date=start_date,
+        start_time=start_time,
+        end_date=end_date,
+        end_time=end_time,
+        timeframe_resolution=timeframe_resolution,
+        quality=quality,
+        research_audit=research_audit,
+        math_block=math_block,
+    )
+    if funnel.get("trashed"):
+        trash_msg = funnel.get("trash_message") or (
+            f"🗑️ PRE-STORAGE TRASH — Regime funnel rejected ({funnel.get('trash_message')})."
+        )
+        st.session_state.room2_regime_funnel = funnel
+        return trash_msg
+
+    spatial = funnel.get("spatial") or {}
+    stage1 = funnel.get("stage1_vibe") or {}
+    stage2 = funnel.get("stage2_shell") or {}
+    stage3 = funnel.get("stage3_judgement") or {}
+    snapshot_vec = funnel.get("feature_vector") or build_four_layer_feature_vector(
+        velocity,
+        metric_envelopes,
+        vwap_bias_pct=vwap_bias_pct,
+        sec_coordinate=finbert_score,
+        math_block=math_block,
+    )
+    blended_match = max(
+        int(math_block.get("match_probability") or 0),
+        int(spatial.get("spatial_match_pct") or 0),
+        int(stage2.get("shell_match_pct") or 0),
     )
     if finbert_score < -0.25 and blended_match >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
         blended_match = LAYOUT_SIGNATURE_MATCH_THRESHOLD - 1
+
     genetic = extract_master_signature_vector(snapshot_vec, blended_match)
     master_vec = genetic.get("master_signature") or snapshot_vec
     st.session_state.room2_master_signature = genetic
     math_block["match_probability"] = blended_match
-    math_block["spatial_match_pct"] = spatial["spatial_match_pct"]
-    math_block["cosine_similarity"] = spatial["cosine_similarity"]
-    math_block["euclidean_distance"] = spatial["euclidean_distance"]
-    math_block["nearest_layout_id"] = genetic.get("layout_id") or spatial["nearest_layout_id"]
+    math_block["spatial_match_pct"] = spatial.get("spatial_match_pct", 0)
+    math_block["cosine_similarity"] = spatial.get("cosine_similarity", 0.0)
+    math_block["euclidean_distance"] = spatial.get("euclidean_distance", 999.0)
+    math_block["nearest_layout_id"] = (
+        funnel.get("master_layout_container")
+        or genetic.get("layout_id")
+        or spatial.get("nearest_layout_id")
+    )
     math_block["master_overlap_pct"] = genetic.get("overlap_pct", 0)
+    math_block["regime_funnel_version"] = REGIME_FUNNEL_VERSION
+    math_block["vibe_profile"] = stage1.get("vibe_profile")
+    math_block["shell_strategy_count"] = stage2.get("strategy_count", 0)
+    math_block["selected_strategy"] = funnel.get("execution_strategy")
+    math_block["action_mechanic"] = funnel.get("action_mechanic")
+    math_block["judgement_qualified"] = stage3.get("candidates_qualified", 0)
     st.session_state.room2_spatial_cluster = spatial
     st.session_state.room2_last_math_block = math_block
+    st.session_state.room2_funnel_execution_strategy = funnel.get("execution_strategy")
 
     register_id = str(
-        layout_block_id or genetic.get("layout_id") or spatial["nearest_layout_id"]
+        layout_block_id
+        or funnel.get("master_layout_container")
+        or genetic.get("layout_id")
+        or spatial.get("nearest_layout_id", "NEW_LAYOUT")
     )
     if register_id != "PURGATORY_PENDING" and resolved_ticker:
         register_layout_vector_in_master_index(

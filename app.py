@@ -2881,6 +2881,22 @@ def _advance_room2_processor() -> str:
             proc["data_stream"] = data_stream
             proc["start_norm"] = start_norm
             proc["end_norm"] = end_norm
+
+            lane_check = core_quantum.validate_regime_lookback_lanes(
+                data_stream,
+                start_date=start_date,
+                start_time=start_time,
+                timeframe_resolution=timeframe_resolution,
+            )
+            if not lane_check.get("passed"):
+                return _halt_room2_processor_with_charts(
+                    fault_text=(
+                        f"🗑️ PRE-STORAGE TRASH — Lookback lane assertion failed: need "
+                        f"{lane_check.get('required_bars')} bars, got {lane_check.get('actual_bars')} "
+                        f"on {timeframe_resolution} track."
+                    )
+                )
+            proc["lane_check"] = lane_check
             proc["step"] = 2
 
         elif step == 2:
@@ -2990,8 +3006,11 @@ def _advance_room2_processor() -> str:
                 layout_block_id="",
             )
             quantum_report = _coerce_quantum_summary_to_text(quantum_summary)
+            if "PRE-STORAGE TRASH" in quantum_report:
+                return _halt_room2_processor_with_charts(fault_text=quantum_report)
             math_block = st.session_state.get("room2_last_math_block", {}) or {}
             genetic = st.session_state.get("room2_master_signature") or {}
+            funnel = st.session_state.get("room2_regime_funnel") or {}
             master_signature_json = json.dumps(
                 {
                     "master_signature": genetic.get("master_signature") or [],
@@ -3006,12 +3025,20 @@ def _advance_room2_processor() -> str:
                 },
                 default=str,
             )
-            macro_weather_layout = _resolve_auto_layout_id()
+            macro_weather_layout = str(
+                funnel.get("master_layout_container")
+                or math_block.get("nearest_layout_id")
+                or _resolve_auto_layout_id()
+            )
             match_score = int(math_block.get("match_probability") or 0)
-            execution_strategy = core_quantum.resolve_matrix_strategy_id(
-                layout_id=macro_weather_layout,
-                timeframe_resolution=timeframe_resolution,
-                spatial_match_pct=match_score,
+            execution_strategy = str(
+                funnel.get("execution_strategy")
+                or st.session_state.get("room2_funnel_execution_strategy")
+                or core_quantum.resolve_matrix_strategy_id(
+                    layout_id=macro_weather_layout,
+                    timeframe_resolution=timeframe_resolution,
+                    spatial_match_pct=match_score,
+                )
             )
 
             if not (st.session_state.get("room2_chart_coupling") or {}).get("passed"):
