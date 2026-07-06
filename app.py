@@ -78,6 +78,16 @@ ROOM2_INVALID_INPUT_MESSAGE = (
     "⚠️ INVALID INPUT: Verify your Ticker is filled out and your Timestamps match "
     "the 'HH:MM AM/PM' format exactly."
 )
+
+
+def _last_completed_equity_session_date() -> date:
+    """Most recent U.S. equity session before today — avoids same-day Massive plan blocks."""
+    session_day = date.today() - timedelta(days=1)
+    while session_day.weekday() >= 5:
+        session_day -= timedelta(days=1)
+    return session_day
+
+
 R2_TIMESTAMP_PATTERN = re.compile(r"^\d{1,2}:\d{2}\s+(AM|PM)$", re.IGNORECASE)
 ROOM2_CLEAN_SLATE_MESSAGE = (
     "DATABASE SNAPSHOT: 100% CLEAN SLATE. No active patterns logged. "
@@ -770,8 +780,10 @@ if "room2_text_buffer" not in st.session_state: st.session_state.room2_text_buff
 if "r2_good_start_time" not in st.session_state: st.session_state.r2_good_start_time = "09:31 AM"
 if "r2_good_end_time" not in st.session_state: st.session_state.r2_good_end_time = "04:00 PM"
 if "r2_single_notes_field" not in st.session_state: st.session_state.r2_single_notes_field = ""
-if "r2_good_start_date" not in st.session_state: st.session_state.r2_good_start_date = date.today()
-if "r2_good_end_date" not in st.session_state: st.session_state.r2_good_end_date = date.today()
+if "r2_good_start_date" not in st.session_state:
+    st.session_state.r2_good_start_date = _last_completed_equity_session_date()
+if "r2_good_end_date" not in st.session_state:
+    st.session_state.r2_good_end_date = _last_completed_equity_session_date()
 if "room2_vault_flash" not in st.session_state: st.session_state.room2_vault_flash = ""
 if "room2_last_rescue_vault_id" not in st.session_state: st.session_state.room2_last_rescue_vault_id = None
 if "matrix_cloud_hydrated" not in st.session_state: st.session_state.matrix_cloud_hydrated = False
@@ -3562,13 +3574,34 @@ def _advance_room2_processor() -> str:
                 return _halt_room2_processor(
                     fault_text=_coerce_quantum_summary_to_text(core_quantum.THROTTLE_MESSAGE)
                 )
-            if core_quantum.is_pipeline_signal(data_stream, core_quantum.POLYGON_REST_DATA_EMPTY):
-                api_err = st.session_state.get("r2_market_data_error", "")
+            if core_quantum.is_pipeline_signal(
+                data_stream, core_quantum.MASSIVE_PLAN_TIMEFRAME_BLOCKED
+            ):
                 return _halt_room2_processor(
                     fault_text=(
-                        f"⚠️ {core_quantum.POLYGON_REST_DATA_EMPTY} — No 1m bars for {ticker} "
-                        f"on {_session_date_label(start_date)}–{_session_date_label(end_date)}. "
-                        f"Verify Massive API key and session dates."
+                        f"⚠️ {core_quantum.MASSIVE_PLAN_TIMEFRAME_BLOCKED} — Same-day 1m bars for "
+                        f"{ticker} on {_session_date_label(start_date)} are not on your API tier. "
+                        f"Set Start/End Date to a prior completed session "
+                        f"(e.g. {_session_date_label(_last_completed_equity_session_date())})."
+                    )
+                )
+            if core_quantum.is_pipeline_signal(data_stream, core_quantum.POLYGON_REST_DATA_EMPTY):
+                api_err = str(st.session_state.get("r2_market_data_error") or "").strip()
+                if api_err.startswith("MASSIVE_EMPTY_SESSION"):
+                    empty_hint = (
+                        f"No 1m bars returned for {ticker} on "
+                        f"{_session_date_label(start_date)}–{_session_date_label(end_date)}. "
+                        "Try the last trading day with regular volume."
+                    )
+                else:
+                    empty_hint = (
+                        f"No 1m bars for {ticker} on "
+                        f"{_session_date_label(start_date)}–{_session_date_label(end_date)}. "
+                        "Verify Massive API key and session dates."
+                    )
+                return _halt_room2_processor(
+                    fault_text=(
+                        f"⚠️ {core_quantum.POLYGON_REST_DATA_EMPTY} — {empty_hint}"
                         + (f" [{api_err}]" if api_err else "")
                     )
                 )

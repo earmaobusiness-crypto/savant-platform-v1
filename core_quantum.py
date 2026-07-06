@@ -29,6 +29,7 @@ except ImportError:
 
 POLYGON_CALLS_PER_MINUTE = 5
 POLYGON_REST_DATA_EMPTY = "POLYGON REST DATA EMPTY"
+MASSIVE_PLAN_TIMEFRAME_BLOCKED = "MASSIVE PLAN TIMEFRAME BLOCKED"
 MASSIVE_API_BASE = "https://api.massive.com"
 MASSIVE_PUBLIC_HOST = "massive.com"
 MASSIVE_API_BASES = (MASSIVE_API_BASE,)
@@ -294,6 +295,18 @@ def _massive_aggs_request(
         http_resp = requests.get(url, params=params, headers=headers, timeout=20)
         body_text = http_resp.text[:240]
         if not http_resp.ok:
+            try:
+                err_payload = http_resp.json()
+                if isinstance(err_payload, dict):
+                    detail = str(
+                        err_payload.get("message")
+                        or err_payload.get("error")
+                        or err_payload.get("status")
+                        or body_text
+                    )
+                    return err_payload, http_resp.status_code, detail
+            except Exception:
+                pass
             return None, http_resp.status_code, body_text
         payload = http_resp.json()
         if isinstance(payload, dict):
@@ -400,6 +413,12 @@ def fetch_massive_session_1m_package(
                     "MASSIVE_HTTP_401|Unknown API Key — set MASSIVE_API_KEY in "
                     ".streamlit/secrets.toml"
                 )
+            elif last_status == 403 or "NOT_AUTHORIZED" in str(last_detail).upper():
+                st.session_state.r2_market_data_error = (
+                    "MASSIVE_HTTP_403|Same-day minute bars are not included on your "
+                    "current Massive/Polygon plan — use a prior completed session date."
+                )
+                return None, MASSIVE_PLAN_TIMEFRAME_BLOCKED
             else:
                 st.session_state.r2_market_data_error = (
                     f"MASSIVE_HTTP_{last_status}|{last_detail[:80]}"
@@ -420,7 +439,7 @@ def fetch_massive_session_1m_package(
             st.session_state.polygon_lockout = True
             return None, "THROTTLE"
         st.session_state.r2_market_data_error = (
-            str(payload.get("error") or status or "MASSIVE_EMPTY_RESULTS")
+            f"MASSIVE_EMPTY_SESSION|{_session_date_value(start_date)}|results=0"
         )
         return None, POLYGON_REST_DATA_EMPTY
 
@@ -557,6 +576,8 @@ def get_room2_polygon_pipeline(
         if polygon_signal == "THROTTLE":
             st.session_state.polygon_lockout = True
             return "THROTTLE"
+        if polygon_signal == MASSIVE_PLAN_TIMEFRAME_BLOCKED:
+            return MASSIVE_PLAN_TIMEFRAME_BLOCKED
         if polygon_signal == POLYGON_REST_DATA_EMPTY or not polygon_bars:
             st.session_state.r2_micro_feed_source = DATA_FEED_POLYGON_1M
             return POLYGON_REST_DATA_EMPTY
