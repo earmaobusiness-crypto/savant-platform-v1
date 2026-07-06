@@ -4324,7 +4324,11 @@ def render_room2_forensic_lab():
             )
 
     if st.session_state.polygon_lockout:
-        st.error(core_quantum.THROTTLE_MESSAGE)
+        wait_sec = core_quantum._polygon_throttle_seconds_remaining()
+        st.error(
+            f"{core_quantum.THROTTLE_MESSAGE} Retry in ~{wait_sec}s "
+            f"({core_quantum._polygon_calls_remaining()}/{core_quantum.POLYGON_CALLS_PER_MINUTE} calls left)."
+        )
 
     commit_throttle_active = _room2_commit_throttle_active()
     _render_room2_commit_throttle_banner()

@@ -374,7 +374,7 @@ def fetch_massive_session_1m_package(
         st.session_state.r2_market_data_error = "MASSIVE_API_KEY_MISSING"
         return None, POLYGON_REST_DATA_EMPTY
 
-    if not _consume_polygon_call():
+    if not _polygon_call_available():
         return None, "THROTTLE"
 
     def _pull_once() -> tuple[list | None, str | None]:
@@ -429,6 +429,7 @@ def fetch_massive_session_1m_package(
 
         results = payload.get("results")
         if isinstance(results, list) and len(results) > 0:
+            _consume_polygon_call()
             st.session_state.massive_last_pull_at = time.time()
             return results, None
 
@@ -2380,6 +2381,17 @@ def _init_polygon_rate_monitor() -> None:
 def _polygon_calls_remaining() -> int:
     _init_polygon_rate_monitor()
     return int(st.session_state.polygon_calls_remaining)
+
+
+def _polygon_call_available() -> bool:
+    _init_polygon_rate_monitor()
+    return int(st.session_state.polygon_calls_remaining) > 0
+
+
+def _polygon_throttle_seconds_remaining() -> int:
+    _init_polygon_rate_monitor()
+    elapsed = time.time() - float(st.session_state.polygon_rate_window_start)
+    return max(0, int(60 - elapsed))
 
 
 def _consume_polygon_call() -> bool:
