@@ -2222,8 +2222,116 @@ def _restore_soft_deleted_pattern_from_vault(restore_all: bool = False) -> str:
 def _is_pattern_mining_query(text: str) -> bool:
     low = text.lower()
     pattern_words = ("pattern", "patterns", "finding", "findings", "evolving", "machine", "logged", "cloud")
-    ask_words = ("what", "how", "tell", "explain", "show", "describe")
+    ask_words = ("what", "how", "tell", "explain", "show", "describe", "list", "count", "any")
     return any(w in low for w in pattern_words) and any(w in low for w in ask_words)
+
+
+def _window4_is_vault_inventory_query(text: str) -> bool:
+    """Questions about what is saved in the cloud vault — not live Massive metrics."""
+    low = str(text or "").lower()
+    if _window4_vault_command_only(str(text or "")):
+        return False
+    nouns = (
+        "pattern",
+        "patterns",
+        "stock",
+        "stocks",
+        "ticker",
+        "tickers",
+        "layout",
+        "layouts",
+        "vault",
+        "archive",
+        "logged",
+        "deployed",
+        "saved",
+    )
+    if not any(word in low for word in nouns):
+        return False
+    probes = (
+        "any ",
+        "how many",
+        "what's in",
+        "what is in",
+        "are there",
+        "is there",
+        "do we have",
+        "do i have",
+        "anything in",
+        "as of now",
+        "right now",
+        "currently",
+        "in the vault",
+        "in vault",
+        "in the cloud",
+        "in cloud",
+    )
+    if any(probe in low for probe in probes):
+        return True
+    return _is_pattern_mining_query(text)
+
+
+def _window4_build_vault_inventory_reply() -> str:
+    """Deterministic vault inventory — does not require a live deploy stream."""
+    _ensure_supabase_session()
+    st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
+    st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
+    active = int(st.session_state.matrix_active_pattern_count or 0)
+    trash = int(st.session_state.matrix_trash_vault_count or 0)
+
+    if not st.session_state.get("supabase_ready"):
+        return (
+            "Cloud vault is offline — Supabase is not configured, so I cannot list saved patterns."
+        )
+
+    if active == 0:
+        proc = st.session_state.get("room2_processor") or {}
+        if proc.get("active"):
+            return (
+                "Deploy is still running in Window 1 — nothing has been written to the vault yet."
+            )
+        hints: list[str] = []
+        if st.session_state.get("polygon_lockout"):
+            hints.append("API throttle is active — wait ~60s, then redeploy.")
+        report = str(st.session_state.get("room2_quantum_report") or "")
+        if "PRE-STORAGE TRASH" in report or "VAULT BLOCKED" in report:
+            hints.append("Last deploy failed quality/coupling gates — it was not saved.")
+        elif "THROTTLE" in report or "POLYGON REST DATA EMPTY" in report:
+            hints.append("Last deploy did not fetch bars — use a past session date and regular hours.")
+        hint = f" {' '.join(hints)}" if hints else ""
+        return (
+            f"No active patterns in the cloud vault ({trash} in Trash Vault).{hint} "
+            "Submitting the form only queues a deploy — patterns appear here after Window 1 "
+            "completes vault sync."
+        )
+
+    raw = _fetch_live_cloud_patterns()
+    rows: list[dict] = []
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                rows = parsed
+        except json.JSONDecodeError:
+            rows = []
+
+    lines = [
+        f"**{active} active pattern(s)** in cloud vault ({trash} in Trash Vault):",
+        "",
+    ]
+    for row in rows[:12]:
+        ticker = str(row.get("ticker") or "?").strip().upper()
+        layout = str(
+            row.get("macro_weather_layout") or row.get("execution_strategy") or "—"
+        ).strip()
+        ts = str(row.get("timestamp") or "")[:10]
+        tf = str(row.get("timeframe_resolution") or "").strip()
+        margin = row.get("structural_move_pct") or row.get("margin_pct")
+        margin_bit = f" · {float(margin):.2f}% move" if margin is not None else ""
+        lines.append(f"- **{ticker}** · {layout} · {tf}{margin_bit} · {ts}")
+    if active > len(rows):
+        lines.append(f"- …and {active - len(rows)} more not shown.")
+    return "\n".join(lines)
 
 
 _WINDOW4_GREETING_RE = re.compile(
@@ -2308,10 +2416,12 @@ def _window4_is_conversational_message(text: str) -> bool:
 
 
 def _window4_route_message(text: str) -> str:
-    """Dual-track router — conversational vs hard-gated technical data."""
+    """Router — vault commands, cloud inventory, live data track, or conversational."""
     clean = str(text or "").strip()
     if _window4_vault_command_only(clean):
         return "vault"
+    if _window4_is_vault_inventory_query(clean):
+        return "inventory"
     if _window4_is_technical_data_query(clean):
         return "data"
     return "conversational"
@@ -2628,6 +2738,21 @@ def _window4_handle_chat_submit(user_text: str) -> None:
 
     route = _window4_route_message(clean)
 
+    if route == "inventory":
+        st.session_state.room2_chat_history.append(
+            {
+                "speaker": "Forensic Expert",
+                "text": _format_window4_response(
+                    _window4_build_vault_inventory_reply(),
+                    vault_safe=True,
+                ),
+                "vault_safe": True,
+            }
+        )
+        st.session_state.window4_status_line = "☁️ Vault inventory read from cloud archive."
+        _sync_matrix_chat_to_cloud()
+        return
+
     if route == "data":
         if not _window4_has_verified_metric_stream():
             st.session_state.room2_chat_history.append(
@@ -2739,7 +2864,7 @@ def _build_pattern_strategist_messages(user_text: str) -> list[dict]:
             "role": "user",
             "content": (
                 f"{user_text}\n"
-                f"[CLOUD_PATTERNS]{cloud_data if verified_blob else 'CLOUD:GATED'}[/CLOUD_PATTERNS]\n"
+                f"[CLOUD_PATTERNS]{cloud_data}[/CLOUD_PATTERNS]\n"
                 f"{verified_blob}"
             ),
         },
