@@ -1550,8 +1550,11 @@ WINDOW4_CONVERSATIONAL_SYSTEM = (
     "STRICT ANTI-HALLUCINATION RULES:\n"
     "• Never invent Layout IDs, Strategy Nodes, Match Scores, Net Margins, or ticker symbols.\n"
     "• Never cite fake percentages, cloud pattern counts, or deploy statistics.\n"
-    "• If the operator asks for live market layouts or stock statistics you do not have, say plainly "
-    "that the core data engine is idle and waiting for a stock deployment — do not fabricate data.\n"
+    "• Inventory or count questions (how many stocks/patterns in the system or vault) are answered "
+    "by the vault roster — never say the engine is idle if a [SESSION_VERIFIED_DEPLOY] or "
+    "[VAULT_INVENTORY] tag is present in the operator message.\n"
+    "• Only say the core data engine is idle when no verified deploy tags exist and the operator "
+    "asks for live market metrics you do not have — do not fabricate data.\n"
     "• Keep replies conversational — no dense forensic dumps unless verified payload tags are present.\n\n"
     f"{WINDOW4_FORMAT_PROTOCOL}"
 )
@@ -2232,6 +2235,47 @@ def _window4_is_vault_inventory_query(text: str) -> bool:
     low = str(text or "").lower()
     if _window4_vault_command_only(str(text or "")):
         return False
+    inventory_context = (
+        "in the system",
+        "in system",
+        "in the matrix",
+        "in matrix",
+        "in the lab",
+        "in lab",
+        "in the vault",
+        "in vault",
+        "in the cloud",
+        "in cloud",
+        "in here",
+        "right now",
+        "as of now",
+        "currently",
+        "deployed",
+        "saved",
+        "logged",
+        "archived",
+    )
+    count_probes = (
+        "how many",
+        "how much",
+        "count ",
+        "count?",
+        "number of",
+        "total ",
+        "total?",
+        "qty",
+        "quantity",
+    )
+    if any(probe in low for probe in count_probes):
+        if any(ctx in low for ctx in inventory_context):
+            return True
+        if re.search(r"how many\s+(?:are\s+)?(?:there|we|you|i)\b", low):
+            return True
+        if re.search(
+            r"how many\s+(?:stocks?|tickers?|patterns?|symbols?|setups?|layouts?|names?)\b",
+            low,
+        ):
+            return True
     nouns = (
         "pattern",
         "patterns",
@@ -2239,6 +2283,10 @@ def _window4_is_vault_inventory_query(text: str) -> bool:
         "stocks",
         "ticker",
         "tickers",
+        "symbol",
+        "symbols",
+        "setup",
+        "setups",
         "layout",
         "layouts",
         "vault",
@@ -2247,8 +2295,6 @@ def _window4_is_vault_inventory_query(text: str) -> bool:
         "deployed",
         "saved",
     )
-    if not any(word in low for word in nouns):
-        return False
     probes = (
         "any ",
         "how many",
@@ -2259,21 +2305,16 @@ def _window4_is_vault_inventory_query(text: str) -> bool:
         "do we have",
         "do i have",
         "anything in",
-        "as of now",
-        "right now",
-        "currently",
-        "in the vault",
-        "in vault",
-        "in the cloud",
-        "in cloud",
         "know any",
         "know about",
         "you know",
         "receive",
         "have any",
         "see any",
+        "list ",
+        "show ",
     )
-    if any(probe in low for probe in probes):
+    if any(word in low for word in nouns) and any(probe in low for probe in probes):
         return True
     if "pattern" in low and any(
         word in low for word in ("know", "have", "see", "show", "list", "saved", "logged", "deployed")
@@ -2302,9 +2343,12 @@ def _window4_build_vault_inventory_reply() -> str:
         strategy = str(funnel.get("execution_strategy") or "").strip()
         if last_ticker:
             return (
-                f"Your last deploy (**{last_ticker}**) shows **VAULT SYNC OK** in Window 1, "
-                f"but the cloud count reads 0 — Supabase may be offline or still syncing. "
-                f"Session layout: **{layout or '—'}** · strategy **{strategy or '—'}**."
+                f"**1 stock/pattern in this lab session** — **{last_ticker}** reached "
+                f"**VAULT SYNC OK** in Window 1.\n\n"
+                f"- **Ticker:** **{last_ticker}**\n"
+                f"- **Layout:** **{layout or '—'}**\n"
+                f"- **Strategy:** **{strategy or '—'}**\n"
+                f"- **Cloud vault count:** 0 (Supabase may be offline, lagging, or on a different table)"
             )
 
     if active == 0:
@@ -2596,8 +2640,25 @@ def _build_room2_groq_messages(user_text: str) -> list[dict]:
     return groq_msgs
 
 
+def _window4_conversational_context_tags() -> str:
+    """Light session tags so conversational Groq does not contradict an active deploy."""
+    bits: list[str] = []
+    if _window4_last_deploy_verified():
+        ticker = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
+        if ticker:
+            bits.append(f"[SESSION_VERIFIED_DEPLOY ticker={ticker}]")
+    if _window4_has_verified_metric_stream():
+        ticker = _window4_operator_deploy_ticker()
+        if ticker:
+            bits.append(f"[LIVE_FORENSIC_STREAM ticker={ticker}]")
+    active = int(st.session_state.get("matrix_active_pattern_count") or 0)
+    if active > 0:
+        bits.append(f"[VAULT_INVENTORY active_patterns={active}]")
+    return "\n".join(bits)
+
+
 def _build_window4_conversational_messages(user_text: str) -> list[dict]:
-    """Conversational track — no backend metric injection; natural lab chat only."""
+    """Conversational track — session tags only; vault counts stay deterministic."""
     groq_msgs = [
         {"role": "system", "content": WINDOW4_CONVERSATIONAL_SYSTEM},
     ]
@@ -2605,7 +2666,11 @@ def _build_window4_conversational_messages(user_text: str) -> list[dict]:
     for msg in prior[-6:]:
         role = "user" if msg["speaker"] == "You" else "assistant"
         groq_msgs.append({"role": role, "content": str(msg.get("text") or "")})
-    groq_msgs.append({"role": "user", "content": str(user_text or "").strip()})
+    latest = str(user_text or "").strip()
+    context = _window4_conversational_context_tags()
+    if context:
+        latest = f"{latest}\n{context}"
+    groq_msgs.append({"role": "user", "content": latest})
     return groq_msgs
 
 
@@ -2844,6 +2909,21 @@ def _window4_handle_chat_submit(user_text: str) -> None:
             return
 
         _window4_start_pending_groq(clean, track="data")
+        return
+
+    if _window4_is_vault_inventory_query(clean):
+        st.session_state.room2_chat_history.append(
+            {
+                "speaker": "Forensic Expert",
+                "text": _format_window4_response(
+                    _window4_build_vault_inventory_reply(),
+                    vault_safe=True,
+                ),
+                "vault_safe": True,
+            }
+        )
+        st.session_state.window4_status_line = "☁️ Vault inventory read from cloud archive."
+        _sync_matrix_chat_to_cloud()
         return
 
     _window4_start_pending_groq(clean, track="conversational")
