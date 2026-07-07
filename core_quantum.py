@@ -140,6 +140,12 @@ HILL_DROP_MIN_PCT = 0.35
 LOOKBACK_DELTAS = {
     "15-Minute": datetime.timedelta(hours=12),
 }
+# Extra session days pulled before operator start_date so dragnet lanes have enough bars.
+LOOKBACK_FETCH_PADDING_DAYS = {
+    "1-Minute": 0,
+    "5-Minute": 1,
+    "15-Minute": 2,
+}
 NOISE_DIM_EPSILON = 0.18
 SEMANTIC_EMBED_DIMS = 32
 DRAGNET_TIMEFRAMES = frozenset({"5-Minute", "15-Minute"})
@@ -331,6 +337,28 @@ def _session_date_value(raw_date) -> str | None:
         return raw_date.strftime("%Y-%m-%d")
     text = str(raw_date).strip()
     return text[:10] if text else None
+
+
+def _shift_session_date_backward(raw_date, days: int):
+    """Move a deploy session date back N calendar days for extended lookback fetches."""
+    if days <= 0:
+        return raw_date
+    text = _session_date_value(raw_date)
+    if not text:
+        return raw_date
+    try:
+        shifted = datetime.datetime.strptime(text, "%Y-%m-%d").date() - datetime.timedelta(
+            days=days
+        )
+        if hasattr(raw_date, "strftime"):
+            return shifted
+        return shifted.isoformat()
+    except ValueError:
+        return raw_date
+
+
+def _lookback_fetch_padding_days(timeframe_resolution: str) -> int:
+    return int(LOOKBACK_FETCH_PADDING_DAYS.get(timeframe_resolution, 1))
 
 
 def _polygon_session_bounds_ms(start_date, end_date) -> tuple[int, int] | None:
@@ -564,14 +592,19 @@ def get_room2_polygon_pipeline(
     if not ticker_clean:
         return POLYGON_REST_DATA_EMPTY
 
-    cache_key = f"{ticker_clean}|{_session_date_value(start_date)}|{_session_date_value(end_date)}"
+    fetch_pad_days = _lookback_fetch_padding_days(timeframe_resolution)
+    fetch_start_date = _shift_session_date_backward(start_date, fetch_pad_days)
+    cache_key = (
+        f"{ticker_clean}|{_session_date_value(fetch_start_date)}"
+        f"|{_session_date_value(end_date)}|pad={fetch_pad_days}"
+    )
     cached_key = st.session_state.get("r2_polygon_session_key")
     frame_1m = st.session_state.get("r2_polygon_1m_ram")
 
     if cached_key != cache_key or not is_usable_data_stream(frame_1m):
         polygon_bars, polygon_signal = fetch_polygon_session_1m_package(
             ticker_clean,
-            start_date=start_date,
+            start_date=fetch_start_date,
             end_date=end_date,
         )
         if polygon_signal == "THROTTLE":

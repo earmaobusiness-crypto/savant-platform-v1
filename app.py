@@ -3800,11 +3800,15 @@ def _advance_room2_processor() -> str:
                 timeframe_resolution=timeframe_resolution,
             )
             if not lane_check.get("passed"):
+                required = lane_check.get("required_bars")
+                actual = lane_check.get("actual_bars")
                 return _halt_room2_processor_with_charts(
                     fault_text=(
                         f"🗑️ PRE-STORAGE TRASH — Lookback lane assertion failed: need "
-                        f"{lane_check.get('required_bars')} bars, got {lane_check.get('actual_bars')} "
-                        f"on {timeframe_resolution} track."
+                        f"{required} bars before Start Time, got {actual} on {timeframe_resolution} "
+                        f"({required} bars of history before your entry). Pattern was not saved. "
+                        f"Try a later Start Time (e.g. 11:00 AM–2:00 PM ET) or regular session "
+                        f"hours 9:31 AM–4:00 PM on a prior trading day."
                     )
                 )
             proc["lane_check"] = lane_check
