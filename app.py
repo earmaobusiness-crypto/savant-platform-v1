@@ -776,6 +776,7 @@ if "polygon_lockout" not in st.session_state: st.session_state.polygon_lockout =
 if "room2_commit_timestamps" not in st.session_state: st.session_state.room2_commit_timestamps = []
 if "room2_commit_throttle_until" not in st.session_state: st.session_state.room2_commit_throttle_until = 0.0
 if "room2_forensic_ticker" not in st.session_state: st.session_state.room2_forensic_ticker = ""
+if "room2_last_successful_deploy" not in st.session_state: st.session_state.room2_last_successful_deploy = {}
 if "room2_quantum_report" not in st.session_state: st.session_state.room2_quantum_report = ""
 if "room2_bar_count" not in st.session_state: st.session_state.room2_bar_count = 0
 if "room2_text_buffer" not in st.session_state: st.session_state.room2_text_buffer = ""
@@ -1617,7 +1618,9 @@ def _pattern_archive_query_suffix(*, active_only: bool = True, trash_only: bool 
     if trash_only:
         parts.append("state=eq.soft_deleted")
     elif active_only:
-        parts.append("or=(state.is.null,state.eq.active,state.eq.incubation)")
+        parts.append(
+            "or=(state.is.null,state.eq.active,state.eq.incubation,state.eq.purgatory)"
+        )
     return "&" + "&".join(parts)
 
 
@@ -2048,6 +2051,17 @@ def _hydrate_matrix_memory_from_cloud() -> None:
                 match_pct=pct,
                 valid=pct >= core_quantum.LAYOUT_SIGNATURE_MATCH_THRESHOLD,
             )
+        _window4_record_deploy_snapshot(
+            ticker=forensic_ticker,
+            layout=str(latest.get("macro_weather_layout") or ""),
+            strategy=str(latest.get("execution_strategy") or ""),
+            timeframe=str(latest.get("timeframe_resolution") or ""),
+            structural_move=float(margin or 0.0),
+            vault_synced=(
+                "VAULT SYNC OK" in report
+                or "INTERNET VAULT SYNC CONFIRMED" in report
+            ),
+        )
 
     terminal = str(st.session_state.get("quantum_terminal_output") or "")
     if terminal:
@@ -2407,6 +2421,16 @@ def _window4_is_vault_inventory_query(text: str) -> bool:
 
 def _window4_should_use_vault_roster(text: str) -> bool:
     """Any question about saved patterns/stocks/vault — never delegate to Groq."""
+    low = str(text or "").lower().strip()
+    if "how many" in low and not any(
+        marker in low
+        for marker in ("percent", "margin", "match score", "match %", "bars needed")
+    ):
+        return True
+    if re.search(r"\b(?:matrix|matirx|matiirx|system|sysytem)\b", low) and any(
+        word in low for word in ("how many", "what", "any", "count", "stock", "pattern", "saved")
+    ):
+        return True
     if _window4_is_vault_inventory_query(text):
         return True
     if _is_pattern_mining_query(text):
@@ -2455,6 +2479,80 @@ def _window4_should_use_vault_roster(text: str) -> bool:
     return any(phrase in low for phrase in roster_phrases)
 
 
+def _window4_record_deploy_snapshot(
+    *,
+    ticker: str,
+    layout: str = "",
+    strategy: str = "",
+    timeframe: str = "",
+    structural_move: float = 0.0,
+    vault_synced: bool = False,
+) -> None:
+    """Pin last deploy for Window 4 inventory — survives until next deploy."""
+    clean_ticker = str(ticker or "").strip().upper()
+    if not clean_ticker:
+        return
+    st.session_state.room2_last_successful_deploy = {
+        "ticker": clean_ticker,
+        "layout": str(layout or "—").strip() or "—",
+        "strategy": str(strategy or "—").strip() or "—",
+        "timeframe": str(timeframe or "—").strip() or "—",
+        "structural_move": float(structural_move or 0.0),
+        "vault_synced": bool(vault_synced),
+    }
+
+
+def _window4_session_deploy_for_inventory() -> dict | None:
+    """Session deploy record when cloud count lags or refresh dropped vault flags."""
+    snap = st.session_state.get("room2_last_successful_deploy")
+    if isinstance(snap, dict) and str(snap.get("ticker") or "").strip():
+        return snap
+    if not (
+        _window4_last_deploy_verified()
+        or _window4_has_verified_metric_stream()
+    ):
+        return None
+    ticker = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
+    if not ticker:
+        ticker = _window4_operator_deploy_ticker()
+    if not ticker:
+        return None
+    funnel = st.session_state.get("room2_regime_funnel") or {}
+    math_block = st.session_state.get("room2_last_math_block") or {}
+    return {
+        "ticker": ticker,
+        "layout": str(funnel.get("master_layout_container") or "—").strip() or "—",
+        "strategy": str(funnel.get("execution_strategy") or "—").strip() or "—",
+        "timeframe": str(st.session_state.get("r2_timeframe_mode") or "—").strip() or "—",
+        "structural_move": float(math_block.get("structural_move_pct") or 0.0),
+        "vault_synced": _window4_last_deploy_verified(),
+    }
+
+
+def _window4_format_session_deploy_inventory(session: dict, *, trash: int) -> str:
+    ticker = str(session.get("ticker") or "?").strip().upper()
+    layout = str(session.get("layout") or "—").strip() or "—"
+    strategy = str(session.get("strategy") or "—").strip() or "—"
+    tf = str(session.get("timeframe") or "—").strip() or "—"
+    move = session.get("structural_move")
+    margin_bit = f" · {float(move):.2f}% move" if move not in (None, "", 0, 0.0) else ""
+    if session.get("vault_synced") or _window4_last_deploy_verified():
+        headline = f"**1 stock/pattern in the Matrix** — **{ticker}** · **VAULT SYNC OK**"
+    else:
+        headline = (
+            f"**1 stock/pattern in this lab session** — **{ticker}** "
+            f"(forensic deploy active · cloud count still 0)"
+        )
+    return (
+        f"{headline}\n\n"
+        f"- **Ticker:** **{ticker}**\n"
+        f"- **Layout:** **{layout}**\n"
+        f"- **Strategy:** **{strategy}**\n"
+        f"- **Timeframe:** **{tf}**{margin_bit}\n"
+        f"- **Trash Vault:** {trash} archived row(s)"
+    )
+
+
 def _window4_latest_saved_pattern_row() -> dict | None:
     """Latest non-chat-log pattern row from cloud — survives browser refresh."""
     row = _fetch_latest_active_pattern_row()
@@ -2477,6 +2575,15 @@ def _window4_restore_vault_flags_from_report(report: str) -> None:
             st.session_state.room2_vault_confirmation = clean
             if not str(st.session_state.get("room2_vault_flash") or "").strip():
                 st.session_state.room2_vault_flash = clean
+            ticker_match = re.search(
+                r"(?:VAULT SYNC OK|INTERNET VAULT SYNC CONFIRMED)[^A-Z]*([A-Z][A-Z0-9.-]{0,6})",
+                clean,
+            )
+            if ticker_match:
+                _window4_record_deploy_snapshot(
+                    ticker=ticker_match.group(1),
+                    vault_synced=True,
+                )
             return
 
 
@@ -2548,14 +2655,21 @@ def _window4_build_vault_inventory_reply() -> str:
         layout = str(funnel.get("master_layout_container") or "").strip()
         strategy = str(funnel.get("execution_strategy") or "").strip()
         if last_ticker:
-            return (
-                f"**1 stock/pattern in this lab session** — **{last_ticker}** reached "
-                f"**VAULT SYNC OK** in Window 1.\n\n"
-                f"- **Ticker:** **{last_ticker}**\n"
-                f"- **Layout:** **{layout or '—'}**\n"
-                f"- **Strategy:** **{strategy or '—'}**\n"
-                f"- **Cloud vault count:** 0 (Supabase may be offline, lagging, or on a different table)"
+            _window4_record_deploy_snapshot(
+                ticker=last_ticker,
+                layout=layout,
+                strategy=strategy,
+                timeframe=str(st.session_state.get("r2_timeframe_mode") or ""),
+                vault_synced=True,
             )
+            return _window4_format_session_deploy_inventory(
+                _window4_session_deploy_for_inventory() or {},
+                trash=trash,
+            )
+
+    session = _window4_session_deploy_for_inventory()
+    if active == 0 and session:
+        return _window4_format_session_deploy_inventory(session, trash=trash)
 
     if active == 0:
         proc = st.session_state.get("room2_processor") or {}
@@ -2702,7 +2816,15 @@ def _window4_route_message(text: str) -> str:
 def _window4_operator_deploy_ticker() -> str:
     """Active deploy ticker — last forensic deploy wins over stale form defaults."""
     forensic = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
-    if forensic and (_window4_last_deploy_verified() or _window4_latest_saved_pattern_row()):
+    snap = st.session_state.get("room2_last_successful_deploy") or {}
+    snap_ticker = str(snap.get("ticker") or "").strip().upper()
+    if snap_ticker:
+        return snap_ticker
+    if forensic and (
+        _window4_last_deploy_verified()
+        or _window4_latest_saved_pattern_row()
+        or bool(st.session_state.get("room2_last_successful_deploy"))
+    ):
         return forensic
     form_ticker = str(st.session_state.get("r2_good_ticker") or "").strip().upper()
     if form_ticker:
@@ -3881,6 +4003,7 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
     payload = proc.get("payload") or {}
 
     ok, vault_message = core_quantum.stream_payload_to_vault(payload)
+    vault_synced_ui = False
     if ok:
         funnel = st.session_state.get("room2_regime_funnel") or {}
         pg_pct = int(
@@ -3992,6 +4115,15 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
         st.session_state.room2_vault_confirmation = confirm
         st.session_state.room2_forensic_ticker = ticker
         st.session_state.matrix_window1_rejection_text = ""
+        vault_synced_ui = True
+        _window4_record_deploy_snapshot(
+            ticker=ticker,
+            layout=macro_weather_layout,
+            strategy=execution_strategy,
+            timeframe=timeframe_resolution,
+            structural_move=structural_move,
+            vault_synced=True,
+        )
         deploy_note = (
             f"✅ **Pattern saved** — **{ticker}** · **{macro_weather_layout}** · "
             f"**{execution_strategy}** · {structural_move:.2f}% structural move. "
@@ -4006,6 +4138,16 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
         )
     else:
         final_terminal = _assign_matrix_terminal_output(quantum_report, vault_line if ok else None)
+
+    if ok and not vault_synced_ui:
+        _window4_record_deploy_snapshot(
+            ticker=ticker,
+            layout=macro_weather_layout,
+            strategy=execution_strategy,
+            timeframe=timeframe_resolution,
+            structural_move=structural_move,
+            vault_synced=True,
+        )
 
     core_quantum.complete_processing_heartbeat(final_terminal)
     st.session_state.room2_quantum_report = final_terminal
