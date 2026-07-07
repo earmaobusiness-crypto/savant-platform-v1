@@ -23,7 +23,7 @@ core_quantum.hydrate_layout_library_from_vault()
 self_surgery.hydrate_repair_bay_from_cloud()
 
 if "r2_good_ticker" not in st.session_state:
-    st.session_state.r2_good_ticker = "MLGO"
+    st.session_state.r2_good_ticker = ""
 if "room2_chat_history" not in st.session_state:
     st.session_state.room2_chat_history = []
 elif not isinstance(st.session_state.room2_chat_history, list):
@@ -1932,10 +1932,34 @@ def _load_matrix_chat_from_cloud() -> None:
         raw_chat = rows[0].get("operator_context") or "[]"
         parsed = json.loads(raw_chat)
         if isinstance(parsed, list) and parsed:
-            st.session_state.room2_chat_history = parsed
+            normalized: list[dict] = []
+            for msg in parsed:
+                if not isinstance(msg, dict):
+                    continue
+                row = dict(msg)
+                if row.get("speaker") == "Forensic Expert" and not any(
+                    row.get(flag)
+                    for flag in (
+                        "vault_safe",
+                        "status_reply",
+                        "conversational",
+                        "data_fallback",
+                        "data_reply",
+                    )
+                ):
+                    row["vault_safe"] = bool(
+                        "Pattern saved" in str(row.get("text") or "")
+                        or "active pattern" in str(row.get("text") or "").lower()
+                        or "cloud vault" in str(row.get("text") or "").lower()
+                    )
+                    if not row["vault_safe"]:
+                        row["conversational"] = True
+                normalized.append(row)
+            st.session_state.room2_chat_history = normalized
         saved_terminal = str(rows[0].get("quantum_report") or "").strip()
         if saved_terminal and MATRIX_ENGINE_IDLE_MARKER not in saved_terminal:
             st.session_state.quantum_terminal_output = saved_terminal
+            _window4_restore_vault_flags_from_report(saved_terminal)
     except Exception:
         pass
 
@@ -1986,6 +2010,19 @@ def _hydrate_matrix_memory_from_cloud() -> None:
         if not st.session_state.get("matrix_form_seeded"):
             _seed_room2_form_from_pattern_row(latest)
             st.session_state.matrix_form_seeded = True
+        forensic_ticker = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
+        if forensic_ticker:
+            st.session_state.r2_good_ticker = forensic_ticker
+        if match_pct is not None:
+            pct = int(match_pct)
+            core_quantum._sync_window4_regime_flags(
+                match_pct=pct,
+                valid=pct >= core_quantum.LAYOUT_SIGNATURE_MATCH_THRESHOLD,
+            )
+
+    terminal = str(st.session_state.get("quantum_terminal_output") or "")
+    if terminal:
+        _window4_restore_vault_flags_from_report(terminal)
 
     st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
@@ -2376,7 +2413,16 @@ def _window4_should_use_vault_roster(text: str) -> bool:
         "nothing logged",
         "anything in",
         "anything yet",
+        "what did we deploy",
+        "did we deploy",
+        "are we synced",
+        "vault working",
+        "any stocks",
+        "stocks saved",
+        "patterns saved",
     )
+    if re.search(r"\bpatterns?\s*\??\s*$", low):
+        return True
     return any(phrase in low for phrase in roster_phrases)
 
 
@@ -2625,11 +2671,14 @@ def _window4_route_message(text: str) -> str:
 
 
 def _window4_operator_deploy_ticker() -> str:
-    """Active deploy ticker — form field or last successful forensic deploy."""
+    """Active deploy ticker — last forensic deploy wins over stale form defaults."""
+    forensic = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
+    if forensic and (_window4_last_deploy_verified() or _window4_latest_saved_pattern_row()):
+        return forensic
     form_ticker = str(st.session_state.get("r2_good_ticker") or "").strip().upper()
     if form_ticker:
         return form_ticker
-    return str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
+    return forensic
 
 
 def _window4_last_deploy_verified() -> bool:
@@ -2637,11 +2686,9 @@ def _window4_last_deploy_verified() -> bool:
     confirm = str(st.session_state.get("room2_vault_confirmation") or "")
     flash = str(st.session_state.get("room2_vault_flash") or "")
     report = str(st.session_state.get("room2_quantum_report") or "")
-    return (
-        "VAULT SYNC OK" in confirm
-        or "INTERNET VAULT SYNC CONFIRMED" in flash
-        or "INTERNET VAULT SYNC CONFIRMED" in report
-    )
+    terminal = str(st.session_state.get("quantum_terminal_output") or "")
+    markers = ("VAULT SYNC OK", "INTERNET VAULT SYNC CONFIRMED")
+    return any(marker in blob for blob in (confirm, flash, report, terminal) for marker in markers)
 
 
 def _window4_has_verified_metric_stream() -> bool:
@@ -2665,15 +2712,19 @@ def _window4_has_verified_metric_stream() -> bool:
     if not report or "PRE-STORAGE TRASH" in report or MATRIX_ENGINE_IDLE_MARKER in report:
         return False
     forensic = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
-    if forensic and forensic != ticker:
-        return False
+    if forensic and ticker and forensic != ticker and _window4_last_deploy_verified():
+        ticker = forensic
     has_ram = core_quantum.is_usable_data_stream(st.session_state.get("r2_polygon_1m_ram"))
     math_block = st.session_state.get("room2_last_math_block") or {}
     has_metrics = bool(
         math_block.get("structural_move_pct") is not None
         or math_block.get("match_probability")
     )
-    if _window4_last_deploy_verified() and has_metrics and (has_ram or core_quantum.window4_regime_gate_open()):
+    if _window4_last_deploy_verified() and has_metrics:
+        return True
+    if _window4_last_deploy_verified() and _window4_latest_saved_pattern_row():
+        return True
+    if _window4_last_deploy_verified() and (has_ram or core_quantum.window4_regime_gate_open()):
         return True
     if not has_ram:
         return False
@@ -2855,6 +2906,7 @@ def _format_window4_response(
     status_safe: bool = False,
     conversational_safe: bool = False,
     data_fallback: bool = False,
+    data_reply: bool = False,
 ) -> str:
     """
     Window 4 presentation layer — dual-track formatting with hallucination scrub.
@@ -2862,14 +2914,20 @@ def _format_window4_response(
     """
     if data_fallback:
         return WINDOW4_DATA_ENGINE_IDLE_REPLY
-    if conversational_safe:
+    deploy_verified = _window4_last_deploy_verified()
+    if conversational_safe or data_reply:
         polished = _window4_sanitize_display_text(text)
         if not polished:
             polished = (
                 "I'm on the lab wire and ready to chat. "
                 "Deploy a winning pattern when you want live forensic readouts."
             )
-    elif not vault_safe and not status_safe and not _window4_has_verified_metric_stream():
+    elif (
+        not vault_safe
+        and not status_safe
+        and not _window4_has_verified_metric_stream()
+        and not deploy_verified
+    ):
         return WINDOW4_DATA_ENGINE_IDLE_REPLY
     elif status_safe or vault_safe:
         polished = str(text or "").strip()
@@ -2930,7 +2988,7 @@ def _window4_execute_groq_pending(pending: dict) -> None:
             st.session_state.room2_chat_history.append(
                 {
                     "speaker": "Forensic Expert",
-                    "text": _format_window4_response(ai_text),
+                    "text": _format_window4_response(ai_text, data_reply=True),
                     "data_reply": True,
                 }
             )
@@ -2939,7 +2997,7 @@ def _window4_execute_groq_pending(pending: dict) -> None:
             st.session_state.room2_chat_history.append(
                 {
                     "speaker": "Forensic Expert",
-                    "text": _format_window4_response(ai_text),
+                    "text": _format_window4_response(ai_text, data_reply=True),
                     "data_reply": True,
                 }
             )
@@ -3093,16 +3151,18 @@ def _render_window4_chat_message(msg: dict, *, verified_stream: bool) -> None:
         status_safe=status_reply,
         conversational_safe=conversational,
         data_fallback=data_fallback,
+        data_reply=data_reply,
     )
     if (
         not vault_safe
         and not status_reply
         and not conversational
         and not data_fallback
+        and not data_reply
         and display == WINDOW4_DATA_ENGINE_IDLE_REPLY
         and body.strip() not in (WINDOW4_DATA_ENGINE_IDLE_REPLY, WINDOW4_ENGINE_IDLE_MSG)
     ):
-        return
+        display = body.strip() or display
     with st.chat_message("assistant", avatar="🔬"):
         st.markdown(
             '<div class="room2-speaker-expert">Forensic Expert</div>',
@@ -3901,6 +3961,9 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
         )
         st.session_state.room2_stale_threshold_error = None
         st.session_state.room2_vault_confirmation = confirm
+        st.session_state.room2_forensic_ticker = ticker
+        st.session_state.r2_good_ticker = ticker
+        st.session_state.matrix_window1_rejection_text = ""
         deploy_note = (
             f"✅ **Pattern saved** — **{ticker}** · **{macro_weather_layout}** · "
             f"**{execution_strategy}** · {structural_move:.2f}% structural move. "
@@ -3922,6 +3985,8 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
     st.session_state.matrix_satellites_ready = True
     st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
+    if ok and int(st.session_state.matrix_active_pattern_count or 0) == 0:
+        st.session_state.matrix_active_pattern_count = 1
     _sync_matrix_chat_to_cloud()
     _record_room2_successful_commit()
     _clear_room2_form_buffers()
@@ -4528,8 +4593,9 @@ def _validate_room2_deck() -> bool:
 def _ensure_room2_widget_defaults() -> None:
     """Bind missing Room 2 widget keys before render (safe after form-buffer pop)."""
     today = date.today()
+    forensic = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
     bindings = {
-        "r2_good_ticker": "MLGO",
+        "r2_good_ticker": forensic,
         "r2_good_start_date": today,
         "r2_good_end_date": today,
         "r2_good_start_time": "09:31 AM",
@@ -4608,9 +4674,9 @@ def _render_room2_commit_throttle_banner() -> bool:
 
 
 def _clear_room2_form_buffers() -> None:
-    """Reset winning-deck form keys after a validated deploy."""
+    """Reset winning-deck form keys after a validated deploy — keep forensic ticker pinned."""
+    forensic = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
     for key in (
-        "r2_good_ticker",
         "r2_good_start_date",
         "r2_good_start_time",
         "r2_good_end_date",
@@ -4618,6 +4684,10 @@ def _clear_room2_form_buffers() -> None:
         "r2_single_notes_field",
     ):
         st.session_state.pop(key, None)
+    if forensic:
+        st.session_state.r2_good_ticker = forensic
+    else:
+        st.session_state.pop("r2_good_ticker", None)
 
 
 def _handle_room2_deck_submit() -> None:

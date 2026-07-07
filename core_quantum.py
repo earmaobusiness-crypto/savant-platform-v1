@@ -5209,6 +5209,11 @@ def window4_instant_fault_text() -> str | None:
     if "[PROCESSOR FAULT]" in report or "PROCESSOR FAULT" in report:
         return report
     if rejection and ("PRE-STORAGE TRASH" in rejection or "no_volume_ignition" in rejection):
+        if "VAULT SYNC OK" in report or "INTERNET VAULT SYNC CONFIRMED" in report:
+            return None
+        terminal = str(st.session_state.get("quantum_terminal_output") or "")
+        if "VAULT SYNC OK" in terminal or "INTERNET VAULT SYNC CONFIRMED" in terminal:
+            return None
         return rejection
     if api_err and api_err.startswith("MASSIVE_HTTP_"):
         return api_err
