@@ -28,8 +28,6 @@ if "room2_chat_history" not in st.session_state:
     st.session_state.room2_chat_history = []
 elif not isinstance(st.session_state.room2_chat_history, list):
     st.session_state.room2_chat_history = list(st.session_state.room2_chat_history)
-if "room3_router_result" not in st.session_state:
-    st.session_state.room3_router_result = None
 if "market_weather_snapshot" not in st.session_state:
     st.session_state.market_weather_snapshot = {}
 if "quantum_terminal_output" not in st.session_state:
@@ -39,16 +37,9 @@ if "quantum_terminal_output" not in st.session_state:
 
 ROOM1_LABEL = "🏛️ Room 1: Real-Time Front Desk"
 ROOM2_LABEL = "🔮 Room 2: Forensic Pattern Lab"
-ROOM3_LABEL = "🎯 Room 3: Tactical Layout Router"
 ROOM1_SHORT = "🏛️ R1"
 ROOM2_SHORT = "🔮 R2"
-ROOM3_SHORT = "🎯 R3"
-ROOM_SHORT_MAP = {
-    ROOM1_SHORT: ROOM1_LABEL,
-    ROOM2_SHORT: ROOM2_LABEL,
-    ROOM3_SHORT: ROOM3_LABEL,
-}
-ROOM_LABELS = [ROOM1_LABEL, ROOM2_LABEL, ROOM3_LABEL]
+ROOM_SHORT_MAP = {ROOM1_SHORT: ROOM1_LABEL, ROOM2_SHORT: ROOM2_LABEL}
 
 SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
 SECTOR_ETFS = [
@@ -2275,8 +2266,18 @@ def _window4_is_vault_inventory_query(text: str) -> bool:
         "in vault",
         "in the cloud",
         "in cloud",
+        "know any",
+        "know about",
+        "you know",
+        "receive",
+        "have any",
+        "see any",
     )
     if any(probe in low for probe in probes):
+        return True
+    if "pattern" in low and any(
+        word in low for word in ("know", "have", "see", "show", "list", "saved", "logged", "deployed")
+    ):
         return True
     return _is_pattern_mining_query(text)
 
@@ -2293,6 +2294,18 @@ def _window4_build_vault_inventory_reply() -> str:
         return (
             "Cloud vault is offline — Supabase is not configured, so I cannot list saved patterns."
         )
+
+    if active == 0 and _window4_last_deploy_verified():
+        last_ticker = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
+        funnel = st.session_state.get("room2_regime_funnel") or {}
+        layout = str(funnel.get("master_layout_container") or "").strip()
+        strategy = str(funnel.get("execution_strategy") or "").strip()
+        if last_ticker:
+            return (
+                f"Your last deploy (**{last_ticker}**) shows **VAULT SYNC OK** in Window 1, "
+                f"but the cloud count reads 0 — Supabase may be offline or still syncing. "
+                f"Session layout: **{layout or '—'}** · strategy **{strategy or '—'}**."
+            )
 
     if active == 0:
         proc = st.session_state.get("room2_processor") or {}
@@ -2438,13 +2451,28 @@ def _window4_route_message(text: str) -> str:
 
 
 def _window4_operator_deploy_ticker() -> str:
-    """Ticker explicitly entered in the Room 2 Pattern Ticker input field."""
-    return str(st.session_state.get("r2_good_ticker") or "").strip().upper()
+    """Active deploy ticker — form field or last successful forensic deploy."""
+    form_ticker = str(st.session_state.get("r2_good_ticker") or "").strip().upper()
+    if form_ticker:
+        return form_ticker
+    return str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
+
+
+def _window4_last_deploy_verified() -> bool:
+    """True when the most recent Room 2 commit reached cloud vault sync."""
+    confirm = str(st.session_state.get("room2_vault_confirmation") or "")
+    flash = str(st.session_state.get("room2_vault_flash") or "")
+    report = str(st.session_state.get("room2_quantum_report") or "")
+    return (
+        "VAULT SYNC OK" in confirm
+        or "INTERNET VAULT SYNC CONFIRMED" in flash
+        or "INTERNET VAULT SYNC CONFIRMED" in report
+    )
 
 
 def _window4_has_verified_metric_stream() -> bool:
     """
-    True only when Massive-backed metric packets are active for the operator deploy ticker.
+    True when Massive-backed metric packets exist for the active/last deploy ticker.
     """
     ticker = _window4_operator_deploy_ticker()
     if not ticker:
@@ -2462,13 +2490,19 @@ def _window4_has_verified_metric_stream() -> bool:
     report = str(st.session_state.get("room2_quantum_report") or "").strip()
     if not report or "PRE-STORAGE TRASH" in report or MATRIX_ENGINE_IDLE_MARKER in report:
         return False
-    if not core_quantum.is_usable_data_stream(st.session_state.get("r2_polygon_1m_ram")):
+    forensic = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
+    if forensic and forensic != ticker:
         return False
+    has_ram = core_quantum.is_usable_data_stream(st.session_state.get("r2_polygon_1m_ram"))
     math_block = st.session_state.get("room2_last_math_block") or {}
     has_metrics = bool(
         math_block.get("structural_move_pct") is not None
         or math_block.get("match_probability")
     )
+    if _window4_last_deploy_verified() and has_metrics and (has_ram or core_quantum.window4_regime_gate_open()):
+        return True
+    if not has_ram:
+        return False
     return has_metrics or core_quantum.window4_regime_gate_open()
 
 
@@ -2530,6 +2564,16 @@ def _window4_build_verified_context_bits() -> list[str]:
         match_pct = int(st.session_state.get("window4_spatial_match_pct") or 0)
         if match_pct >= core_quantum.LAYOUT_SIGNATURE_MATCH_THRESHOLD:
             bits.append(f"[SPATIAL_MATCH]match={match_pct}%[/SPATIAL_MATCH]")
+    elif _window4_last_deploy_verified():
+        funnel = st.session_state.get("room2_regime_funnel") or {}
+        layout = str(funnel.get("master_layout_container") or "").strip()
+        strategy = str(funnel.get("execution_strategy") or "").strip()
+        if layout and layout not in WINDOW4_PLACEHOLDER_LAYOUT_IDS:
+            bits.append(f"[MACRO_LAYOUT]{layout}[/MACRO_LAYOUT]")
+        if strategy:
+            bits.append(f"[EXECUTION_STRATEGY]{strategy}[/EXECUTION_STRATEGY]")
+        active = int(st.session_state.get("matrix_active_pattern_count") or 0)
+        bits.append(f"[VAULT_INVENTORY]active_patterns={active}[/VAULT_INVENTORY]")
     text_matrix = str(st.session_state.get("room2_text_matrix_string") or "").strip()
     if text_matrix and MATRIX_ENGINE_IDLE_MARKER not in text_matrix:
         bits.append(f"[TEXT_MATRIX]{text_matrix}[/TEXT_MATRIX]")
@@ -2646,7 +2690,11 @@ def _window4_resolve_status_line() -> str:
     if proc.get("active"):
         return f"⚙️ Deploy processor running — step {int(proc.get('step') or 0)}..."
     if _window4_has_verified_metric_stream():
-        return "✅ Verified Massive stream active — forensic chat ready."
+        ticker = _window4_operator_deploy_ticker()
+        return f"✅ Last deploy active — {ticker} forensic packets on wire."
+    if _window4_last_deploy_verified():
+        ticker = _window4_operator_deploy_ticker()
+        return f"☁️ Vault synced — {ticker or 'pattern'} saved; inventory chat ready."
     custom = str(st.session_state.get("window4_status_line") or "").strip()
     if custom and custom != WINDOW4_ENGINE_IDLE_MSG:
         return custom
@@ -3654,6 +3702,18 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
         )
         st.session_state.room2_stale_threshold_error = None
         st.session_state.room2_vault_confirmation = confirm
+        deploy_note = (
+            f"✅ **Pattern saved** — **{ticker}** · **{macro_weather_layout}** · "
+            f"**{execution_strategy}** · {structural_move:.2f}% structural move. "
+            f"Cloud vault synced — ask me about patterns or layouts anytime."
+        )
+        st.session_state.room2_chat_history.append(
+            {
+                "speaker": "Forensic Expert",
+                "text": deploy_note,
+                "vault_safe": True,
+            }
+        )
     else:
         final_terminal = _assign_matrix_terminal_output(quantum_report, vault_line if ok else None)
 
@@ -4373,13 +4433,6 @@ def _fetch_active_layout_folders() -> list[str]:
     return []
 
 
-def _terminal_hub_index(label: str) -> int:
-    try:
-        return ROOM_LABELS.index(label)
-    except ValueError:
-        return 0
-
-
 def _render_market_weather_banner(*, force_refresh: bool = False) -> None:
     """Market-weather footprint — layout buckets represent how the tape feels."""
     weather = core_quantum.compute_market_weather_snapshot(force_refresh=force_refresh)
@@ -4394,105 +4447,6 @@ def _render_market_weather_banner(*, force_refresh: bool = False) -> None:
         f"SPY drift {spy:+.2f}% · VIX drift {vix:+.2f}% · "
         f"Layout buckets: {folder_preview}"
     )
-
-
-def render_room3_tactical_router() -> None:
-    """Room 3 — scan tape + ticker, route to weather-aligned layout, surface strategies."""
-    _hydrate_matrix_memory_from_cloud()
-    core_quantum.hydrate_layout_library_from_vault()
-    self_surgery.ensure_purgatory_hub_session()
-
-    st.markdown(
-        """
-        <div class="room2-hud">
-            <div class="room2-kicker">Live Layout Router</div>
-            <div class="room2-title">Tactical Weather → Layout → Strategy</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    _render_market_weather_banner(force_refresh=True)
-
-    col_scan, col_tf = st.columns([2, 1])
-    with col_scan:
-        scan_ticker = st.text_input(
-            "Filter ticker",
-            key="room3_scan_ticker",
-            placeholder="e.g. NVDA",
-        ).strip().upper()
-    with col_tf:
-        scan_tf = st.selectbox(
-            "Timeframe bin",
-            ["1-Minute", "5-Minute", "15-Minute"],
-            index=2,
-            key="room3_scan_timeframe",
-        )
-
-    if st.button("Scan market weather → layout → strategies", type="primary"):
-        with st.spinner("Routing tactical scan..."):
-            st.session_state.room3_router_result = core_quantum.route_room3_tactical_scan(
-                ticker=scan_ticker,
-                timeframe_resolution=scan_tf,
-            )
-        st.rerun()
-
-    result = st.session_state.get("room3_router_result") or {}
-    if not result:
-        st.info(
-            "Room 3 reads **how the market feels today** (weather), matches that to a "
-            "**layout bucket**, then surfaces **strategies inside that bucket**. "
-            "It can also borrow strategies from a nearby layout when the math is close enough."
-        )
-        return
-
-    if not result.get("ok"):
-        st.error(str(result.get("error") or "Tactical scan failed."))
-        return
-
-    weather = result.get("market_weather") or {}
-    st.markdown(
-        f"**Weather:** {result.get('weather_mood')} · **Primary layout:** "
-        f"**{result.get('primary_layout')}** · match **{result.get('layout_match_pct')}%**"
-    )
-    if result.get("live_execution_halted"):
-        st.warning("Live execution is halted — strategies shown for review only.")
-
-    recommended = result.get("recommended_strategy")
-    if recommended:
-        st.success(
-            f"Recommended: **{recommended.get('strategy_label')}** "
-            f"({recommended.get('timeframe_resolution')}) in "
-            f"**{recommended.get('layout_id')}**"
-        )
-    else:
-        st.warning(
-            "No qualified strategy in the vault for this weather/layout yet — "
-            "train patterns in Room 2 first."
-        )
-
-    primary = result.get("primary_strategies") or []
-    if primary:
-        st.markdown("**Strategies in primary layout**")
-        for row in primary[:8]:
-            blocked = " · 🛑 repair bay" if row.get("live_execution_blocked") else ""
-            st.markdown(
-                f"- **{row.get('strategy_label')}** · {row.get('timeframe_resolution')} · "
-                f"cosine {float(row.get('cosine_to_live') or 0.0):.2f}{blocked}"
-            )
-
-    flex = result.get("flex_strategies") or []
-    if flex:
-        st.markdown("**Flexible cross-layout borrow** (≥70% alignment)")
-        for row in flex[:6]:
-            st.markdown(
-                f"- **{row.get('strategy_label')}** from **{row.get('layout_id')}** · "
-                f"cosine {float(row.get('cosine_to_live') or 0.0):.2f}"
-            )
-
-    macro = weather.get("macro_correlations") or {}
-    if macro:
-        macro_line = " · ".join(f"{k} {v:+.2f}" for k, v in macro.items())
-        st.caption(f"Macro correlations: {macro_line}")
 
 
 def _render_dynamic_layout_registry() -> None:
@@ -4543,6 +4497,10 @@ def render_room2_forensic_lab():
         f"{trash_count} in {RESCUE_VAULT_RETENTION_DAYS}-day Trash Vault."
     )
     _render_market_weather_banner()
+    st.caption(
+        "🧬 **Matrix core (Room 2):** market weather → layout buckets → strategies inside each bucket. "
+        "Room 3 (future) will route live trades — not built yet."
+    )
     offload = cloud_offload.offload_status()
     lanes = []
     if offload.get("cloud_compute"):
@@ -4655,8 +4613,8 @@ def render_terminal_nav() -> str:
                 st.rerun()
             short_pick = st.radio(
                 "HUB:",
-                [ROOM1_SHORT, ROOM2_SHORT, ROOM3_SHORT],
-                index=_terminal_hub_index(st.session_state.terminal_hub),
+                [ROOM1_SHORT, ROOM2_SHORT],
+                index=0 if st.session_state.terminal_hub == ROOM1_LABEL else 1,
                 label_visibility="collapsed",
                 key="terminal_hub_collapsed",
             )
@@ -4672,8 +4630,8 @@ def render_terminal_nav() -> str:
             )
             room_pick = st.radio(
                 "TERMINAL HUB COMMANDS:",
-                ROOM_LABELS,
-                index=_terminal_hub_index(st.session_state.terminal_hub),
+                [ROOM1_LABEL, ROOM2_LABEL],
+                index=0 if st.session_state.terminal_hub == ROOM1_LABEL else 1,
                 key="terminal_hub_expanded",
             )
             st.session_state.terminal_hub = room_pick
@@ -4696,8 +4654,6 @@ terminal_hub = render_terminal_nav()
 
 if terminal_hub == ROOM1_LABEL:
     _render_room1_forensic_front_desk()
-elif terminal_hub == ROOM3_LABEL:
-    render_room3_tactical_router()
 else:
     render_room2_forensic_lab()
 

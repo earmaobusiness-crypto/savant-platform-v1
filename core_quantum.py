@@ -5422,8 +5422,9 @@ def route_room3_tactical_scan(
     timeframe_resolution: str = "15-Minute",
 ) -> dict:
     """
-    Room 3 router — read market weather, align layout bucket, surface in-bucket strategies,
-    and allow flexible cross-layout strategy borrow when cosine alignment is close enough.
+    RESERVED — future Room 3 live execution router (not exposed in UI yet).
+    Reads market weather, aligns layout bucket, surfaces in-bucket strategies,
+    and allows flexible cross-layout strategy borrow when cosine alignment is close enough.
     """
     import self_surgery
 
