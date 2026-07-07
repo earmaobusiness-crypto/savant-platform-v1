@@ -1846,6 +1846,35 @@ def _fetch_latest_active_pattern_row() -> dict | None:
     return None
 
 
+def _queue_room2_form_ticker(ticker: str) -> None:
+    """Defer Pattern Ticker widget writes — Streamlit forbids post-render session patches."""
+    st.session_state["_pending_r2_good_ticker"] = str(ticker or "").strip().upper()
+
+
+def _queue_room2_form_reset(*, ticker: str = "") -> None:
+    st.session_state["_pending_room2_form_reset"] = True
+    _queue_room2_form_ticker(ticker)
+
+
+def _apply_pending_room2_form_patches() -> None:
+    """Must run before any Room 2 widget with key r2_good_ticker is drawn."""
+    if st.session_state.pop("_pending_room2_form_reset", False):
+        for key in (
+            "r2_good_start_date",
+            "r2_good_start_time",
+            "r2_good_end_date",
+            "r2_good_end_time",
+            "r2_single_notes_field",
+        ):
+            st.session_state.pop(key, None)
+    if "_pending_r2_good_ticker" in st.session_state:
+        ticker = str(st.session_state.pop("_pending_r2_good_ticker") or "").strip().upper()
+        if ticker:
+            st.session_state.r2_good_ticker = ticker
+        else:
+            st.session_state.pop("r2_good_ticker", None)
+
+
 def _seed_room2_form_from_pattern_row(row: dict) -> None:
     """Restore latest cloud pattern coordinates into the Room 2 input deck."""
     cat = str(row.get("pattern_category", "")).upper()
@@ -1856,7 +1885,7 @@ def _seed_room2_form_from_pattern_row(row: dict) -> None:
         return
     prefix = "r2_good"
     notes_key = "r2_single_notes_field"
-    st.session_state[f"{prefix}_ticker"] = ticker
+    _queue_room2_form_ticker(ticker)
     if row.get("entry_time"):
         st.session_state[f"{prefix}_start_time"] = str(row["entry_time"])
     if row.get("exit_time"):
@@ -2012,7 +2041,7 @@ def _hydrate_matrix_memory_from_cloud() -> None:
             st.session_state.matrix_form_seeded = True
         forensic_ticker = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
         if forensic_ticker:
-            st.session_state.r2_good_ticker = forensic_ticker
+            _queue_room2_form_ticker(forensic_ticker)
         if match_pct is not None:
             pct = int(match_pct)
             core_quantum._sync_window4_regime_flags(
@@ -3962,7 +3991,6 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
         st.session_state.room2_stale_threshold_error = None
         st.session_state.room2_vault_confirmation = confirm
         st.session_state.room2_forensic_ticker = ticker
-        st.session_state.r2_good_ticker = ticker
         st.session_state.matrix_window1_rejection_text = ""
         deploy_note = (
             f"✅ **Pattern saved** — **{ticker}** · **{macro_weather_layout}** · "
@@ -4417,9 +4445,9 @@ def _advance_room2_processor() -> str:
         )
 
 
-def _render_matrix_window1_panel() -> None:
+def _render_matrix_window1_panel(*, processor_status: str) -> None:
     """Window 1 — hybrid chart stream, live heartbeat, or critical fault readout."""
-    status = _advance_room2_processor()
+    status = processor_status
 
     st.markdown(
         '<div class="room2-terminal-header">▸ WINDOW 1 — MATRIX REACTION PROCESSOR</div>',
@@ -4674,20 +4702,9 @@ def _render_room2_commit_throttle_banner() -> bool:
 
 
 def _clear_room2_form_buffers() -> None:
-    """Reset winning-deck form keys after a validated deploy — keep forensic ticker pinned."""
+    """Reset winning-deck form keys after deploy — deferred until pre-widget patch pass."""
     forensic = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
-    for key in (
-        "r2_good_start_date",
-        "r2_good_start_time",
-        "r2_good_end_date",
-        "r2_good_end_time",
-        "r2_single_notes_field",
-    ):
-        st.session_state.pop(key, None)
-    if forensic:
-        st.session_state.r2_good_ticker = forensic
-    else:
-        st.session_state.pop("r2_good_ticker", None)
+    _queue_room2_form_reset(ticker=forensic)
 
 
 def _handle_room2_deck_submit() -> None:
@@ -4786,7 +4803,9 @@ def _purge_room2_deck_inputs() -> None:
 
 
 def render_room2_forensic_lab():
+    _apply_pending_room2_form_patches()
     _hydrate_matrix_memory_from_cloud()
+    _apply_pending_room2_form_patches()
     _ensure_room2_widget_defaults()
 
     active_count = st.session_state.get("matrix_active_pattern_count", 0)
@@ -4866,6 +4885,9 @@ def render_room2_forensic_lab():
     commit_throttle_active = _room2_commit_throttle_active()
     _render_room2_commit_throttle_banner()
 
+    processor_status = _advance_room2_processor()
+    _apply_pending_room2_form_patches()
+
     col_left, col_right = st.columns([1.0, 1.0])
 
     with col_left:
@@ -4895,11 +4917,14 @@ def render_room2_forensic_lab():
                 _handle_room2_deck_submit()
 
     with col_right:
-        _render_matrix_window1_panel()
+        _render_matrix_window1_panel(processor_status=processor_status)
         _render_room2_proxy_telemetry_banners()
         _render_purgatory_shelf()
 
         _render_window4_conversation_wire()
+
+    if processor_status == "running":
+        st.rerun()
 
 
 def render_terminal_nav() -> str:
