@@ -5174,6 +5174,403 @@ def _sync_window4_regime_flags(
     st.session_state.window4_regime_valid = bool(valid) and int(match_pct) >= LAYOUT_SIGNATURE_MATCH_THRESHOLD
 
 
+def _pearson_correlation(series_a: list[float], series_b: list[float]) -> float:
+    n = min(len(series_a), len(series_b))
+    if n < 5:
+        return 0.0
+    x, y = series_a[-n:], series_b[-n:]
+    mx, my = statistics.mean(x), statistics.mean(y)
+    num = sum((xi - mx) * (yi - my) for xi, yi in zip(x, y))
+    den_x = sum((xi - mx) ** 2 for xi in x) ** 0.5
+    den_y = sum((yi - my) ** 2 for yi in y) ** 0.5
+    if den_x == 0 or den_y == 0:
+        return 0.0
+    return num / (den_x * den_y)
+
+
+MARKET_WEATHER_CACHE_SEC = 60
+LAYOUT_CROSS_MATCH_FLEX_PCT = 70
+MARKET_WEATHER_MACRO_SYMBOLS = (
+    ("SPY", "SPY"),
+    ("^VIX", "VIX"),
+    ("GC=F", "GOLD"),
+    ("CL=F", "OIL"),
+    ("^TNX", "RATES"),
+)
+
+
+def _fetch_yahoo_close_series(
+    symbol: str,
+    *,
+    range_: str = "5d",
+    interval: str = "5m",
+) -> list[float]:
+    """Lightweight macro tape — no extra pip dependency."""
+    sym = urllib.parse.quote(str(symbol).strip(), safe="")
+    if not sym:
+        return []
+    try:
+        resp = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+            params={"interval": interval, "range": range_},
+            headers={"User-Agent": "SavantApprentice/1.0"},
+            timeout=10,
+        )
+        if not resp.ok:
+            return []
+        result = (resp.json().get("chart") or {}).get("result") or []
+        if not result:
+            return []
+        closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close") or []
+        return [float(c) for c in closes if c is not None]
+    except Exception:
+        return []
+
+
+def fetch_symbol_velocity_series(symbol: str, periods: int = 20) -> list[float]:
+    """Bar-over-bar % velocity for macro cross-asset correlation."""
+    closes = _fetch_yahoo_close_series(symbol, range_="5d", interval="5m")
+    if len(closes) < 3:
+        return []
+    velocities: list[float] = []
+    for idx in range(1, len(closes)):
+        prev = closes[idx - 1]
+        if prev:
+            velocities.append((closes[idx] - prev) / prev * 100.0)
+    return velocities[-periods:]
+
+
+def fetch_distinct_layout_folders() -> list[str]:
+    """Active layout buckets minted in Supabase."""
+    headers = _supabase_rest_headers()
+    if not headers:
+        return []
+    table = _supabase_table_name()
+    try:
+        supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+        resp = requests.get(
+            f"{supabase_url}/rest/v1/{table}",
+            headers=headers,
+            params={
+                "select": "macro_weather_layout",
+                "macro_weather_layout": "not.is.null",
+                "vault_track": "eq.track_1_validated",
+                "or": "(state.is.null,state.eq.active,state.eq.incubation)",
+                "limit": "256",
+            },
+            timeout=12,
+        )
+        if not resp.ok or not isinstance(resp.json(), list):
+            return []
+        seen: set[str] = set()
+        folders: list[str] = []
+        for row in resp.json():
+            label = str(row.get("macro_weather_layout") or "").strip()
+            if label and label not in seen:
+                seen.add(label)
+                folders.append(label)
+        return sorted(folders)
+    except Exception:
+        return []
+
+
+def _weather_mood_from_macro(
+    *,
+    spy_velocity: float,
+    vix_velocity: float,
+    vol_sigma: float,
+) -> tuple[str, str]:
+    """Return (weather_mood label, vibe_profile token)."""
+    if vix_velocity >= 0.35 or vol_sigma >= 2.0:
+        return "Risk-Off Volatile", "expansion"
+    if vix_velocity <= -0.15 and spy_velocity >= 0.05:
+        return "Risk-On Expansion", "expansion"
+    if abs(spy_velocity) <= 0.04 and vol_sigma <= 0.35:
+        return "Tight Range", "compressed"
+    if spy_velocity >= 0.08:
+        return "Risk-On Drift", "neutral"
+    if spy_velocity <= -0.08:
+        return "Risk-Off Slide", "expansion"
+    return "Mixed Session", "neutral"
+
+
+def compute_market_weather_snapshot(*, ticker: str = "", force_refresh: bool = False) -> dict:
+    """
+    Market-weather footprint — how the broad tape feels before layout routing.
+    Layout buckets represent this weather; strategies nest inside each bucket.
+    """
+    now = time.time()
+    cached = st.session_state.get("market_weather_snapshot") or {}
+    if (
+        not force_refresh
+        and cached.get("fetched_at_epoch")
+        and (now - float(cached["fetched_at_epoch"])) < MARKET_WEATHER_CACHE_SEC
+    ):
+        return cached
+
+    spy_vel = fetch_symbol_velocity_series("SPY")
+    vix_vel = fetch_symbol_velocity_series("^VIX")
+    ticker_vel = fetch_symbol_velocity_series(str(ticker).strip().upper()) if ticker else []
+
+    spy_session = sum(spy_vel[-12:]) if spy_vel else 0.0
+    vix_session = sum(vix_vel[-12:]) if vix_vel else 0.0
+    vol_sigma = statistics.pstdev(spy_vel) if len(spy_vel) >= 3 else 0.0
+    weather_mood, vibe_profile = _weather_mood_from_macro(
+        spy_velocity=spy_session,
+        vix_velocity=vix_session,
+        vol_sigma=vol_sigma,
+    )
+
+    macro_correlations: dict[str, float] = {}
+    base = ticker_vel or spy_vel
+    if len(base) >= 5:
+        for sym, label in MARKET_WEATHER_MACRO_SYMBOLS:
+            macro_vel = fetch_symbol_velocity_series(sym)
+            if len(macro_vel) >= 5:
+                n = min(len(base), len(macro_vel))
+                macro_correlations[label] = round(
+                    _pearson_correlation(base[-n:], macro_vel[-n:]), 4
+                )
+
+    weather_vec = build_four_layer_feature_vector(
+        {
+            "session_velocity_pct": spy_session,
+            "peak_bar_velocity_pct": max(spy_vel) if spy_vel else 0.0,
+            "mean_bar_velocity_pct": statistics.mean(spy_vel) if spy_vel else 0.0,
+        },
+        {"volume": {"sigma": vol_sigma, "z_score": vol_sigma}},
+        vwap_bias_pct=spy_session,
+        sec_coordinate=max(-1.0, min(1.0, vix_session / 5.0)),
+    )
+    spatial = compute_spatial_layout_match(weather_vec)
+    folders = fetch_distinct_layout_folders()
+
+    snapshot = {
+        "fetched_at_epoch": now,
+        "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "weather_mood": weather_mood,
+        "vibe_profile": vibe_profile,
+        "spy_session_velocity_pct": round(spy_session, 4),
+        "vix_session_velocity_pct": round(vix_session, 4),
+        "vol_sigma": round(vol_sigma, 4),
+        "macro_correlations": macro_correlations,
+        "layout_folders": folders,
+        "spatial": spatial,
+        "nearest_weather_layout": str(spatial.get("nearest_layout_id") or "NEW_LAYOUT"),
+        "spatial_match_pct": int(spatial.get("spatial_match_pct") or 0),
+        "ticker": str(ticker or "").strip().upper(),
+    }
+    st.session_state.market_weather_snapshot = snapshot
+    st.session_state.cross_asset_correlation_context = (
+        "XASSET_CORR|"
+        + "|".join(f"{k}:{v:+.3f}" for k, v in macro_correlations.items())
+        if macro_correlations
+        else "XASSET_CORR:MACRO_ONLY"
+    )
+    return snapshot
+
+
+def mint_market_weather_layout_label(*, vibe_profile: str, weather_mood: str) -> str:
+    """Mint numbered layout bucket — weather footprint first, strategies follow."""
+    folders = fetch_distinct_layout_folders()
+    max_num = 0
+    for label in folders:
+        match = re.search(r"(\d+)", label)
+        if match:
+            max_num = max(max_num, int(match.group(1)))
+    vibe_token = {
+        "expansion": "Volatile",
+        "compressed": "Tight",
+        "neutral": "Neutral",
+    }.get(str(vibe_profile or "neutral"), "Neutral")
+    return f"Layout {max_num + 1} — {vibe_token} / {weather_mood}"
+
+
+def resolve_layout_with_market_weather(
+    layout_id: str,
+    *,
+    vibe_profile: str,
+    weather: dict | None = None,
+    spatial_match_pct: int = 0,
+) -> str:
+    """
+    Layout bucket = market weather footprint.
+    Match existing bucket when spatial math aligns; otherwise mint a new numbered layout.
+    """
+    layout = str(layout_id or "NEW_LAYOUT").strip()
+    if layout not in ("NEW_LAYOUT", "PURGATORY_PENDING", ""):
+        return layout
+
+    wx = weather or st.session_state.get("market_weather_snapshot") or {}
+    nearest = str(wx.get("nearest_weather_layout") or "NEW_LAYOUT")
+    wx_match = int(wx.get("spatial_match_pct") or spatial_match_pct or 0)
+
+    if nearest not in ("NEW_LAYOUT", "PURGATORY_PENDING", "") and wx_match >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
+        return nearest
+    if wx_match >= LAYOUT_SIGNATURE_MATCH_THRESHOLD and nearest not in ("NEW_LAYOUT", "PURGATORY_PENDING"):
+        return nearest
+
+    return mint_market_weather_layout_label(
+        vibe_profile=vibe_profile,
+        weather_mood=str(wx.get("weather_mood") or "Mixed Session"),
+    )
+
+
+def route_room3_tactical_scan(
+    *,
+    ticker: str,
+    timeframe_resolution: str = "15-Minute",
+) -> dict:
+    """
+    Room 3 router — read market weather, align layout bucket, surface in-bucket strategies,
+    and allow flexible cross-layout strategy borrow when cosine alignment is close enough.
+    """
+    import self_surgery
+
+    ticker_clean = str(ticker or "").strip().upper()
+    if not ticker_clean:
+        return {"ok": False, "error": "Ticker required for tactical scan."}
+
+    weather = compute_market_weather_snapshot(ticker=ticker_clean, force_refresh=True)
+    ticker_vel = fetch_symbol_velocity_series(ticker_clean)
+    if len(ticker_vel) < 5:
+        return {
+            "ok": False,
+            "error": f"Insufficient tape for {ticker_clean} — try a more liquid symbol.",
+            "market_weather": weather,
+        }
+
+    live_vec = build_four_layer_feature_vector(
+        {
+            "session_velocity_pct": sum(ticker_vel[-12:]),
+            "peak_bar_velocity_pct": max(ticker_vel),
+            "mean_bar_velocity_pct": statistics.mean(ticker_vel),
+        },
+        {"volume": {"sigma": statistics.pstdev(ticker_vel) if len(ticker_vel) >= 3 else 0.0}},
+        vwap_bias_pct=sum(ticker_vel[-6:]),
+        sec_coordinate=max(-1.0, min(1.0, float(weather.get("vix_session_velocity_pct") or 0.0) / 5.0)),
+    )
+    spatial = compute_spatial_layout_match(live_vec)
+    match_pct = int(spatial.get("spatial_match_pct") or 0)
+    primary_layout = resolve_layout_with_market_weather(
+        str(spatial.get("nearest_layout_id") or "NEW_LAYOUT"),
+        vibe_profile=str(weather.get("vibe_profile") or "neutral"),
+        weather=weather,
+        spatial_match_pct=match_pct,
+    )
+
+    ranked_layouts = cloud_offload.rpc_top_layout_alignments(live_vec, limit=6)
+    if not ranked_layouts:
+        ranked_layouts = [
+            {
+                "layout_id": primary_layout,
+                "cosine_similarity": float(spatial.get("cosine_similarity") or 0.0),
+                "spatial_match_pct": match_pct,
+            }
+        ]
+
+    primary_strategies = fetch_layout_shell_strategies(
+        primary_layout,
+        timeframe_resolution=timeframe_resolution,
+    )
+    strategy_rows: list[dict] = []
+    seen: set[str] = set()
+    for row in primary_strategies:
+        label = str(row.get("execution_strategy") or "").strip()
+        tf = str(row.get("timeframe_resolution") or timeframe_resolution).strip()
+        if not label:
+            continue
+        key = f"{label}|{tf}"
+        if key in seen:
+            continue
+        seen.add(key)
+        blocked = self_surgery.is_live_execution_blocked(
+            parent_layout_id=primary_layout,
+            strategy_label=label,
+            timeframe_resolution=tf,
+        )
+        stored_vec = _parse_master_signature_from_row(row)
+        cos = _cosine_similarity(live_vec, stored_vec) if stored_vec else 0.0
+        strategy_rows.append(
+            {
+                "strategy_label": label,
+                "timeframe_resolution": tf,
+                "layout_id": primary_layout,
+                "source": "primary_layout",
+                "cosine_to_live": round(cos, 4),
+                "structural_move_pct": float(row.get("structural_move_pct") or 0.0),
+                "live_execution_blocked": blocked,
+            }
+        )
+
+    flex_rows: list[dict] = []
+    for entry in ranked_layouts:
+        alt_layout = str(entry.get("layout_id") or entry.get("macro_weather_layout") or "").strip()
+        if not alt_layout or alt_layout == primary_layout:
+            continue
+        alt_pct = int(
+            round(float(entry.get("cosine_similarity") or 0.0) * 100)
+            if entry.get("cosine_similarity") is not None
+            else int(entry.get("spatial_match_pct") or 0)
+        )
+        if alt_pct < LAYOUT_CROSS_MATCH_FLEX_PCT:
+            continue
+        for row in fetch_layout_shell_strategies(alt_layout, timeframe_resolution=timeframe_resolution):
+            label = str(row.get("execution_strategy") or "").strip()
+            tf = str(row.get("timeframe_resolution") or timeframe_resolution).strip()
+            if not label:
+                continue
+            key = f"{label}|{tf}"
+            if key in seen:
+                continue
+            seen.add(key)
+            stored_vec = _parse_master_signature_from_row(row)
+            cos = _cosine_similarity(live_vec, stored_vec) if stored_vec else 0.0
+            if cos * 100 < LAYOUT_CROSS_MATCH_FLEX_PCT:
+                continue
+            blocked = self_surgery.is_live_execution_blocked(
+                parent_layout_id=alt_layout,
+                strategy_label=label,
+                timeframe_resolution=tf,
+            )
+            flex_rows.append(
+                {
+                    "strategy_label": label,
+                    "timeframe_resolution": tf,
+                    "layout_id": alt_layout,
+                    "source": "cross_layout_flex",
+                    "layout_match_pct": alt_pct,
+                    "cosine_to_live": round(cos, 4),
+                    "structural_move_pct": float(row.get("structural_move_pct") or 0.0),
+                    "live_execution_blocked": blocked,
+                }
+            )
+
+    flex_rows.sort(key=lambda row: float(row.get("cosine_to_live") or 0.0), reverse=True)
+    recommended = next(
+        (row for row in strategy_rows if not row.get("live_execution_blocked")),
+        next((row for row in flex_rows if not row.get("live_execution_blocked")), None),
+    )
+
+    result = {
+        "ok": True,
+        "ticker": ticker_clean,
+        "timeframe_resolution": timeframe_resolution,
+        "market_weather": weather,
+        "primary_layout": primary_layout,
+        "layout_match_pct": match_pct,
+        "weather_mood": weather.get("weather_mood"),
+        "vibe_profile": weather.get("vibe_profile"),
+        "primary_strategies": strategy_rows,
+        "flex_strategies": flex_rows[:6],
+        "recommended_strategy": recommended,
+        "ranked_layouts": ranked_layouts,
+        "live_execution_halted": bool(st.session_state.get("room2_live_execution_halted")),
+    }
+    st.session_state.room3_router_result = result
+    return result
+
+
 def fetch_layout_shell_strategies(
     layout_id: str,
     *,
@@ -5274,6 +5671,23 @@ def run_global_vibe_check(
     else:
         vibe = "neutral"
 
+    weather = compute_market_weather_snapshot(ticker=str(st.session_state.get("r2_good_ticker") or ""))
+    weather_vibe = str(weather.get("vibe_profile") or vibe)
+    if weather_vibe in ("expansion", "compressed", "neutral"):
+        vibe = weather_vibe
+
+    layout_id = resolve_layout_with_market_weather(
+        layout_id,
+        vibe_profile=vibe,
+        weather=weather,
+        spatial_match_pct=match_pct,
+    )
+    if match_pct < LAYOUT_SIGNATURE_MATCH_THRESHOLD and str(spatial.get("nearest_layout_id") or "") in (
+        "NEW_LAYOUT",
+        "PURGATORY_PENDING",
+    ):
+        layout_id = str(layout_id or "PURGATORY_PENDING")
+
     news_depth_days = int(REGIME_VIBE_NEWS_DEPTH_DAYS.get(timeframe_resolution, 7))
     scaled_lookback_hours = round(3.0 * scale, 2)
 
@@ -5281,6 +5695,8 @@ def run_global_vibe_check(
         "stage": "global_vibe_check",
         "master_layout_container": layout_id,
         "vibe_profile": vibe,
+        "market_weather": weather,
+        "weather_mood": weather.get("weather_mood"),
         "lookback_scale": scale,
         "scaled_lookback_hours": scaled_lookback_hours,
         "news_depth_days": news_depth_days,
@@ -5521,6 +5937,8 @@ def run_regime_switching_funnel(
         "action_mechanic": stage3["action_mechanic"],
         "feature_vector": stage1["feature_vector"],
         "spatial": stage1["spatial"],
+        "market_weather": stage1.get("market_weather") or {},
+        "weather_mood": stage1.get("weather_mood"),
         "trashed": bool(stage3.get("trashed")),
         "trash_message": stage3.get("trash_reason"),
         "window4_regime_valid": regime_valid,

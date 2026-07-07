@@ -28,6 +28,10 @@ if "room2_chat_history" not in st.session_state:
     st.session_state.room2_chat_history = []
 elif not isinstance(st.session_state.room2_chat_history, list):
     st.session_state.room2_chat_history = list(st.session_state.room2_chat_history)
+if "room3_router_result" not in st.session_state:
+    st.session_state.room3_router_result = None
+if "market_weather_snapshot" not in st.session_state:
+    st.session_state.market_weather_snapshot = {}
 if "quantum_terminal_output" not in st.session_state:
     st.session_state.quantum_terminal_output = (
         "📡 [DATALINK: ENGINE_IDLE] TERMINAL ENGINE ONLINE. WAITING FOR DEPLOY SIGNAL..."
@@ -35,9 +39,16 @@ if "quantum_terminal_output" not in st.session_state:
 
 ROOM1_LABEL = "🏛️ Room 1: Real-Time Front Desk"
 ROOM2_LABEL = "🔮 Room 2: Forensic Pattern Lab"
+ROOM3_LABEL = "🎯 Room 3: Tactical Layout Router"
 ROOM1_SHORT = "🏛️ R1"
 ROOM2_SHORT = "🔮 R2"
-ROOM_SHORT_MAP = {ROOM1_SHORT: ROOM1_LABEL, ROOM2_SHORT: ROOM2_LABEL}
+ROOM3_SHORT = "🎯 R3"
+ROOM_SHORT_MAP = {
+    ROOM1_SHORT: ROOM1_LABEL,
+    ROOM2_SHORT: ROOM2_LABEL,
+    ROOM3_SHORT: ROOM3_LABEL,
+}
+ROOM_LABELS = [ROOM1_LABEL, ROOM2_LABEL, ROOM3_LABEL]
 
 SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
 SECTOR_ETFS = [
@@ -1107,8 +1118,7 @@ def _pearson_correlation(series_a: list[float], series_b: list[float]) -> float:
 
 
 def _price_velocity_array(symbol: str, periods: int = 20) -> list[float]:
-    _ = (symbol, periods)
-    return []
+    return core_quantum.fetch_symbol_velocity_series(symbol, periods=periods)
 
 
 def _compute_cross_asset_correlation(ticker: str) -> str:
@@ -4363,6 +4373,128 @@ def _fetch_active_layout_folders() -> list[str]:
     return []
 
 
+def _terminal_hub_index(label: str) -> int:
+    try:
+        return ROOM_LABELS.index(label)
+    except ValueError:
+        return 0
+
+
+def _render_market_weather_banner(*, force_refresh: bool = False) -> None:
+    """Market-weather footprint — layout buckets represent how the tape feels."""
+    weather = core_quantum.compute_market_weather_snapshot(force_refresh=force_refresh)
+    mood = str(weather.get("weather_mood") or "Scanning")
+    vibe = str(weather.get("vibe_profile") or "neutral").title()
+    spy = float(weather.get("spy_session_velocity_pct") or 0.0)
+    vix = float(weather.get("vix_session_velocity_pct") or 0.0)
+    folders = weather.get("layout_folders") or []
+    folder_preview = ", ".join(folders[:4]) if folders else "none minted yet"
+    st.caption(
+        f"🌡️ **Market Weather:** {mood} · vibe **{vibe}** · "
+        f"SPY drift {spy:+.2f}% · VIX drift {vix:+.2f}% · "
+        f"Layout buckets: {folder_preview}"
+    )
+
+
+def render_room3_tactical_router() -> None:
+    """Room 3 — scan tape + ticker, route to weather-aligned layout, surface strategies."""
+    _hydrate_matrix_memory_from_cloud()
+    core_quantum.hydrate_layout_library_from_vault()
+    self_surgery.ensure_purgatory_hub_session()
+
+    st.markdown(
+        """
+        <div class="room2-hud">
+            <div class="room2-kicker">Live Layout Router</div>
+            <div class="room2-title">Tactical Weather → Layout → Strategy</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    _render_market_weather_banner(force_refresh=True)
+
+    col_scan, col_tf = st.columns([2, 1])
+    with col_scan:
+        scan_ticker = st.text_input(
+            "Filter ticker",
+            key="room3_scan_ticker",
+            placeholder="e.g. NVDA",
+        ).strip().upper()
+    with col_tf:
+        scan_tf = st.selectbox(
+            "Timeframe bin",
+            ["1-Minute", "5-Minute", "15-Minute"],
+            index=2,
+            key="room3_scan_timeframe",
+        )
+
+    if st.button("Scan market weather → layout → strategies", type="primary"):
+        with st.spinner("Routing tactical scan..."):
+            st.session_state.room3_router_result = core_quantum.route_room3_tactical_scan(
+                ticker=scan_ticker,
+                timeframe_resolution=scan_tf,
+            )
+        st.rerun()
+
+    result = st.session_state.get("room3_router_result") or {}
+    if not result:
+        st.info(
+            "Room 3 reads **how the market feels today** (weather), matches that to a "
+            "**layout bucket**, then surfaces **strategies inside that bucket**. "
+            "It can also borrow strategies from a nearby layout when the math is close enough."
+        )
+        return
+
+    if not result.get("ok"):
+        st.error(str(result.get("error") or "Tactical scan failed."))
+        return
+
+    weather = result.get("market_weather") or {}
+    st.markdown(
+        f"**Weather:** {result.get('weather_mood')} · **Primary layout:** "
+        f"**{result.get('primary_layout')}** · match **{result.get('layout_match_pct')}%**"
+    )
+    if result.get("live_execution_halted"):
+        st.warning("Live execution is halted — strategies shown for review only.")
+
+    recommended = result.get("recommended_strategy")
+    if recommended:
+        st.success(
+            f"Recommended: **{recommended.get('strategy_label')}** "
+            f"({recommended.get('timeframe_resolution')}) in "
+            f"**{recommended.get('layout_id')}**"
+        )
+    else:
+        st.warning(
+            "No qualified strategy in the vault for this weather/layout yet — "
+            "train patterns in Room 2 first."
+        )
+
+    primary = result.get("primary_strategies") or []
+    if primary:
+        st.markdown("**Strategies in primary layout**")
+        for row in primary[:8]:
+            blocked = " · 🛑 repair bay" if row.get("live_execution_blocked") else ""
+            st.markdown(
+                f"- **{row.get('strategy_label')}** · {row.get('timeframe_resolution')} · "
+                f"cosine {float(row.get('cosine_to_live') or 0.0):.2f}{blocked}"
+            )
+
+    flex = result.get("flex_strategies") or []
+    if flex:
+        st.markdown("**Flexible cross-layout borrow** (≥70% alignment)")
+        for row in flex[:6]:
+            st.markdown(
+                f"- **{row.get('strategy_label')}** from **{row.get('layout_id')}** · "
+                f"cosine {float(row.get('cosine_to_live') or 0.0):.2f}"
+            )
+
+    macro = weather.get("macro_correlations") or {}
+    if macro:
+        macro_line = " · ".join(f"{k} {v:+.2f}" for k, v in macro.items())
+        st.caption(f"Macro correlations: {macro_line}")
+
+
 def _render_dynamic_layout_registry() -> None:
     """Database-minted layout folders only — zero manual selectors on the glass."""
     folders = _fetch_active_layout_folders()
@@ -4410,6 +4542,7 @@ def render_room2_forensic_lab():
         f"☁️ **Winning-DNA Memory (cloud-synced):** {active_count} active layouts · "
         f"{trash_count} in {RESCUE_VAULT_RETENTION_DAYS}-day Trash Vault."
     )
+    _render_market_weather_banner()
     offload = cloud_offload.offload_status()
     lanes = []
     if offload.get("cloud_compute"):
@@ -4522,8 +4655,8 @@ def render_terminal_nav() -> str:
                 st.rerun()
             short_pick = st.radio(
                 "HUB:",
-                [ROOM1_SHORT, ROOM2_SHORT],
-                index=0 if st.session_state.terminal_hub == ROOM1_LABEL else 1,
+                [ROOM1_SHORT, ROOM2_SHORT, ROOM3_SHORT],
+                index=_terminal_hub_index(st.session_state.terminal_hub),
                 label_visibility="collapsed",
                 key="terminal_hub_collapsed",
             )
@@ -4539,8 +4672,8 @@ def render_terminal_nav() -> str:
             )
             room_pick = st.radio(
                 "TERMINAL HUB COMMANDS:",
-                [ROOM1_LABEL, ROOM2_LABEL],
-                index=0 if st.session_state.terminal_hub == ROOM1_LABEL else 1,
+                ROOM_LABELS,
+                index=_terminal_hub_index(st.session_state.terminal_hub),
                 key="terminal_hub_expanded",
             )
             st.session_state.terminal_hub = room_pick
@@ -4563,6 +4696,8 @@ terminal_hub = render_terminal_nav()
 
 if terminal_hub == ROOM1_LABEL:
     _render_room1_forensic_front_desk()
+elif terminal_hub == ROOM3_LABEL:
+    render_room3_tactical_router()
 else:
     render_room2_forensic_lab()
 
