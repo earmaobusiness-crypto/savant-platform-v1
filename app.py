@@ -1954,12 +1954,12 @@ def _hydrate_matrix_memory_from_cloud() -> None:
     self_surgery.purge_expired_repair_bay_profiles()
     _load_matrix_chat_from_cloud()
 
-    latest = _fetch_latest_active_pattern_row()
+    latest = _window4_latest_saved_pattern_row()
     if latest:
-        latest = _pattern_row_effective_fields(latest)
         report = str(latest.get("quantum_report") or "").strip()
         if report:
             st.session_state.room2_quantum_report = report
+            _window4_restore_vault_flags_from_report(report)
             if MATRIX_ENGINE_IDLE_MARKER in st.session_state.quantum_terminal_output:
                 st.session_state.quantum_terminal_output = report
         st.session_state.room2_forensic_ticker = str(latest.get("ticker") or "")
@@ -1967,6 +1967,22 @@ def _hydrate_matrix_memory_from_cloud() -> None:
         matrix_blob = str(latest.get("text_matrix_string") or "").strip()
         if matrix_blob:
             st.session_state.room2_text_matrix_string = matrix_blob
+        margin = latest.get("structural_move_pct") or latest.get("margin_pct")
+        match_pct = latest.get("layout_match_pct")
+        if margin is not None or match_pct is not None:
+            st.session_state.room2_last_math_block = {
+                **(st.session_state.get("room2_last_math_block") or {}),
+                **(
+                    {"structural_move_pct": margin}
+                    if margin is not None
+                    else {}
+                ),
+                **(
+                    {"match_probability": match_pct}
+                    if match_pct is not None
+                    else {}
+                ),
+            }
         if not st.session_state.get("matrix_form_seeded"):
             _seed_room2_form_from_pattern_row(latest)
             st.session_state.matrix_form_seeded = True
@@ -2323,6 +2339,87 @@ def _window4_is_vault_inventory_query(text: str) -> bool:
     return _is_pattern_mining_query(text)
 
 
+def _window4_should_use_vault_roster(text: str) -> bool:
+    """Any question about saved patterns/stocks/vault — never delegate to Groq."""
+    if _window4_is_vault_inventory_query(text):
+        return True
+    if _is_pattern_mining_query(text):
+        return True
+    low = str(text or "").lower().strip()
+    roster_phrases = (
+        "patterns found",
+        "pattern found",
+        "found any",
+        "found yet",
+        "anything saved",
+        "anything logged",
+        "anything deployed",
+        "what did you find",
+        "what have you found",
+        "what did we get",
+        "what's saved",
+        "whats saved",
+        "show me what",
+        "tell me what",
+        "vault state",
+        "vault status",
+        "my patterns",
+        "my stocks",
+        "my tickers",
+        "what do you have",
+        "what you have",
+        "do you have anything",
+        "waiting for",
+        "strategy node",
+        "no patterns",
+        "nothing saved",
+        "nothing logged",
+        "anything in",
+        "anything yet",
+    )
+    return any(phrase in low for phrase in roster_phrases)
+
+
+def _window4_latest_saved_pattern_row() -> dict | None:
+    """Latest non-chat-log pattern row from cloud — survives browser refresh."""
+    row = _fetch_latest_active_pattern_row()
+    if not row:
+        return None
+    ticker = str(row.get("ticker") or "").strip().upper()
+    if not ticker or ticker == MATRIX_CHAT_LOG_TICKER:
+        return None
+    return _pattern_row_effective_fields(row)
+
+
+def _window4_restore_vault_flags_from_report(report: str) -> None:
+    """Rehydrate deploy confirmation from a saved quantum terminal snapshot."""
+    text = str(report or "")
+    if not text:
+        return
+    for line in text.splitlines():
+        clean = line.strip()
+        if "VAULT SYNC OK" in clean or "INTERNET VAULT SYNC CONFIRMED" in clean:
+            st.session_state.room2_vault_confirmation = clean
+            if not str(st.session_state.get("room2_vault_flash") or "").strip():
+                st.session_state.room2_vault_flash = clean
+            return
+
+
+def _window4_append_vault_roster_reply() -> None:
+    st.session_state.room2_chat_history.append(
+        {
+            "speaker": "Forensic Expert",
+            "text": _format_window4_response(
+                _window4_build_vault_inventory_reply(),
+                vault_safe=True,
+            ),
+            "vault_safe": True,
+        }
+    )
+    st.session_state.window4_status_line = "☁️ Vault roster read — cloud archive + session deploy."
+    _sync_matrix_chat_to_cloud()
+
+
 def _window4_build_vault_inventory_reply() -> str:
     """Deterministic vault inventory — does not require a live deploy stream."""
     _ensure_supabase_session()
@@ -2334,6 +2431,40 @@ def _window4_build_vault_inventory_reply() -> str:
     if not st.session_state.get("supabase_ready"):
         return (
             "Cloud vault is offline — Supabase is not configured, so I cannot list saved patterns."
+        )
+
+    latest_row = _window4_latest_saved_pattern_row()
+    if active == 0 and latest_row:
+        ticker = str(latest_row.get("ticker") or "").strip().upper()
+        layout = str(
+            latest_row.get("macro_weather_layout")
+            or latest_row.get("execution_strategy")
+            or "—"
+        ).strip()
+        strategy = str(latest_row.get("execution_strategy") or "—").strip()
+        tf = str(latest_row.get("timeframe_resolution") or "").strip()
+        margin = latest_row.get("structural_move_pct") or latest_row.get("margin_pct")
+        margin_bit = f" · {float(margin):.2f}% move" if margin is not None else ""
+        ts = str(latest_row.get("timestamp") or "")[:10]
+        report = str(latest_row.get("quantum_report") or "")
+        synced = (
+            "VAULT SYNC OK" in report
+            or "INTERNET VAULT SYNC CONFIRMED" in report
+            or _window4_last_deploy_verified()
+        )
+        sync_line = (
+            "**VAULT SYNC OK** — saved in cloud archive."
+            if synced
+            else "Latest row found in cloud — verify Window 1 for full sync status."
+        )
+        return (
+            f"**1 active pattern** in cloud vault ({trash} in Trash Vault).\n\n"
+            f"{sync_line}\n\n"
+            f"- **Ticker:** **{ticker}**\n"
+            f"- **Layout:** **{layout}**\n"
+            f"- **Strategy:** **{strategy}**\n"
+            f"- **Timeframe:** **{tf or '—'}**{margin_bit}\n"
+            f"- **Date:** {ts or '—'}"
         )
 
     if active == 0 and _window4_last_deploy_verified():
@@ -2416,7 +2547,6 @@ _WINDOW4_TECHNICAL_DATA_MARKERS = (
     "pgvector",
     "cosine match",
     "structural move",
-    "vault state",
     "market layout",
     "real-time layout",
     "active layout",
@@ -2487,7 +2617,7 @@ def _window4_route_message(text: str) -> str:
     clean = str(text or "").strip()
     if _window4_vault_command_only(clean):
         return "vault"
-    if _window4_is_vault_inventory_query(clean):
+    if _window4_should_use_vault_roster(clean):
         return "inventory"
     if _window4_is_technical_data_query(clean):
         return "data"
@@ -2643,10 +2773,17 @@ def _build_room2_groq_messages(user_text: str) -> list[dict]:
 def _window4_conversational_context_tags() -> str:
     """Light session tags so conversational Groq does not contradict an active deploy."""
     bits: list[str] = []
+    _ensure_supabase_session()
+    if st.session_state.get("supabase_ready"):
+        st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
     if _window4_last_deploy_verified():
         ticker = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
         if ticker:
             bits.append(f"[SESSION_VERIFIED_DEPLOY ticker={ticker}]")
+    elif (latest := _window4_latest_saved_pattern_row()):
+        ticker = str(latest.get("ticker") or "").strip().upper()
+        if ticker:
+            bits.append(f"[CLOUD_LATEST_PATTERN ticker={ticker}]")
     if _window4_has_verified_metric_stream():
         ticker = _window4_operator_deploy_ticker()
         if ticker:
@@ -2654,6 +2791,8 @@ def _window4_conversational_context_tags() -> str:
     active = int(st.session_state.get("matrix_active_pattern_count") or 0)
     if active > 0:
         bits.append(f"[VAULT_INVENTORY active_patterns={active}]")
+    elif _window4_latest_saved_pattern_row():
+        bits.append("[VAULT_INVENTORY active_patterns=1]")
     return "\n".join(bits)
 
 
@@ -2772,6 +2911,10 @@ def _window4_execute_groq_pending(pending: dict) -> None:
     track = str(pending.get("track") or "conversational")
     if not user_text:
         return
+    if _window4_should_use_vault_roster(user_text):
+        _window4_append_vault_roster_reply()
+        st.session_state.window4_groq_pending = None
+        return
     try:
         if track == "conversational":
             ai_text = run_groq(_build_window4_conversational_messages(user_text))
@@ -2862,18 +3005,7 @@ def _window4_handle_chat_submit(user_text: str) -> None:
     route = _window4_route_message(clean)
 
     if route == "inventory":
-        st.session_state.room2_chat_history.append(
-            {
-                "speaker": "Forensic Expert",
-                "text": _format_window4_response(
-                    _window4_build_vault_inventory_reply(),
-                    vault_safe=True,
-                ),
-                "vault_safe": True,
-            }
-        )
-        st.session_state.window4_status_line = "☁️ Vault inventory read from cloud archive."
-        _sync_matrix_chat_to_cloud()
+        _window4_append_vault_roster_reply()
         return
 
     if route == "data":
@@ -2911,21 +3043,6 @@ def _window4_handle_chat_submit(user_text: str) -> None:
         _window4_start_pending_groq(clean, track="data")
         return
 
-    if _window4_is_vault_inventory_query(clean):
-        st.session_state.room2_chat_history.append(
-            {
-                "speaker": "Forensic Expert",
-                "text": _format_window4_response(
-                    _window4_build_vault_inventory_reply(),
-                    vault_safe=True,
-                ),
-                "vault_safe": True,
-            }
-        )
-        st.session_state.window4_status_line = "☁️ Vault inventory read from cloud archive."
-        _sync_matrix_chat_to_cloud()
-        return
-
     _window4_start_pending_groq(clean, track="conversational")
 
 
@@ -2960,12 +3077,14 @@ def _render_window4_chat_message(msg: dict, *, verified_stream: bool) -> None:
             unsafe_allow_html=True,
         )
         return
+    data_reply = bool(msg.get("data_reply"))
     if (
         not verified_stream
         and not vault_safe
         and not status_reply
         and not conversational
         and not data_fallback
+        and not data_reply
     ):
         return
     display = _format_window4_response(
