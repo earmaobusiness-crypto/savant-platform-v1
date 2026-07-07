@@ -146,6 +146,14 @@ LOOKBACK_FETCH_PADDING_DAYS = {
     "5-Minute": 1,
     "15-Minute": 2,
 }
+# Session quality — reject thin/gappy deploy days before vault mint.
+SESSION_MIN_BAR_DENSITY = 0.45
+SESSION_MIN_AVG_VOLUME_PER_BAR = 2_500
+SESSION_SECTOR_ETF_SYMBOLS = ("XLK", "XLF", "XLE", "XLV", "XLU", "SPY")
+# Strategy trust — promote only after repeatable wins (not one-off luck).
+STRATEGY_TRUST_MIN_SAMPLES = 3
+STRATEGY_TRUST_MIN_UNIQUE_TICKERS = 2
+STRATEGY_TRUST_MIN_UNIQUE_SESSIONS = 2
 NOISE_DIM_EPSILON = 0.18
 SEMANTIC_EMBED_DIMS = 32
 DRAGNET_TIMEFRAMES = frozenset({"5-Minute", "15-Minute"})
@@ -5006,6 +5014,8 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
         "master_signature_json",
         "metric_envelopes_json",
         "semantic_catalyst_json",
+        "day_context_json",
+        "strategy_trust_tier",
     )
 
     def _post(body: dict):
@@ -5414,6 +5424,279 @@ def resolve_layout_with_market_weather(
         vibe_profile=vibe_profile,
         weather_mood=str(wx.get("weather_mood") or "Mixed Session"),
     )
+
+
+def _expected_bars_in_operator_window(
+    start_dt: datetime.datetime | None,
+    end_dt: datetime.datetime | None,
+    timeframe_resolution: str,
+) -> int:
+    if start_dt is None or end_dt is None or end_dt <= start_dt:
+        return 0
+    minutes = max(1, int((end_dt - start_dt).total_seconds() // 60))
+    if timeframe_resolution == "1-Minute":
+        return max(1, minutes)
+    if timeframe_resolution == "5-Minute":
+        return max(1, minutes // 5)
+    if timeframe_resolution == "15-Minute":
+        return max(1, minutes // 15)
+    return max(1, minutes // 15)
+
+
+def _operator_window_frame(
+    data_stream,
+    *,
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+):
+    frame = _ensure_dataframe(data_stream)
+    if frame is None:
+        return None
+    start_dt = _parse_session_datetime(start_date, start_time)
+    end_dt = _parse_session_datetime(end_date, end_time)
+    if start_dt is None or end_dt is None:
+        return frame
+    try:
+        window = frame[(frame.index >= start_dt) & (frame.index <= end_dt)]
+        return window if not window.empty else None
+    except Exception:
+        return frame
+
+
+def evaluate_session_data_quality(
+    data_stream,
+    *,
+    ticker: str,
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+    timeframe_resolution: str,
+) -> dict:
+    """
+    Liquidity / density gate — only trustworthy session days enter the pattern library.
+    """
+    window = _operator_window_frame(
+        data_stream,
+        start_date=start_date,
+        start_time=start_time,
+        end_date=end_date,
+        end_time=end_time,
+    )
+    start_dt = _parse_session_datetime(start_date, start_time)
+    end_dt = _parse_session_datetime(end_date, end_time)
+    expected = _expected_bars_in_operator_window(start_dt, end_dt, timeframe_resolution)
+    actual = len(window) if window is not None and not window.empty else 0
+    density = round(actual / expected, 4) if expected else 0.0
+
+    avg_volume = 0.0
+    gap_pct = 0.0
+    if window is not None and not window.empty:
+        if "Volume" in window.columns:
+            vols = window["Volume"].astype(float).fillna(0.0)
+            avg_volume = float(vols.mean() or 0.0)
+        if "Open" in window.columns and "Close" in window.columns and len(window) >= 2:
+            opens = window["Open"].astype(float)
+            closes = window["Close"].astype(float)
+            prev_close = float(closes.iloc[0])
+            first_open = float(opens.iloc[0])
+            if prev_close > 0:
+                gap_pct = round(abs((first_open - prev_close) / prev_close * 100.0), 4)
+
+    density_ok = density >= SESSION_MIN_BAR_DENSITY
+    volume_ok = avg_volume >= SESSION_MIN_AVG_VOLUME_PER_BAR
+    passed = density_ok and volume_ok and actual >= 3
+    reasons: list[str] = []
+    if not density_ok:
+        reasons.append(f"low_bar_density|{density:.2f}<{SESSION_MIN_BAR_DENSITY}")
+    if not volume_ok:
+        reasons.append(f"thin_volume|avg={int(avg_volume)}")
+    if actual < 3:
+        reasons.append("operator_window_too_thin")
+
+    return {
+        "passed": passed,
+        "trashed": not passed,
+        "ticker": str(ticker or "").strip().upper(),
+        "actual_bars": actual,
+        "expected_bars": expected,
+        "bar_density": density,
+        "avg_volume_per_bar": round(avg_volume, 2),
+        "session_gap_pct": gap_pct,
+        "rejection_reasons": reasons,
+        "trash_reason": "|".join(reasons) if reasons else None,
+    }
+
+
+def build_day_context_envelope(
+    *,
+    ticker: str,
+    data_stream,
+    start_date,
+    start_time: str,
+    end_date,
+    end_time: str,
+    timeframe_resolution: str,
+) -> dict:
+    """
+    Full-day fingerprint context — weather, VIX, sector rhyme, gap, session quality.
+    Stored on every deploy so patterns compound with what that day felt like.
+    """
+    ticker_clean = str(ticker or "").strip().upper()
+    weather = compute_market_weather_snapshot(ticker=ticker_clean)
+    session_quality = evaluate_session_data_quality(
+        data_stream,
+        ticker=ticker_clean,
+        start_date=start_date,
+        start_time=start_time,
+        end_date=end_date,
+        end_time=end_time,
+        timeframe_resolution=timeframe_resolution,
+    )
+    ticker_vel = fetch_symbol_velocity_series(ticker_clean)
+    sector_rhymes: dict[str, float] = {}
+    if len(ticker_vel) >= 5:
+        for sym in SESSION_SECTOR_ETF_SYMBOLS:
+            macro_vel = fetch_symbol_velocity_series(sym)
+            if len(macro_vel) >= 5:
+                n = min(len(ticker_vel), len(macro_vel))
+                sector_rhymes[sym] = round(_pearson_correlation(ticker_vel[-n:], macro_vel[-n:]), 4)
+
+    vix_vel = fetch_symbol_velocity_series("^VIX")
+    vix_session = round(sum(vix_vel[-12:]), 4) if vix_vel else 0.0
+
+    envelope = {
+        "ticker": ticker_clean,
+        "session_date": _session_date_value(start_date),
+        "timeframe_resolution": timeframe_resolution,
+        "weather_mood": weather.get("weather_mood"),
+        "vibe_profile": weather.get("vibe_profile"),
+        "spy_session_velocity_pct": weather.get("spy_session_velocity_pct"),
+        "vix_session_velocity_pct": vix_session,
+        "macro_correlations": weather.get("macro_correlations") or {},
+        "sector_rhymes": sector_rhymes,
+        "session_gap_pct": session_quality.get("session_gap_pct", 0.0),
+        "bar_density": session_quality.get("bar_density", 0.0),
+        "avg_volume_per_bar": session_quality.get("avg_volume_per_bar", 0.0),
+        "session_quality_passed": bool(session_quality.get("passed")),
+        "captured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    st.session_state.room2_day_context = envelope
+    return envelope
+
+
+def _fetch_strategy_vault_samples(
+    *,
+    macro_weather_layout: str,
+    execution_strategy: str,
+    timeframe_resolution: str,
+) -> list[dict]:
+    headers = _supabase_rest_headers()
+    if not headers:
+        return []
+    layout = str(macro_weather_layout or "").strip()
+    strategy = str(execution_strategy or "").strip()
+    if not layout or not strategy:
+        return []
+    table = _supabase_table_name()
+    try:
+        supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+        resp = requests.get(
+            f"{supabase_url}/rest/v1/{table}",
+            headers=headers,
+            params={
+                "select": "ticker,timestamp,structural_move_pct,state",
+                "macro_weather_layout": f"eq.{layout}",
+                "execution_strategy": f"eq.{strategy}",
+                "timeframe_resolution": f"eq.{timeframe_resolution}",
+                "or": "(state.is.null,state.eq.active,state.eq.incubation)",
+                "order": "timestamp.desc",
+                "limit": "64",
+            },
+            timeout=15,
+        )
+        if resp.ok and isinstance(resp.json(), list):
+            return resp.json()
+    except Exception:
+        pass
+    return []
+
+
+def evaluate_strategy_trust_promotion(
+    *,
+    macro_weather_layout: str,
+    execution_strategy: str,
+    timeframe_resolution: str,
+    ticker: str,
+    session_date,
+    margin_pct: float,
+) -> dict:
+    """
+    Promote strategy to TRUSTED only after repeatable wins across names/sessions.
+    First saves stay incubation candidates until the library proves repetition.
+    """
+    floor_pct = timeframe_margin_floor(timeframe_resolution)
+    current_win = float(margin_pct or 0.0) >= floor_pct
+    rows = _fetch_strategy_vault_samples(
+        macro_weather_layout=macro_weather_layout,
+        execution_strategy=execution_strategy,
+        timeframe_resolution=timeframe_resolution,
+    )
+    tickers: set[str] = set()
+    sessions: set[str] = set()
+    wins = 0
+    for row in rows:
+        move = float(row.get("structural_move_pct") or 0.0)
+        if move < floor_pct * 0.85:
+            continue
+        wins += 1
+        tick = str(row.get("ticker") or "").strip().upper()
+        if tick:
+            tickers.add(tick)
+        ts = str(row.get("timestamp") or "")[:10]
+        if ts:
+            sessions.add(ts)
+
+    ticker_clean = str(ticker or "").strip().upper()
+    session_key = _session_date_value(session_date) or ""
+    projected_wins = wins + (1 if current_win else 0)
+    projected_tickers = set(tickers)
+    if current_win and ticker_clean:
+        projected_tickers.add(ticker_clean)
+    projected_sessions = set(sessions)
+    if session_key:
+        projected_sessions.add(session_key)
+
+    trusted = (
+        projected_wins >= STRATEGY_TRUST_MIN_SAMPLES
+        and len(projected_tickers) >= STRATEGY_TRUST_MIN_UNIQUE_TICKERS
+        and len(projected_sessions) >= STRATEGY_TRUST_MIN_UNIQUE_SESSIONS
+    )
+    tier = "trusted" if trusted else "candidate"
+    remaining = max(0, STRATEGY_TRUST_MIN_SAMPLES - projected_wins)
+    message = (
+        f"Strategy **{execution_strategy}** promoted to **TRUSTED** "
+        f"({projected_wins} wins · {len(projected_tickers)} tickers · "
+        f"{len(projected_sessions)} sessions)."
+        if trusted
+        else (
+            f"Strategy **{execution_strategy}** saved as **CANDIDATE** — "
+            f"{remaining} more verified win(s) needed across "
+            f"{STRATEGY_TRUST_MIN_UNIQUE_TICKERS}+ tickers / "
+            f"{STRATEGY_TRUST_MIN_UNIQUE_SESSIONS}+ sessions for TRUSTED status."
+        )
+    )
+    return {
+        "trust_tier": tier,
+        "trusted": trusted,
+        "projected_wins": projected_wins,
+        "unique_tickers": len(projected_tickers),
+        "unique_sessions": len(projected_sessions),
+        "message": message,
+        "vault_state": "active" if trusted else VAULT_STATE_INCUBATION,
+    }
 
 
 def route_room3_tactical_scan(
@@ -6212,12 +6495,22 @@ def build_vault_payload(
     master_signature_json: str = "",
     metric_envelopes_json: str = "",
     semantic_catalyst_json: str = "",
+    day_context_json: str = "",
+    strategy_trust_tier: str = "candidate",
 ) -> dict:
     """Package Room 2 deck parameters for Internet Vault streaming."""
     notes = operator_notes.strip()
     matrix_blob = str(text_matrix_string or st.session_state.get("room2_text_matrix_string", "")).strip()
     if matrix_blob and "TEXT_MATRIX|" not in notes:
         notes = f"{notes} | {matrix_blob}".strip(" |") if notes else matrix_blob
+
+    day_blob = day_context_json or json.dumps(
+        st.session_state.get("room2_day_context") or {}, default=str
+    )
+    if day_blob and day_blob != "{}" and "DAY_CONTEXT:" not in notes:
+        notes = f"{notes} | DAY_CONTEXT:{day_blob}".strip(" |") if notes else f"DAY_CONTEXT:{day_blob}"
+    if strategy_trust_tier and "TRUST_TIER:" not in notes:
+        notes = f"{notes} | TRUST_TIER:{strategy_trust_tier}".strip(" |")
 
     audit = st.session_state.get("room2_deep_research_audit") or {}
     dragnet_blob = forensic_dragnet_blob or audit.get("forensic_dragnet_blob", "")
@@ -6263,6 +6556,9 @@ def build_vault_payload(
         "master_signature_json": master_sig,
         "metric_envelopes_json": env_json,
         "semantic_catalyst_json": sem_json,
+        "strategy_trust_tier": str(strategy_trust_tier or "candidate"),
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+    if day_blob and day_blob != "{}":
+        body["day_context_json"] = day_blob
     return body

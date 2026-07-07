@@ -3705,7 +3705,7 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
         deploy_note = (
             f"✅ **Pattern saved** — **{ticker}** · **{macro_weather_layout}** · "
             f"**{execution_strategy}** · {structural_move:.2f}% structural move. "
-            f"Cloud vault synced — ask me about patterns or layouts anytime."
+            f"{str((st.session_state.get('room2_strategy_trust') or {}).get('message') or 'Cloud vault synced.')}"
         )
         st.session_state.room2_chat_history.append(
             {
@@ -3932,8 +3932,29 @@ def _advance_room2_processor() -> str:
                         "Pattern rejected before vault mint."
                     )
                 )
+            session_quality = core_quantum.evaluate_session_data_quality(
+                data_stream,
+                ticker=ticker,
+                start_date=start_date,
+                start_time=start_time,
+                end_date=end_date,
+                end_time=end_time,
+                timeframe_resolution=timeframe_resolution,
+            )
+            st.session_state.room2_session_quality = session_quality
+            if not session_quality.get("passed"):
+                reasons = ", ".join(session_quality.get("rejection_reasons") or ["session_thin"])
+                return _halt_room2_processor_with_charts(
+                    fault_text=(
+                        f"🗑️ PRE-STORAGE TRASH — Session quality failed ({reasons}). "
+                        f"Density {session_quality.get('bar_density', 0):.0%} · "
+                        f"avg vol/bar {int(session_quality.get('avg_volume_per_bar') or 0):,}. "
+                        "Use a liquid name, fuller session window, or later start time."
+                    )
+                )
             proc["quality"] = quality
             proc["chart_coupling"] = chart_coupling
+            proc["session_quality"] = session_quality
             proc["step"] = 3
 
         elif step == 3:
@@ -4053,6 +4074,34 @@ def _advance_room2_processor() -> str:
                 ticker=ticker,
                 pattern_category=pattern_category,
             )
+            day_context = core_quantum.build_day_context_envelope(
+                ticker=ticker,
+                data_stream=data_stream,
+                start_date=start_date,
+                start_time=start_time,
+                end_date=end_date,
+                end_time=end_time,
+                timeframe_resolution=timeframe_resolution,
+            )
+            day_context_json = json.dumps(day_context, default=str)
+            net_margin = float(
+                quality.get("net_margin_pct") or quality.get("structural_move_pct") or structural_move
+            )
+            trust = core_quantum.evaluate_strategy_trust_promotion(
+                macro_weather_layout=macro_weather_layout,
+                execution_strategy=execution_strategy,
+                timeframe_resolution=timeframe_resolution,
+                ticker=ticker,
+                session_date=start_date,
+                margin_pct=net_margin,
+            )
+            st.session_state.room2_strategy_trust = trust
+            if not trust.get("trusted"):
+                vault_state = VAULT_STATE_INCUBATION
+                incubation_msg = str(trust.get("message") or incubation_msg)
+            elif trust.get("trusted") and vault_state == VAULT_STATE_INCUBATION:
+                vault_state = "active"
+                incubation_msg = str(trust.get("message") or incubation_msg)
             payload = core_quantum.build_vault_payload(
                 ticker=ticker,
                 pattern_category=pattern_category,
@@ -4079,6 +4128,8 @@ def _advance_room2_processor() -> str:
                 master_signature_json=master_signature_json,
                 metric_envelopes_json=metric_envelopes_json,
                 semantic_catalyst_json=semantic_catalyst_json,
+                day_context_json=day_context_json,
+                strategy_trust_tier=str(trust.get("trust_tier") or "candidate"),
             )
             proc["payload"] = payload
             proc["quantum_report"] = quantum_report
@@ -4088,6 +4139,8 @@ def _advance_room2_processor() -> str:
             proc["match_score"] = match_score
             proc["vault_state"] = vault_state
             proc["incubation_msg"] = incubation_msg
+            proc["strategy_trust"] = trust
+            proc["day_context"] = day_context
             proc["in_purgatory"] = in_purgatory
             proc["purgatory_message"] = purgatory_message
             proc["quality"] = quality
@@ -4499,7 +4552,10 @@ def render_room2_forensic_lab():
     _render_market_weather_banner()
     st.caption(
         "🧬 **Matrix core (Room 2):** market weather → layout buckets → strategies inside each bucket. "
-        "Room 3 (future) will route live trades — not built yet."
+        "Saves include full-day context (VIX, sectors, gap). Strategies start as **CANDIDATE** until "
+        f"{core_quantum.STRATEGY_TRUST_MIN_SAMPLES}+ repeatable wins across "
+        f"{core_quantum.STRATEGY_TRUST_MIN_UNIQUE_TICKERS}+ tickers promote to **TRUSTED**. "
+        "Room 3 (future) = live execution."
     )
     offload = cloud_offload.offload_status()
     lanes = []
