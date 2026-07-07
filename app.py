@@ -3870,15 +3870,11 @@ def _advance_room2_processor() -> str:
                 timeframe_resolution=timeframe_resolution,
             )
             if not lane_check.get("passed"):
-                required = lane_check.get("required_bars")
-                actual = lane_check.get("actual_bars")
                 return _halt_room2_processor_with_charts(
                     fault_text=(
-                        f"🗑️ PRE-STORAGE TRASH — Lookback lane assertion failed: need "
-                        f"{required} bars before Start Time, got {actual} on {timeframe_resolution} "
-                        f"({required} bars of history before your entry). Pattern was not saved. "
-                        f"Try a later Start Time (e.g. 11:00 AM–2:00 PM ET) or regular session "
-                        f"hours 9:31 AM–4:00 PM on a prior trading day."
+                        f"🗑️ PRE-STORAGE TRASH — No usable chart data before Start Time "
+                        f"(need at least {lane_check.get('min_bars')} bars, got "
+                        f"{lane_check.get('actual_bars')} on {timeframe_resolution})."
                     )
                 )
             proc["lane_check"] = lane_check
@@ -3942,16 +3938,6 @@ def _advance_room2_processor() -> str:
                 timeframe_resolution=timeframe_resolution,
             )
             st.session_state.room2_session_quality = session_quality
-            if not session_quality.get("passed"):
-                reasons = ", ".join(session_quality.get("rejection_reasons") or ["session_thin"])
-                return _halt_room2_processor_with_charts(
-                    fault_text=(
-                        f"🗑️ PRE-STORAGE TRASH — Session quality failed ({reasons}). "
-                        f"Density {session_quality.get('bar_density', 0):.0%} · "
-                        f"avg vol/bar {int(session_quality.get('avg_volume_per_bar') or 0):,}. "
-                        "Use a liquid name, fuller session window, or later start time."
-                    )
-                )
             proc["quality"] = quality
             proc["chart_coupling"] = chart_coupling
             proc["session_quality"] = session_quality
@@ -4552,7 +4538,9 @@ def render_room2_forensic_lab():
     _render_market_weather_banner()
     st.caption(
         "🧬 **Matrix core (Room 2):** market weather → layout buckets → strategies inside each bucket. "
-        "Saves include full-day context (VIX, sectors, gap). Strategies start as **CANDIDATE** until "
+        "Saves include full-day context (VIX, sectors, gap). Thin low-cap tapes use "
+        "**adaptive lookback** — all valid bars up to the data edge, not a full cancel. "
+        "Strategies start as **CANDIDATE** until "
         f"{core_quantum.STRATEGY_TRUST_MIN_SAMPLES}+ repeatable wins across "
         f"{core_quantum.STRATEGY_TRUST_MIN_UNIQUE_TICKERS}+ tickers promote to **TRUSTED**. "
         "Room 3 (future) = live execution."

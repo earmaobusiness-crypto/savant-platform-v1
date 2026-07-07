@@ -49,6 +49,12 @@ LOOKBACK_LANE_ASSERTIONS = {
     "5-Minute": FIVE_MINUTE_DRAGNET_BARS,
     "15-Minute": FIFTEEN_MINUTE_DRAGNET_BARS,
 }
+# Adaptive lookback — use all valid bars up to ideal depth; only trash if near-empty.
+LOOKBACK_ADAPTIVE_MIN_BARS = {
+    "1-Minute": 2,
+    "5-Minute": 4,
+    "15-Minute": 3,
+}
 FIVE_MINUTE_SYNTHETIC_SLIPPAGE_PCT = 1.0
 LIQUIDITY_IGNITION_MIN_SHARES_PER_MINUTE = 10_000
 REJECTED_DEAD_ZONE = "REJECTED_DEAD_ZONE"
@@ -1813,6 +1819,16 @@ def apply_temporal_fence_and_lookback(
     if start_dt is not None and lookback_start is not None and start_dt < lookback_start:
         lookback_start = start_dt
 
+    adaptive_edge = False
+    try:
+        if not frame.empty:
+            first_ts = frame.index.min()
+            if lookback_start is not None and first_ts is not None and lookback_start < first_ts:
+                lookback_start = first_ts
+                adaptive_edge = True
+    except Exception:
+        pass
+
     try:
         if lookback_start is not None:
             fenced = frame[(frame.index <= end_dt) & (frame.index >= lookback_start)]
@@ -1825,7 +1841,8 @@ def apply_temporal_fence_and_lookback(
 
     meta = {
         "temporal_fence_end": end_dt.isoformat(),
-        "lookback_start": lookback_start.isoformat() if lookback_start else None,
+        "lookback_start": lookback_start.isoformat() if lookback_start is not None and hasattr(lookback_start, "isoformat") else (str(lookback_start) if lookback_start else None),
+        "adaptive_data_edge": adaptive_edge,
         "timeframe_resolution": timeframe_resolution,
         "five_minute_dragnet_bars": FIVE_MINUTE_DRAGNET_BARS
         if timeframe_resolution == "5-Minute"
@@ -5090,31 +5107,66 @@ def validate_regime_lookback_lanes(
     timeframe_resolution: str,
 ) -> dict:
     """
-    Strict lookback lane assertions — 1m=5, 5m=36, 15m=48 bars backward from Start Time.
-    Hard assert len(lookback) before any database pass; failures → PRE-STORAGE TRASH.
+    Adaptive lookback lanes — ideal depth is 1m=5, 5m=36, 15m=48 bars before Start Time.
+    Thin low-cap tapes use every valid bar available and stop at the data edge.
+    Only trash when bars fall below LOOKBACK_ADAPTIVE_MIN_BARS (near-empty).
+    Purgatory / incubation handle weak spatial matches — not a full deploy cancel.
     """
     required = int(LOOKBACK_LANE_ASSERTIONS.get(timeframe_resolution, ONE_MINUTE_DRAGNET_BARS))
+    min_bars = int(LOOKBACK_ADAPTIVE_MIN_BARS.get(timeframe_resolution, 3))
     start_dt = _parse_session_datetime(start_date, start_time)
-    _, window = _lookback_lane_dragnet(data_stream, start_dt, timeframe_resolution)
+    lookback_start, window = _lookback_lane_dragnet(data_stream, start_dt, timeframe_resolution)
     actual = 0
-    passed = False
-    try:
-        if not isinstance(window, pd.DataFrame) or window.empty:
-            raise AssertionError(f"lookback_lane_empty|tf={timeframe_resolution}")
-        lookback = window
-        actual = len(lookback)
-        assert len(lookback) == required
-        passed = True
-    except AssertionError:
-        passed = False
+    if isinstance(window, pd.DataFrame) and not window.empty:
+        actual = len(window)
+    adaptive = actual < required
+    effective_bars = actual
+    passed = actual >= min_bars
+    coverage_pct = int(round((actual / required) * 100)) if required else 0
+
+    lookback_start_iso = None
+    if lookback_start is not None:
+        try:
+            lookback_start_iso = (
+                lookback_start.isoformat()
+                if hasattr(lookback_start, "isoformat")
+                else str(lookback_start)
+            )
+        except Exception:
+            lookback_start_iso = str(lookback_start)
+
+    if passed and adaptive:
+        st.session_state.room2_lookback_adaptive = {
+            "timeframe_resolution": timeframe_resolution,
+            "ideal_bars": required,
+            "actual_bars": actual,
+            "effective_bars": effective_bars,
+            "coverage_pct": coverage_pct,
+            "lookback_start": lookback_start_iso,
+        }
+        emit_processing_heartbeat(
+            f"📉 ADAPTIVE LOOKBACK — {timeframe_resolution}: using {actual}/{required} bars "
+            f"({coverage_pct}% of ideal depth). Thin tape — analysis stops at valid data edge.",
+            detail=f"start={start_time}|min={min_bars}",
+        )
+    else:
+        st.session_state.pop("room2_lookback_adaptive", None)
+
     return {
         "passed": passed,
         "trashed": not passed,
+        "adaptive": adaptive and passed,
         "required_bars": required,
         "actual_bars": actual,
+        "effective_bars": effective_bars,
+        "min_bars": min_bars,
+        "coverage_pct": coverage_pct,
         "timeframe_resolution": timeframe_resolution,
-        "rejection_reasons": [] if passed else [f"lookback_lane_assert_{required}_fail"],
-        "trash_reason": None if passed else f"LOOKBACK_LANE|need={required}|got={actual}|tf={timeframe_resolution}",
+        "lookback_start": lookback_start_iso,
+        "rejection_reasons": [] if passed else [f"lookback_lane_min_{min_bars}_fail"],
+        "trash_reason": None
+        if passed
+        else f"LOOKBACK_LANE|min={min_bars}|got={actual}|tf={timeframe_resolution}",
     }
 
 
@@ -6164,8 +6216,8 @@ def run_regime_switching_funnel(
             "funnel_version": REGIME_FUNNEL_VERSION,
             "trashed": True,
             "trash_message": (
-                f"🗑️ PRE-STORAGE TRASH — Lookback lane failed: need "
-                f"{lane.get('required_bars')} bars, got {lane.get('actual_bars')} "
+                f"🗑️ PRE-STORAGE TRASH — Insufficient chart data: need at least "
+                f"{lane.get('min_bars')} bars before Start Time, got {lane.get('actual_bars')} "
                 f"on {timeframe_resolution} track."
             ),
             "lane_validation": lane,
