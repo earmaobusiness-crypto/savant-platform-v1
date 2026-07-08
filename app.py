@@ -1614,12 +1614,10 @@ def _forensic_patterns_table() -> str:
 
 
 def _pattern_archive_query_suffix(*, active_only: bool = True, trash_only: bool = False) -> str:
-    """PostgREST filters excluding the Matrix chat log row."""
+    """PostgREST filters excluding the Matrix chat log row (state filtered client-side)."""
     parts = [f"pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"]
     if trash_only:
         parts.append("state=eq.soft_deleted")
-    elif active_only:
-        parts.append("or=(state.is.null,state.neq.soft_deleted)")
     return "&" + "&".join(parts)
 
 
@@ -1803,72 +1801,87 @@ def _count_cloud_pattern_rows(*, trash_only: bool = False) -> int:
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return 0
+    raw_rows, _ = _supabase_fetch_raw_pattern_rows(limit=200)
+    return sum(
+        1 for row in raw_rows if isinstance(row, dict) and _is_archived_pattern_row(row, trash_only=trash_only)
+    )
+
+
+def _is_archived_pattern_row(row: dict, *, trash_only: bool = False) -> bool:
+    ticker = str(row.get("ticker") or "").strip().upper()
+    if not ticker or ticker == MATRIX_CHAT_LOG_TICKER:
+        return False
+    if str(row.get("pattern_category") or "").strip().upper() == MATRIX_CHAT_LOG_CATEGORY:
+        return False
+    state = str(row.get("state") or "").strip().lower()
+    if trash_only:
+        return state == "soft_deleted"
+    return state != "soft_deleted"
+
+
+def _supabase_fetch_raw_pattern_rows(*, limit: int = 100) -> tuple[list[dict], str | None]:
+    """Raw Supabase pull — filter in Python so PostgREST state quirks cannot hide rows."""
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return [], "supabase_offline"
     table = _forensic_patterns_table()
     base = st.session_state.supabase_url
-    try:
-        resp = requests.get(
-            f"{base}/rest/v1/{table}?select=id"
-            f"{_pattern_archive_query_suffix(active_only=not trash_only, trash_only=trash_only)}",
-            headers={**_supabase_rest_headers(), "Prefer": "count=exact"},
-            timeout=12,
-        )
-        if resp.ok:
-            content_range = resp.headers.get("Content-Range", "")
-            if "/" in content_range:
-                total = content_range.split("/")[-1]
-                if total.isdigit():
-                    return int(total)
-            rows = resp.json()
-            return len(rows) if isinstance(rows, list) else 0
-    except Exception:
-        pass
-    return 0
+    headers = _supabase_rest_headers()
+    errors: list[str] = []
+    for query_suffix in (
+        f"?select=*&order=timestamp.desc&limit={int(limit)}",
+        f"?select=*{_pattern_archive_query_suffix(active_only=False)}"
+        f"&order=timestamp.desc&limit={int(limit)}",
+    ):
+        try:
+            resp = requests.get(f"{base}/rest/v1/{table}{query_suffix}", headers=headers, timeout=12)
+            if not resp.ok:
+                errors.append(f"HTTP {resp.status_code}: {resp.text[:120]}")
+                continue
+            payload = resp.json()
+            if isinstance(payload, list):
+                return payload, None
+        except Exception as exc:
+            errors.append(str(exc))
+    return [], "; ".join(errors) if errors else "empty_response"
 
 
 def _fetch_all_active_pattern_rows(*, limit: int = 50) -> list[dict]:
     """All active matrix rows from Supabase — source of truth for Window 4 inventory."""
+    raw_rows, err = _supabase_fetch_raw_pattern_rows(limit=max(int(limit), 50))
+    st.session_state.matrix_vault_fetch_error = err
+    rows: list[dict] = []
+    for row in raw_rows:
+        if not isinstance(row, dict) or not _is_archived_pattern_row(row, trash_only=False):
+            continue
+        rows.append(_pattern_row_effective_fields(row))
+    rows.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
+    st.session_state.matrix_vault_last_fetch_count = len(rows)
+    return rows[: int(limit)]
+
+
+def _fetch_pattern_rows_for_ticker(ticker: str, *, limit: int = 5) -> list[dict]:
+    clean = str(ticker or "").strip().upper()
+    if not clean:
+        return []
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return []
     table = _forensic_patterns_table()
     base = st.session_state.supabase_url
-    headers = _supabase_rest_headers()
-    query = (
-        f"{base}/rest/v1/{table}?select=*"
-        f"{_pattern_archive_query_suffix(active_only=True)}"
-        f"&order=timestamp.desc&limit={int(limit)}"
-    )
     try:
-        resp = requests.get(query, headers=headers, timeout=12)
-        if resp.ok:
-            payload = resp.json()
-            if isinstance(payload, list):
-                rows: list[dict] = []
-                for row in payload:
-                    ticker = str(row.get("ticker") or "").strip().upper()
-                    if not ticker or ticker == MATRIX_CHAT_LOG_TICKER:
-                        continue
-                    rows.append(_pattern_row_effective_fields(row))
-                if rows:
-                    return rows
-        # Fallback without state filter — RLS/schema quirks should not hide rows.
-        resp2 = requests.get(
-            f"{base}/rest/v1/{table}?select=*"
-            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"
-            f"&order=timestamp.desc&limit={int(limit)}",
-            headers=headers,
+        resp = requests.get(
+            f"{base}/rest/v1/{table}?ticker=eq.{clean}"
+            f"&select=*&order=timestamp.desc&limit={int(limit)}",
+            headers=_supabase_rest_headers(),
             timeout=12,
         )
-        if resp2.ok and isinstance(resp2.json(), list):
-            rows = []
-            for row in resp2.json():
-                ticker = str(row.get("ticker") or "").strip().upper()
-                if not ticker or ticker == MATRIX_CHAT_LOG_TICKER:
-                    continue
-                if str(row.get("state") or "").strip().lower() == "soft_deleted":
-                    continue
-                rows.append(_pattern_row_effective_fields(row))
-            return rows
+        if resp.ok and isinstance(resp.json(), list):
+            return [
+                _pattern_row_effective_fields(row)
+                for row in resp.json()
+                if isinstance(row, dict) and _is_archived_pattern_row(row, trash_only=False)
+            ]
     except Exception:
         pass
     return []
@@ -1886,9 +1899,77 @@ def _registry_entry_from_pattern_row(row: dict) -> dict:
     }
 
 
+def _merge_deploy_registries(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    combined: dict[str, dict] = {}
+    for row in list(existing or []) + list(incoming or []):
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").strip().upper()
+        if not ticker:
+            continue
+        saved = str(row.get("saved_at") or row.get("timestamp") or "")
+        combined[f"{ticker}|{saved[:19]}"] = row
+    return list(combined.values())[-40:]
+
+
+def _session_inventory_rows() -> list[dict]:
+    """Verified session deploys — used when cloud read lags but Window 1 confirmed vault sync."""
+    rows: list[dict] = []
+    registry = [
+        row for row in (st.session_state.get("room2_deploy_registry") or []) if isinstance(row, dict)
+    ]
+    for entry in registry:
+        ticker = str(entry.get("ticker") or "").strip().upper()
+        if not ticker:
+            continue
+        rows.append(
+            {
+                "ticker": ticker,
+                "macro_weather_layout": entry.get("layout"),
+                "execution_strategy": entry.get("strategy"),
+                "timeframe_resolution": entry.get("timeframe"),
+                "structural_move_pct": entry.get("structural_move"),
+                "timestamp": entry.get("saved_at"),
+                "_source": "session_registry",
+            }
+        )
+    snap = st.session_state.get("room2_last_successful_deploy") or {}
+    if isinstance(snap, dict) and str(snap.get("ticker") or "").strip():
+        ticker = str(snap.get("ticker") or "").strip().upper()
+        if ticker and not any(str(r.get("ticker") or "").upper() == ticker for r in rows):
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "macro_weather_layout": snap.get("layout"),
+                    "execution_strategy": snap.get("strategy"),
+                    "timeframe_resolution": snap.get("timeframe"),
+                    "structural_move_pct": snap.get("structural_move"),
+                    "timestamp": snap.get("saved_at"),
+                    "_source": "session_snapshot",
+                }
+            )
+    if _window4_last_deploy_verified():
+        ticker = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
+        if ticker and not any(str(r.get("ticker") or "").upper() == ticker for r in rows):
+            funnel = st.session_state.get("room2_regime_funnel") or {}
+            math_block = st.session_state.get("room2_last_math_block") or {}
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "macro_weather_layout": funnel.get("master_layout_container"),
+                    "execution_strategy": funnel.get("execution_strategy"),
+                    "timeframe_resolution": st.session_state.get("r2_timeframe_mode"),
+                    "structural_move_pct": math_block.get("structural_move_pct"),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "_source": "session_verified_deploy",
+                }
+            )
+    return rows
+
+
 def _merge_vault_inventory_rows(
-  cloud_rows: list[dict] | None = None,
-  registry: list[dict] | None = None,
+    cloud_rows: list[dict] | None = None,
+    registry: list[dict] | None = None,
 ) -> list[dict]:
     """Union cloud archive + session registry — never collapse to a single ticker."""
     merged: dict[str, dict] = {}
@@ -1898,13 +1979,13 @@ def _merge_vault_inventory_rows(
         ticker = str(row.get("ticker") or "").strip().upper()
         if not ticker:
             continue
-        merged[f"reg|{ticker}|{str(row.get('saved_at') or '')[:19]}"] = {
+        merged[f"reg|{ticker}|{str(row.get('saved_at') or row.get('timestamp') or '')[:19]}"] = {
             "ticker": ticker,
-            "macro_weather_layout": row.get("layout"),
-            "execution_strategy": row.get("strategy"),
-            "timeframe_resolution": row.get("timeframe"),
-            "structural_move_pct": row.get("structural_move"),
-            "timestamp": row.get("saved_at"),
+            "macro_weather_layout": row.get("layout") or row.get("macro_weather_layout"),
+            "execution_strategy": row.get("strategy") or row.get("execution_strategy"),
+            "timeframe_resolution": row.get("timeframe") or row.get("timeframe_resolution"),
+            "structural_move_pct": row.get("structural_move") or row.get("structural_move_pct"),
+            "timestamp": row.get("saved_at") or row.get("timestamp"),
         }
     for row in cloud_rows or []:
         if not isinstance(row, dict):
@@ -1917,11 +1998,26 @@ def _merge_vault_inventory_rows(
     return list(merged.values())
 
 
+def _collect_matrix_inventory_rows() -> list[dict]:
+    cloud_rows = _fetch_all_active_pattern_rows(limit=50)
+    registry = [
+        row for row in (st.session_state.get("room2_deploy_registry") or []) if isinstance(row, dict)
+    ]
+    session_rows = _session_inventory_rows()
+    merged = _merge_vault_inventory_rows(cloud_rows, registry)
+    if merged:
+        return merged
+    if session_rows:
+        return session_rows
+    return []
+
+
 def _sync_matrix_active_pattern_count_from_cloud() -> int:
     """Keep session count aligned with actual vault rows (header count can lie)."""
     rows = _fetch_all_active_pattern_rows(limit=100)
+    session_rows = _session_inventory_rows()
     header_count = _count_cloud_pattern_rows(trash_only=False)
-    active = max(len(rows), int(header_count or 0))
+    active = max(len(rows), len(session_rows), int(header_count or 0))
     st.session_state.matrix_active_pattern_count = active
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
     return active
@@ -1952,23 +2048,8 @@ def _fetch_latest_active_pattern_row() -> dict | None:
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return None
-    table = _forensic_patterns_table()
-    base = st.session_state.supabase_url
-    try:
-        resp = requests.get(
-            f"{base}/rest/v1/{table}?select=*"
-            f"{_pattern_archive_query_suffix(active_only=True)}"
-            f"&order=timestamp.desc&limit=1",
-            headers=_supabase_rest_headers(),
-            timeout=12,
-        )
-        if resp.ok:
-            rows = resp.json()
-            if rows:
-                return rows[0]
-    except Exception:
-        pass
-    return None
+    rows = _fetch_all_active_pattern_rows(limit=1)
+    return rows[0] if rows else None
 
 
 def _queue_room2_form_ticker(ticker: str) -> None:
@@ -2130,7 +2211,15 @@ def _load_matrix_chat_from_cloud(*, force: bool = False) -> None:
         if deploy_snap and str(deploy_snap.get("ticker") or "").strip():
             st.session_state.room2_last_successful_deploy = deploy_snap
         if deploy_registry:
-            st.session_state.room2_deploy_registry = deploy_registry
+            existing = [
+                row
+                for row in (st.session_state.get("room2_deploy_registry") or [])
+                if isinstance(row, dict)
+            ]
+            st.session_state.room2_deploy_registry = _merge_deploy_registries(
+                existing,
+                deploy_registry if isinstance(deploy_registry, list) else [],
+            )
         local = st.session_state.get("room2_chat_history") or []
         if parsed_messages:
             normalized: list[dict] = []
@@ -2167,7 +2256,7 @@ def _load_matrix_chat_from_cloud(*, force: bool = False) -> None:
         pass
 
 
-def _refresh_matrix_cloud_wire(*, reload_chat: bool = True) -> None:
+def _refresh_matrix_cloud_wire(*, reload_chat: bool = False) -> None:
     """Live Supabase pull — Window 4 and the header count must not rely on session-only memory."""
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
@@ -2176,23 +2265,14 @@ def _refresh_matrix_cloud_wire(*, reload_chat: bool = True) -> None:
         _load_matrix_chat_from_cloud(force=not bool(st.session_state.get("room2_chat_history")))
     cloud_rows = _fetch_all_active_pattern_rows(limit=50)
     if cloud_rows:
-        registry = [
-            _registry_entry_from_pattern_row(row)
-            for row in cloud_rows
-        ]
+        cloud_registry = [_registry_entry_from_pattern_row(row) for row in cloud_rows]
         session_reg = [
             row for row in (st.session_state.get("room2_deploy_registry") or []) if isinstance(row, dict)
         ]
-        combined: dict[str, dict] = {}
-        for row in session_reg:
-            ticker = str(row.get("ticker") or "").strip().upper()
-            if ticker:
-                combined[f"s|{ticker}|{str(row.get('saved_at') or '')[:19]}"] = row
-        for row in registry:
-            ticker = str(row.get("ticker") or "").strip().upper()
-            if ticker:
-                combined[f"c|{ticker}|{str(row.get('saved_at') or '')[:19]}"] = row
-        st.session_state.room2_deploy_registry = list(combined.values())[-40:]
+        st.session_state.room2_deploy_registry = _merge_deploy_registries(
+            session_reg,
+            cloud_registry,
+        )
     st.session_state.matrix_active_pattern_count = _sync_matrix_active_pattern_count_from_cloud()
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
 
@@ -2901,7 +2981,7 @@ def _window4_append_vault_roster_reply() -> None:
 
 
 def _window4_build_vault_inventory_reply() -> str:
-    """Deterministic vault inventory — always lists every Supabase row, not just the last deploy."""
+    """Deterministic vault inventory — cloud rows + verified session deploys."""
     _refresh_matrix_cloud_wire(reload_chat=False)
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
@@ -2910,13 +2990,20 @@ def _window4_build_vault_inventory_reply() -> str:
         )
 
     trash = _count_cloud_pattern_rows(trash_only=True)
-    cloud_rows = _fetch_all_active_pattern_rows(limit=50)
-    registry = [
-        row for row in (st.session_state.get("room2_deploy_registry") or []) if isinstance(row, dict)
-    ]
-    rows = _merge_vault_inventory_rows(cloud_rows, registry)
+    rows = _collect_matrix_inventory_rows()
     if rows:
-        return _format_vault_pattern_roster(rows, trash=trash)
+        cloud_n = len(_fetch_all_active_pattern_rows(limit=50))
+        session_only = cloud_n == 0 and any(row.get("_source") for row in rows)
+        body = _format_vault_pattern_roster(rows, trash=trash)
+        if session_only:
+            body += (
+                "\n\n*(Cloud read returned 0 rows — showing verified session deploys. "
+                "If this persists after VAULT SYNC OK, check Supabase RLS read policy.)*"
+            )
+        fetch_err = st.session_state.get("matrix_vault_fetch_error")
+        if fetch_err and cloud_n == 0:
+            body += f"\n\n*Fetch note: `{fetch_err}`*"
+        return body
 
     active = int(st.session_state.get("matrix_active_pattern_count") or 0)
     if active > 0:
@@ -2924,6 +3011,10 @@ def _window4_build_vault_inventory_reply() -> str:
             f"**{active} active pattern(s)** reported in cloud vault ({trash} in Trash Vault), "
             "but the roster fetch returned empty — check Supabase read permissions (RLS)."
         )
+
+    session = _window4_session_deploy_for_inventory()
+    if session:
+        return _window4_format_session_deploy_inventory(session, trash=trash)
 
     proc = st.session_state.get("room2_processor") or {}
     if proc.get("active"):
@@ -3202,7 +3293,7 @@ def _window4_conversational_context_tags() -> str:
     bits: list[str] = []
     _refresh_matrix_cloud_wire(reload_chat=False)
     if st.session_state.get("supabase_ready"):
-        rows = _fetch_all_active_pattern_rows(limit=25)
+        rows = _collect_matrix_inventory_rows()
         if rows:
             tickers = sorted(
                 {str(row.get("ticker") or "").strip().upper() for row in rows if row.get("ticker")}
@@ -3210,10 +3301,6 @@ def _window4_conversational_context_tags() -> str:
             if tickers:
                 bits.append(f"[VAULT_TICKERS {', '.join(tickers)}]")
             bits.append(f"[VAULT_INVENTORY active_patterns={len(rows)}]")
-        else:
-            active = int(st.session_state.get("matrix_active_pattern_count") or 0)
-            if active > 0:
-                bits.append(f"[VAULT_INVENTORY active_patterns={active}]")
     if _window4_last_deploy_verified():
         ticker = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
         if ticker:
@@ -4237,6 +4324,16 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
     ok, vault_message = core_quantum.stream_payload_to_vault(payload)
     vault_synced_ui = False
     if ok:
+        readback = _fetch_pattern_rows_for_ticker(ticker, limit=3)
+        st.session_state.matrix_last_vault_readback = readback
+        st.session_state.matrix_last_vault_write_ok = True
+        _window4_append_deploy_registry_entry(
+            ticker=ticker,
+            layout=macro_weather_layout,
+            strategy=execution_strategy,
+            timeframe=timeframe_resolution,
+            structural_move=structural_move,
+        )
         funnel = st.session_state.get("room2_regime_funnel") or {}
         pg_pct = int(
             funnel.get("window4_spatial_match_pct")
@@ -5193,7 +5290,7 @@ def _purge_room2_deck_inputs() -> None:
 def render_room2_forensic_lab():
     _apply_pending_room2_form_patches()
     _hydrate_matrix_memory_from_cloud()
-    _refresh_matrix_cloud_wire(reload_chat=not bool(st.session_state.get("room2_chat_history")))
+    _refresh_matrix_cloud_wire(reload_chat=False)
     _apply_pending_room2_form_patches()
     _ensure_room2_widget_defaults()
 
