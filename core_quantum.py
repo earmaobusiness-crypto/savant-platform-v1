@@ -1594,18 +1594,42 @@ def resolve_adaptive_entry_anchor(
     elif hill_rewind and struct_idx is not None:
         ignition_search_from = struct_idx
 
+    saved_winner = {
+        "label": winner_label,
+        "ts": winner_ts,
+        "price": winner_price,
+        "liquidity_ignition": liquidity_ignition,
+    }
+
     ign_idx, ign_price = _volatility_ignition_anchor(window, ignition_search_from)
     if ign_idx is not None and ign_price is not None:
-        winner_label = "volatility_ignition"
-        winner_ts = str(ign_idx)
-        winner_price = float(ign_price)
-        liquidity_ignition = True
-    else:
-        winner_label = None
-        winner_ts = None
-        winner_price = None
+        ign_margin = _entry_margin_pct(ign_price, raw_exit)
+        if ign_margin >= floor:
+            winner_label = "volatility_ignition"
+            winner_ts = str(ign_idx)
+            winner_price = float(ign_price)
+            liquidity_ignition = True
+        elif saved_winner.get("price") is not None:
+            winner_label = saved_winner["label"]
+            winner_ts = saved_winner["ts"]
+            winner_price = float(saved_winner["price"])
+            liquidity_ignition = bool(saved_winner["liquidity_ignition"])
+    elif saved_winner.get("price") is not None:
+        winner_label = saved_winner["label"]
+        winner_ts = saved_winner["ts"]
+        winner_price = float(saved_winner["price"])
+        liquidity_ignition = bool(saved_winner["liquidity_ignition"])
 
-    if winner_label != "volatility_ignition" or winner_price is None:
+    if winner_price is None and manual_idx is not None and manual_price is not None:
+        manual_margin = _entry_margin_pct(manual_price, raw_exit)
+        if manual_margin >= floor and not _hill_trap_shrinks_margin(
+            window, manual_idx, manual_price, raw_exit
+        ):
+            winner_label = "manual_anchor"
+            winner_ts = str(manual_idx)
+            winner_price = float(manual_price)
+
+    if winner_price is None or winner_label is None:
         st.session_state.room2_entry_optimizer = {
             "selected_candidate": None,
             "candidates": scored,
@@ -1618,6 +1642,17 @@ def resolve_adaptive_entry_anchor(
         return {**empty_result, "candidates": scored}
 
     winner_margin = _entry_margin_pct(winner_price, raw_exit)
+    if winner_margin < floor:
+        st.session_state.room2_entry_optimizer = {
+            "selected_candidate": None,
+            "candidates": scored,
+            "floor_pct": floor,
+            "downhill_pivot": False,
+            "hill_bypass_rewind": hill_rewind,
+            "liquidity_ignition": False,
+            "three_hour_volume_envelope": baseline_env,
+        }
+        return {**empty_result, "candidates": scored}
     meta = {
         "selected_candidate": winner_label,
         "candidates": scored,
@@ -1927,6 +1962,18 @@ def evaluate_playbook_quality_barrier(
     if optimizer_meta.get("volatility_ignition_timestamp"):
         ignition_ts = optimizer_meta["volatility_ignition_timestamp"]
 
+    operator_coordinate_fallback = False
+    if not ignition_price and start_dt is not None:
+        operator_entry_price = _price_at_datetime(data_stream, start_dt)
+        if operator_entry_price and operator_entry_price > 0:
+            ignition_price = operator_entry_price
+            ignition_ts = start_dt
+            operator_coordinate_fallback = True
+            entry_resolution = {
+                **(entry_resolution or {}),
+                "selected_candidate": "operator_coordinate_fallback",
+            }
+
     structural_move_pct = 0.0
     exit_price = raw_exit_price
     exit_anchor_ts = str(end_dt) if end_dt is not None else None
@@ -1975,6 +2022,7 @@ def evaluate_playbook_quality_barrier(
         "liquidity_ignition": bool(
             (entry_resolution.get("optimizer_meta") or {}).get("liquidity_ignition")
         ),
+        "operator_coordinate_fallback": operator_coordinate_fallback,
     }
     return enforce_permanent_library_profit_floor(quality)
 
@@ -4326,6 +4374,23 @@ def validate_chart_data_coupling(data_stream, quality: dict | None = None) -> di
         ignition = bool(entry_opt.get("liquidity_ignition")) or (
             entry_opt.get("selected_candidate") == "volatility_ignition"
         )
+    if not ignition:
+        ignition = bool(quality.get("operator_coordinate_fallback"))
+    if not ignition:
+        selected = quality.get("entry_candidate_selected") or entry_opt.get("selected_candidate")
+        if selected in (
+            "volume_std_anchor",
+            "velocity_spike_anchor",
+            "structure_baseline",
+            "manual_anchor",
+            "operator_coordinate_fallback",
+        ):
+            ignition = True
+    if not ignition:
+        move = float(quality.get("structural_move_pct") or 0.0)
+        floor = float(quality.get("floor_pct") or 0.0)
+        if quality.get("passed") and move >= floor:
+            ignition = True
     if not ignition:
         reasons.append("no_volume_ignition")
 
