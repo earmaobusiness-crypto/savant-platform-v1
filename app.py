@@ -777,6 +777,7 @@ if "room2_commit_timestamps" not in st.session_state: st.session_state.room2_com
 if "room2_commit_throttle_until" not in st.session_state: st.session_state.room2_commit_throttle_until = 0.0
 if "room2_forensic_ticker" not in st.session_state: st.session_state.room2_forensic_ticker = ""
 if "room2_last_successful_deploy" not in st.session_state: st.session_state.room2_last_successful_deploy = {}
+if "room2_deploy_registry" not in st.session_state: st.session_state.room2_deploy_registry = []
 if "room2_quantum_report" not in st.session_state: st.session_state.room2_quantum_report = ""
 if "room2_bar_count" not in st.session_state: st.session_state.room2_bar_count = 0
 if "room2_text_buffer" not in st.session_state: st.session_state.room2_text_buffer = ""
@@ -1826,6 +1827,67 @@ def _count_cloud_pattern_rows(*, trash_only: bool = False) -> int:
     return 0
 
 
+def _fetch_all_active_pattern_rows(*, limit: int = 50) -> list[dict]:
+    """All active matrix rows from Supabase — source of truth for Window 4 inventory."""
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        return []
+    table = _forensic_patterns_table()
+    base = st.session_state.supabase_url
+    try:
+        resp = requests.get(
+            f"{base}/rest/v1/{table}?select=*"
+            f"{_pattern_archive_query_suffix(active_only=True)}"
+            f"&order=timestamp.desc&limit={int(limit)}",
+            headers=_supabase_rest_headers(),
+            timeout=12,
+        )
+        if resp.ok:
+            payload = resp.json()
+            if isinstance(payload, list):
+                rows: list[dict] = []
+                for row in payload:
+                    ticker = str(row.get("ticker") or "").strip().upper()
+                    if not ticker or ticker == MATRIX_CHAT_LOG_TICKER:
+                        continue
+                    rows.append(_pattern_row_effective_fields(row))
+                return rows
+    except Exception:
+        pass
+    return []
+
+
+def _sync_matrix_active_pattern_count_from_cloud() -> int:
+    """Keep session count aligned with actual vault rows (header count can lie)."""
+    rows = _fetch_all_active_pattern_rows(limit=100)
+    header_count = _count_cloud_pattern_rows(trash_only=False)
+    active = max(len(rows), int(header_count or 0))
+    st.session_state.matrix_active_pattern_count = active
+    st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
+    return active
+
+
+def _format_vault_pattern_roster(rows: list[dict], *, trash: int) -> str:
+    active = len(rows)
+    lines = [
+        f"**{active} active pattern(s)** in cloud vault ({trash} in Trash Vault):",
+        "",
+    ]
+    for row in rows[:12]:
+        ticker = str(row.get("ticker") or "?").strip().upper()
+        layout = str(
+            row.get("macro_weather_layout") or row.get("execution_strategy") or "—"
+        ).strip()
+        ts = str(row.get("timestamp") or "")[:10]
+        tf = str(row.get("timeframe_resolution") or "").strip()
+        margin = row.get("structural_move_pct") or row.get("margin_pct")
+        margin_bit = f" · {float(margin):.2f}% move" if margin is not None else ""
+        lines.append(f"- **{ticker}** · {layout} · {tf}{margin_bit} · {ts}")
+    if active > 12:
+        lines.append(f"- …and {active - 12} more not shown.")
+    return "\n".join(lines)
+
+
 def _fetch_latest_active_pattern_row() -> dict | None:
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
@@ -1902,31 +1964,37 @@ def _encode_matrix_chat_blob() -> str:
     snap = st.session_state.get("room2_last_successful_deploy") or {}
     if not isinstance(snap, dict):
         snap = {}
+    registry = st.session_state.get("room2_deploy_registry") or []
+    if not isinstance(registry, list):
+        registry = []
     return json.dumps(
         {
             "v": 2,
             "messages": st.session_state.room2_chat_history[-80:],
             "deploy_snapshot": snap,
+            "deploy_registry": registry[-40:],
         },
         default=str,
     )
 
 
-def _parse_matrix_chat_blob(raw: str) -> tuple[list, dict]:
+def _parse_matrix_chat_blob(raw: str) -> tuple[list, dict, list]:
     try:
         parsed = json.loads(raw or "[]")
     except json.JSONDecodeError:
-        return [], {}
+        return [], {}, []
     if isinstance(parsed, dict) and int(parsed.get("v") or 0) == 2:
         messages = parsed.get("messages") or []
         snap = parsed.get("deploy_snapshot") or {}
+        registry = parsed.get("deploy_registry") or []
         return (
             messages if isinstance(messages, list) else [],
             snap if isinstance(snap, dict) else {},
+            registry if isinstance(registry, list) else [],
         )
     if isinstance(parsed, list):
-        return parsed, {}
-    return [], {}
+        return parsed, {}, []
+    return [], {}, []
 
 
 def _sync_matrix_chat_to_cloud() -> None:
@@ -1993,9 +2061,11 @@ def _load_matrix_chat_from_cloud() -> None:
         if not rows:
             return
         raw_chat = rows[0].get("operator_context") or "[]"
-        parsed_messages, deploy_snap = _parse_matrix_chat_blob(str(raw_chat))
+        parsed_messages, deploy_snap, deploy_registry = _parse_matrix_chat_blob(str(raw_chat))
         if deploy_snap and str(deploy_snap.get("ticker") or "").strip():
             st.session_state.room2_last_successful_deploy = deploy_snap
+        if deploy_registry:
+            st.session_state.room2_deploy_registry = deploy_registry
         if parsed_messages:
             normalized: list[dict] = []
             for msg in parsed_messages:
@@ -2090,26 +2160,17 @@ def _hydrate_matrix_memory_from_cloud() -> None:
     if terminal:
         _window4_restore_vault_flags_from_report(terminal)
 
-    st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
+    st.session_state.matrix_active_pattern_count = _sync_matrix_active_pattern_count_from_cloud()
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
 
 
 def _fetch_live_cloud_patterns() -> str:
+    rows = _fetch_all_active_pattern_rows(limit=12)
+    if rows:
+        return json.dumps(rows, default=str)
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return "CLOUD:OFFLINE"
-    try:
-        resp = requests.get(
-            f"{st.session_state.supabase_url}/rest/v1/{_forensic_patterns_table()}"
-            f"?select=*{_pattern_archive_query_suffix(active_only=True)}"
-            f"&order=timestamp.desc&limit=12",
-            headers=_supabase_rest_headers(),
-            timeout=12,
-        )
-        if resp.ok:
-            return json.dumps(resp.json(), default=str)
-    except Exception as exc:
-        return f"CLOUD:FETCH_ERR|{exc}"
     return "CLOUD:FETCH_FAIL"
 
 
@@ -2554,6 +2615,43 @@ def _window4_record_deploy_snapshot(
     }
 
 
+def _window4_append_deploy_registry_entry(
+    *,
+    ticker: str,
+    layout: str = "",
+    strategy: str = "",
+    timeframe: str = "",
+    structural_move: float = 0.0,
+) -> None:
+    clean_ticker = str(ticker or "").strip().upper()
+    if not clean_ticker:
+        return
+    entry = {
+        "ticker": clean_ticker,
+        "layout": str(layout or "—").strip() or "—",
+        "strategy": str(strategy or "—").strip() or "—",
+        "timeframe": str(timeframe or "—").strip() or "—",
+        "structural_move": float(structural_move or 0.0),
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    registry = [
+        row
+        for row in (st.session_state.get("room2_deploy_registry") or [])
+        if isinstance(row, dict)
+    ]
+    registry = [
+        row
+        for row in registry
+        if not (
+            str(row.get("ticker") or "").upper() == clean_ticker
+            and str(row.get("timeframe") or "") == entry["timeframe"]
+            and str(row.get("saved_at") or "")[:16] == entry["saved_at"][:16]
+        )
+    ]
+    registry.append(entry)
+    st.session_state.room2_deploy_registry = registry[-40:]
+
+
 def _window4_session_deploy_for_inventory() -> dict | None:
     """Session deploy record when cloud count lags or refresh dropped vault flags."""
     snap = st.session_state.get("room2_last_successful_deploy")
@@ -2655,130 +2753,68 @@ def _window4_append_vault_roster_reply() -> None:
 
 
 def _window4_build_vault_inventory_reply() -> str:
-    """Deterministic vault inventory — does not require a live deploy stream."""
+    """Deterministic vault inventory — always lists every Supabase row, not just the last deploy."""
     _ensure_supabase_session()
-    _window4_refresh_deploy_snapshot_from_cloud()
-    st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
-    st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
-    active = int(st.session_state.matrix_active_pattern_count or 0)
-    trash = int(st.session_state.matrix_trash_vault_count or 0)
-
     if not st.session_state.get("supabase_ready"):
         return (
             "Cloud vault is offline — Supabase is not configured, so I cannot list saved patterns."
         )
 
-    latest_row = _window4_latest_saved_pattern_row()
-    if active == 0 and latest_row:
-        ticker = str(latest_row.get("ticker") or "").strip().upper()
-        layout = str(
-            latest_row.get("macro_weather_layout")
-            or latest_row.get("execution_strategy")
-            or "—"
-        ).strip()
-        strategy = str(latest_row.get("execution_strategy") or "—").strip()
-        tf = str(latest_row.get("timeframe_resolution") or "").strip()
-        margin = latest_row.get("structural_move_pct") or latest_row.get("margin_pct")
-        margin_bit = f" · {float(margin):.2f}% move" if margin is not None else ""
-        ts = str(latest_row.get("timestamp") or "")[:10]
-        report = str(latest_row.get("quantum_report") or "")
-        synced = (
-            "VAULT SYNC OK" in report
-            or "INTERNET VAULT SYNC CONFIRMED" in report
-            or _window4_last_deploy_verified()
-        )
-        sync_line = (
-            "**VAULT SYNC OK** — saved in cloud archive."
-            if synced
-            else "Latest row found in cloud — verify Window 1 for full sync status."
-        )
+    trash = _count_cloud_pattern_rows(trash_only=True)
+    rows = _fetch_all_active_pattern_rows(limit=50)
+    active = _sync_matrix_active_pattern_count_from_cloud()
+    if rows:
+        return _format_vault_pattern_roster(rows, trash=trash)
+
+    if active > 0:
         return (
-            f"**1 active pattern** in cloud vault ({trash} in Trash Vault).\n\n"
-            f"{sync_line}\n\n"
-            f"- **Ticker:** **{ticker}**\n"
-            f"- **Layout:** **{layout}**\n"
-            f"- **Strategy:** **{strategy}**\n"
-            f"- **Timeframe:** **{tf or '—'}**{margin_bit}\n"
-            f"- **Date:** {ts or '—'}"
+            f"**{active} active pattern(s)** reported in cloud vault ({trash} in Trash Vault), "
+            "but the roster fetch returned empty — check Supabase read permissions (RLS)."
         )
 
-    if active == 0 and _window4_last_deploy_verified():
-        last_ticker = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
-        funnel = st.session_state.get("room2_regime_funnel") or {}
-        layout = str(funnel.get("master_layout_container") or "").strip()
-        strategy = str(funnel.get("execution_strategy") or "").strip()
-        if last_ticker:
-            _window4_record_deploy_snapshot(
-                ticker=last_ticker,
-                layout=layout,
-                strategy=strategy,
-                timeframe=str(st.session_state.get("r2_timeframe_mode") or ""),
-                vault_synced=True,
-            )
-            return _window4_format_session_deploy_inventory(
-                _window4_session_deploy_for_inventory() or {},
-                trash=trash,
-            )
+    registry = [
+        row for row in (st.session_state.get("room2_deploy_registry") or []) if isinstance(row, dict)
+    ]
+    if registry:
+        pseudo_rows = [
+            {
+                "ticker": row.get("ticker"),
+                "macro_weather_layout": row.get("layout"),
+                "execution_strategy": row.get("strategy"),
+                "timeframe_resolution": row.get("timeframe"),
+                "structural_move_pct": row.get("structural_move"),
+                "timestamp": row.get("saved_at"),
+            }
+            for row in registry
+        ]
+        return (
+            _format_vault_pattern_roster(pseudo_rows, trash=trash)
+            + "\n\n*(Roster from session registry — cloud read returned no rows yet.)*"
+        )
 
     session = _window4_session_deploy_for_inventory()
-    if active == 0 and session:
+    if session:
         return _window4_format_session_deploy_inventory(session, trash=trash)
 
-    if active == 0:
-        proc = st.session_state.get("room2_processor") or {}
-        if proc.get("active"):
-            return (
-                "Deploy is still running in Window 1 — nothing has been written to the vault yet."
-            )
-        hints: list[str] = []
-        if st.session_state.get("polygon_lockout"):
-            hints.append("API throttle is active — wait ~60s, then redeploy.")
-        report = str(st.session_state.get("room2_quantum_report") or "")
-        if "PRE-STORAGE TRASH" in report or "VAULT BLOCKED" in report:
-            hints.append("Last deploy failed quality/coupling gates — it was not saved.")
-        elif "THROTTLE" in report or "POLYGON REST DATA EMPTY" in report:
-            hints.append("Last deploy did not fetch bars — use a past session date and regular hours.")
-        hint = f" {' '.join(hints)}" if hints else ""
+    proc = st.session_state.get("room2_processor") or {}
+    if proc.get("active"):
         return (
-            f"No active patterns in the cloud vault ({trash} in Trash Vault).{hint} "
-            "Submitting the form only queues a deploy — patterns appear here after Window 1 "
-            "completes vault sync."
+            "Deploy is still running in Window 1 — nothing has been written to the vault yet."
         )
-
-    raw = _fetch_live_cloud_patterns()
-    rows: list[dict] = []
-    if raw.startswith("["):
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                rows = parsed
-        except json.JSONDecodeError:
-            rows = []
-
-    lines = [
-        f"**{active} active pattern(s)** in cloud vault ({trash} in Trash Vault):",
-        "",
-    ]
-    for row in rows[:12]:
-        ticker = str(row.get("ticker") or "?").strip().upper()
-        layout = str(
-            row.get("macro_weather_layout") or row.get("execution_strategy") or "—"
-        ).strip()
-        ts = str(row.get("timestamp") or "")[:10]
-        tf = str(row.get("timeframe_resolution") or "").strip()
-        margin = row.get("structural_move_pct") or row.get("margin_pct")
-        margin_bit = f" · {float(margin):.2f}% move" if margin is not None else ""
-        lines.append(f"- **{ticker}** · {layout} · {tf}{margin_bit} · {ts}")
-    if active > len(rows):
-        lines.append(f"- …and {active - len(rows)} more not shown.")
-    if active > 0 and not rows:
-        session = _window4_session_deploy_for_inventory()
-        if session:
-            lines.append("")
-            lines.extend(
-                _window4_format_session_deploy_inventory(session, trash=trash).splitlines()
-            )
-    return "\n".join(lines)
+    hints: list[str] = []
+    if st.session_state.get("polygon_lockout"):
+        hints.append("API throttle is active — wait ~60s, then redeploy.")
+    report = str(st.session_state.get("room2_quantum_report") or "")
+    if "PRE-STORAGE TRASH" in report or "VAULT BLOCKED" in report:
+        hints.append("Last deploy failed quality/coupling gates — it was not saved.")
+    elif "THROTTLE" in report or "POLYGON REST DATA EMPTY" in report:
+        hints.append("Last deploy did not fetch bars — use a past session date and regular hours.")
+    hint = f" {' '.join(hints)}" if hints else ""
+    return (
+        f"No active patterns in the cloud vault ({trash} in Trash Vault).{hint} "
+        "Submitting the form only queues a deploy — patterns appear here after Window 1 "
+        "completes vault sync."
+    )
 
 
 _WINDOW4_GREETING_RE = re.compile(
@@ -4209,14 +4245,21 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
             vault_synced=True,
         )
 
+    if ok:
+        _window4_append_deploy_registry_entry(
+            ticker=ticker,
+            layout=macro_weather_layout,
+            strategy=execution_strategy,
+            timeframe=timeframe_resolution,
+            structural_move=structural_move,
+        )
+
     core_quantum.complete_processing_heartbeat(final_terminal)
     st.session_state.room2_quantum_report = final_terminal
     st.session_state.room2_vault_flash = vault_line if ok else ""
     st.session_state.matrix_satellites_ready = True
-    st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
+    st.session_state.matrix_active_pattern_count = _sync_matrix_active_pattern_count_from_cloud()
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
-    if ok and int(st.session_state.matrix_active_pattern_count or 0) == 0:
-        st.session_state.matrix_active_pattern_count = 1
     _sync_matrix_chat_to_cloud()
     _record_room2_successful_commit()
     _clear_room2_form_buffers()
