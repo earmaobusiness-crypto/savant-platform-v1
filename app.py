@@ -1898,6 +1898,37 @@ def _seed_room2_form_from_pattern_row(row: dict) -> None:
         st.session_state[notes_key] = notes
 
 
+def _encode_matrix_chat_blob() -> str:
+    snap = st.session_state.get("room2_last_successful_deploy") or {}
+    if not isinstance(snap, dict):
+        snap = {}
+    return json.dumps(
+        {
+            "v": 2,
+            "messages": st.session_state.room2_chat_history[-80:],
+            "deploy_snapshot": snap,
+        },
+        default=str,
+    )
+
+
+def _parse_matrix_chat_blob(raw: str) -> tuple[list, dict]:
+    try:
+        parsed = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return [], {}
+    if isinstance(parsed, dict) and int(parsed.get("v") or 0) == 2:
+        messages = parsed.get("messages") or []
+        snap = parsed.get("deploy_snapshot") or {}
+        return (
+            messages if isinstance(messages, list) else [],
+            snap if isinstance(snap, dict) else {},
+        )
+    if isinstance(parsed, list):
+        return parsed, {}
+    return [], {}
+
+
 def _sync_matrix_chat_to_cloud() -> None:
     """Persist Room 2 lab chat so the Matrix remembers across refresh and devices."""
     _ensure_supabase_session()
@@ -1905,7 +1936,7 @@ def _sync_matrix_chat_to_cloud() -> None:
         return
     table = _forensic_patterns_table()
     base = st.session_state.supabase_url
-    chat_blob = json.dumps(st.session_state.room2_chat_history[-80:], default=str)
+    chat_blob = _encode_matrix_chat_blob()
     terminal_snapshot = str(st.session_state.get("quantum_terminal_output", ""))[:12000]
     payload = {
         "ticker": MATRIX_CHAT_LOG_TICKER,
@@ -1962,10 +1993,12 @@ def _load_matrix_chat_from_cloud() -> None:
         if not rows:
             return
         raw_chat = rows[0].get("operator_context") or "[]"
-        parsed = json.loads(raw_chat)
-        if isinstance(parsed, list) and parsed:
+        parsed_messages, deploy_snap = _parse_matrix_chat_blob(str(raw_chat))
+        if deploy_snap and str(deploy_snap.get("ticker") or "").strip():
+            st.session_state.room2_last_successful_deploy = deploy_snap
+        if parsed_messages:
             normalized: list[dict] = []
-            for msg in parsed:
+            for msg in parsed_messages:
                 if not isinstance(msg, dict):
                     continue
                 row = dict(msg)
@@ -2051,17 +2084,7 @@ def _hydrate_matrix_memory_from_cloud() -> None:
                 match_pct=pct,
                 valid=pct >= core_quantum.LAYOUT_SIGNATURE_MATCH_THRESHOLD,
             )
-        _window4_record_deploy_snapshot(
-            ticker=forensic_ticker,
-            layout=str(latest.get("macro_weather_layout") or ""),
-            strategy=str(latest.get("execution_strategy") or ""),
-            timeframe=str(latest.get("timeframe_resolution") or ""),
-            structural_move=float(margin or 0.0),
-            vault_synced=(
-                "VAULT SYNC OK" in report
-                or "INTERNET VAULT SYNC CONFIRMED" in report
-            ),
-        )
+        _window4_record_deploy_snapshot_from_pattern_row(latest)
 
     terminal = str(st.session_state.get("quantum_terminal_output") or "")
     if terminal:
@@ -2479,6 +2502,35 @@ def _window4_should_use_vault_roster(text: str) -> bool:
     return any(phrase in low for phrase in roster_phrases)
 
 
+def _window4_record_deploy_snapshot_from_pattern_row(row: dict) -> None:
+    """Rebuild pinned deploy snapshot from a Supabase pattern row."""
+    if not row:
+        return
+    ticker = str(row.get("ticker") or "").strip().upper()
+    if not ticker or ticker == MATRIX_CHAT_LOG_TICKER:
+        return
+    report = str(row.get("quantum_report") or "")
+    margin = row.get("structural_move_pct") or row.get("margin_pct")
+    _window4_record_deploy_snapshot(
+        ticker=ticker,
+        layout=str(row.get("macro_weather_layout") or ""),
+        strategy=str(row.get("execution_strategy") or ""),
+        timeframe=str(row.get("timeframe_resolution") or ""),
+        structural_move=float(margin or 0.0),
+        vault_synced=(
+            "VAULT SYNC OK" in report
+            or "INTERNET VAULT SYNC CONFIRMED" in report
+        ),
+    )
+
+
+def _window4_refresh_deploy_snapshot_from_cloud() -> None:
+    """Self-heal inventory after browser refresh — always re-read latest vault row."""
+    latest = _window4_latest_saved_pattern_row()
+    if latest:
+        _window4_record_deploy_snapshot_from_pattern_row(latest)
+
+
 def _window4_record_deploy_snapshot(
     *,
     ticker: str,
@@ -2605,6 +2657,7 @@ def _window4_append_vault_roster_reply() -> None:
 def _window4_build_vault_inventory_reply() -> str:
     """Deterministic vault inventory — does not require a live deploy stream."""
     _ensure_supabase_session()
+    _window4_refresh_deploy_snapshot_from_cloud()
     st.session_state.matrix_active_pattern_count = _count_cloud_pattern_rows(trash_only=False)
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
     active = int(st.session_state.matrix_active_pattern_count or 0)
@@ -2718,6 +2771,13 @@ def _window4_build_vault_inventory_reply() -> str:
         lines.append(f"- **{ticker}** · {layout} · {tf}{margin_bit} · {ts}")
     if active > len(rows):
         lines.append(f"- …and {active - len(rows)} more not shown.")
+    if active > 0 and not rows:
+        session = _window4_session_deploy_for_inventory()
+        if session:
+            lines.append("")
+            lines.extend(
+                _window4_format_session_deploy_inventory(session, trash=trash).splitlines()
+            )
     return "\n".join(lines)
 
 
