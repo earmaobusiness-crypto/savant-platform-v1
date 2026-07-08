@@ -4453,6 +4453,13 @@ def _advance_room2_processor() -> str:
                     )
                 return _halt_room2_processor_with_charts(fault_text=trash_text)
             if not quality.get("passed"):
+                tf_fit = quality.get("timeframe_fit") or {}
+                if not tf_fit.get("passed", True):
+                    return _halt_room2_processor_with_charts(
+                        fault_text=(
+                            f"🗑️ PRE-STORAGE TRASH — {tf_fit.get('message', 'Timeframe does not fit operator window.')}"
+                        )
+                    )
                 floor_pct = quality.get("floor_pct", 1.0)
                 move_pct = quality.get("structural_move_pct", 0.0)
                 net = quality.get("net_margin_pct", move_pct)

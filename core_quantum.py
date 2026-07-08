@@ -138,6 +138,11 @@ TIMEFRAME_MARGIN_FLOORS = {
     "5-Minute": 6.0,
     "15-Minute": 5.0,
 }
+TIMEFRAME_BAR_MINUTES = {
+    "1-Minute": 1,
+    "5-Minute": 5,
+    "15-Minute": 15,
+}
 EXECUTION_FRICTION_SLIPPAGE_MIN = 0.5
 EXECUTION_FRICTION_SLIPPAGE_MAX = 1.5
 HILL_BYPASS_LOCAL_BARS = 6
@@ -660,6 +665,48 @@ def timeframe_margin_floor(timeframe_resolution: str) -> float:
     return float(TIMEFRAME_MARGIN_FLOORS.get(timeframe_resolution, 1.0))
 
 
+def validate_operator_timeframe_fit(
+    start_dt: datetime.datetime | None,
+    end_dt: datetime.datetime | None,
+    timeframe_resolution: str,
+) -> dict:
+    """
+    Operator window must span at least one bar on the selected track.
+    e.g. 8:31–8:35 (4 min) cannot run on 5-Minute or 15-Minute — use 1-Minute.
+    """
+    bar_minutes = int(TIMEFRAME_BAR_MINUTES.get(timeframe_resolution, 15))
+    if start_dt is None or end_dt is None or end_dt <= start_dt:
+        return {
+            "passed": False,
+            "window_minutes": 0,
+            "bar_minutes": bar_minutes,
+            "suggested_timeframe": "1-Minute",
+            "message": "Invalid operator start/end window.",
+        }
+    window_minutes = max(1, int((end_dt - start_dt).total_seconds() // 60))
+    passed = window_minutes >= bar_minutes
+    if window_minutes < 5:
+        suggested = "1-Minute"
+    elif window_minutes < 15:
+        suggested = "1-Minute" if timeframe_resolution == "15-Minute" else "5-Minute"
+    else:
+        suggested = timeframe_resolution if passed else "5-Minute"
+    message = ""
+    if not passed:
+        message = (
+            f"Operator window is {window_minutes} minute(s) — too short for "
+            f"{timeframe_resolution} (needs at least {bar_minutes} minute(s)). "
+            f"Switch to {suggested}."
+        )
+    return {
+        "passed": passed,
+        "window_minutes": window_minutes,
+        "bar_minutes": bar_minutes,
+        "suggested_timeframe": suggested,
+        "message": message,
+    }
+
+
 def _ensure_dataframe(data_stream):
     if pd is None:
         return None
@@ -1129,11 +1176,16 @@ def enforce_permanent_library_profit_floor(quality: dict) -> dict:
     else:
         effective_move = move_pct
     passed = effective_move >= floor_pct
+    tf_fit = out.get("timeframe_fit") or {}
+    if tf_fit and not tf_fit.get("passed", True):
+        passed = False
     out["floor_pct"] = floor_pct
     out["passed"] = passed
     out["trashed"] = not passed
     if not passed:
-        if friction_pct > 0 and net_margin_pct is not None:
+        if tf_fit and not tf_fit.get("passed", True):
+            out["trash_reason"] = tf_fit.get("message") or "timeframe_window_mismatch"
+        elif friction_pct > 0 and net_margin_pct is not None:
             out["trash_reason"] = (
                 f"BELOW_NET_ALPHA_FLOOR|gross={move_pct:.4f}%|"
                 f"friction={friction_pct:.4f}%|net={effective_move:.4f}%|"
@@ -1906,96 +1958,48 @@ def evaluate_playbook_quality_barrier(
     timeframe_resolution: str,
 ) -> dict:
     """
-    Pre-storage quality gate: hill bypass + liquidity ignition anchor + tiered floors.
-    1m >= 1.0%, 5m >= 6.0% strict alpha (net of slippage), 15m >= 5.0%.
+    Operator-first quality gate — only two decisions:
+    1) Window must fit the selected bar size (1m/5m/15m).
+    2) Net move inside the operator window must clear the tiered floor.
     """
     floor_pct = timeframe_margin_floor(timeframe_resolution)
     end_dt = _parse_session_datetime(end_date, end_time)
     start_dt = _parse_session_datetime(start_date, start_time)
+    timeframe_fit = validate_operator_timeframe_fit(start_dt, end_dt, timeframe_resolution)
+
+    operator_spike = _operator_window_spike_metrics(data_stream, start_dt, end_dt)
+    structural_move_pct = float(operator_spike.get("envelope_move_pct") or 0.0)
+    ignition_price = operator_spike.get("window_low")
+    exit_price = operator_spike.get("window_high")
+    ignition_ts = operator_spike.get("low_ts")
+    exit_anchor_ts = operator_spike.get("high_ts")
+    raw_exit_price = _price_at_datetime(data_stream, end_dt)
+
+    if start_dt is not None and end_dt is not None:
+        start_px = _price_at_datetime(data_stream, start_dt)
+        end_px = raw_exit_price
+        if start_px and end_px and start_px > 0:
+            coord_move = abs((end_px - start_px) / start_px * 100)
+            if coord_move > structural_move_pct:
+                structural_move_pct = coord_move
+                ignition_price = start_px
+                exit_price = end_px
+                ignition_ts = str(start_dt)
+                exit_anchor_ts = str(end_dt)
+
     lookback_start = _calibrated_lookback_start(
         end_dt,
         timeframe_resolution,
         start_dt=start_dt,
         data_stream=data_stream,
     ) if end_dt else None
-    inner_start = _clamp_inner_move_window(start_dt, end_dt, timeframe_resolution)
-    anchor_search_start = lookback_start
-    if inner_start is not None and lookback_start is not None:
-        anchor_search_start = max(inner_start, lookback_start)
-    elif inner_start is not None:
-        anchor_search_start = inner_start
-
-    _, baseline_window = (
-        _dynamic_1m_dragnet_window(data_stream, start_dt)
-        if timeframe_resolution == "1-Minute" and start_dt is not None
-        else _dynamic_5m_dragnet_window(data_stream, start_dt)
-        if timeframe_resolution == "5-Minute" and start_dt is not None
-        else (None, None)
-    )
-    if _dataframe_is_empty(baseline_window) and anchor_search_start is not None and end_dt is not None:
-        baseline_window = _lookback_window_frame(data_stream, end_dt, anchor_search_start)
-
-    raw_exit_price = _price_at_datetime(data_stream, end_dt)
-    entry_resolution = resolve_adaptive_entry_anchor(
-        data_stream,
-        exit_dt=end_dt,
-        manual_entry_dt=start_dt,
-        lookback_start_dt=anchor_search_start,
-        exit_price=raw_exit_price,
-        floor_pct=floor_pct,
-        timeframe_resolution=timeframe_resolution,
-        baseline_window=baseline_window,
-    )
-    anchor_ts = entry_resolution.get("anchor_timestamp")
-    anchor_price = entry_resolution.get("anchor_price")
-    if anchor_ts is not None and not isinstance(anchor_ts, datetime.datetime):
-        try:
-            anchor_ts = datetime.datetime.fromisoformat(str(anchor_ts).replace("Z", "+00:00"))
-        except ValueError:
-            pass
-
-    ignition_price = anchor_price
-    ignition_ts = anchor_ts
-    optimizer_meta = entry_resolution.get("optimizer_meta") or {}
-    if optimizer_meta.get("volatility_ignition_entry_price") is not None:
-        ignition_price = float(optimizer_meta["volatility_ignition_entry_price"])
-    if optimizer_meta.get("volatility_ignition_timestamp"):
-        ignition_ts = optimizer_meta["volatility_ignition_timestamp"]
-
-    operator_coordinate_fallback = False
-    if not ignition_price and start_dt is not None:
-        operator_entry_price = _price_at_datetime(data_stream, start_dt)
-        if operator_entry_price and operator_entry_price > 0:
-            ignition_price = operator_entry_price
-            ignition_ts = start_dt
-            operator_coordinate_fallback = True
-            entry_resolution = {
-                **(entry_resolution or {}),
-                "selected_candidate": "operator_coordinate_fallback",
-            }
-
-    structural_move_pct = 0.0
-    exit_price = raw_exit_price
-    exit_anchor_ts = str(end_dt) if end_dt is not None else None
-    if ignition_price and raw_exit_price and ignition_price > 0:
-        structural_move_pct = abs((raw_exit_price - ignition_price) / ignition_price * 100)
-        exit_price, exit_anchor_ts = resolve_stable_profit_exit_anchor(
-            data_stream,
-            exit_dt=end_dt,
-            anchor_price=ignition_price,
-            target_move_pct=structural_move_pct,
-            timeframe_resolution=timeframe_resolution,
-        )
-        if exit_price and ignition_price:
-            structural_move_pct = abs((exit_price - ignition_price) / ignition_price * 100)
-
-    gate_window = _lookback_window_frame(data_stream, end_dt, anchor_search_start)
+    gate_window = _lookback_window_frame(data_stream, end_dt, lookback_start)
     friction_pct = _execution_friction_buffer_pct(
         gate_window,
         timeframe_resolution=timeframe_resolution,
     )
     net_margin_pct = round(structural_move_pct - friction_pct, 4)
-    passed = net_margin_pct >= floor_pct
+    passed = bool(timeframe_fit.get("passed")) and net_margin_pct >= floor_pct
     quality = {
         "passed": passed,
         "trashed": not passed,
@@ -2012,17 +2016,15 @@ def evaluate_playbook_quality_barrier(
         "exit_anchor_timestamp": exit_anchor_ts,
         "timeframe_resolution": timeframe_resolution,
         "lookback_start": str(lookback_start) if lookback_start else None,
-        "exit_cluster_zone": st.session_state.get("room2_exit_cluster_zone", {}),
-        "entry_optimizer": entry_resolution.get("optimizer_meta")
-        or st.session_state.get("room2_entry_optimizer", {}),
-        "entry_candidate_selected": entry_resolution.get("selected_candidate"),
-        "hill_bypass_rewind": bool(
-            (entry_resolution.get("optimizer_meta") or {}).get("hill_bypass_rewind")
+        "entry_candidate_selected": "operator_window_envelope",
+        "operator_window_envelope": True,
+        "operator_spike_metrics": operator_spike,
+        "timeframe_fit": timeframe_fit,
+        "trash_reason": (
+            timeframe_fit.get("message")
+            if not timeframe_fit.get("passed")
+            else None
         ),
-        "liquidity_ignition": bool(
-            (entry_resolution.get("optimizer_meta") or {}).get("liquidity_ignition")
-        ),
-        "operator_coordinate_fallback": operator_coordinate_fallback,
     }
     return enforce_permanent_library_profit_floor(quality)
 
@@ -4334,8 +4336,8 @@ def parse_operator_boundaries(
 
 def validate_chart_data_coupling(data_stream, quality: dict | None = None) -> dict:
     """
-    Coupling lock — chart lane must pass before SEC text or Supabase vault writes.
-    Rejects empty arrays, 0.00% flatlines, and missing volume ignition.
+    Coupling lock — chart lane must have bars before SEC/vault writes.
+    Move quality is decided solely by the operator-window margin floor.
     """
     quality = dict(quality or {})
     frame = _ensure_dataframe(data_stream)
@@ -4350,57 +4352,13 @@ def validate_chart_data_coupling(data_stream, quality: dict | None = None) -> di
         if total_volume <= 0:
             reasons.append("zero_volume")
 
-    flatline = False
-    zero_velocity = False
-    if frame is not None and not frame.empty and "Close" in frame.columns and len(frame) >= 2:
-        closes = frame["Close"].astype(float)
-        first = float(closes.iloc[0])
-        last = float(closes.iloc[-1])
-        move_pct = abs((last - first) / first * 100.0) if first else 0.0
-        vel_series = closes.pct_change().fillna(0.0) * 100.0
-        max_vel = float(vel_series.abs().max() or 0.0)
-        if move_pct < 0.01 and float(closes.std() or 0.0) < 1e-8:
-            flatline = True
-            reasons.append("flatline_zero_move")
-        if max_vel < 0.01:
-            zero_velocity = True
-            reasons.append("velocity_flatline_0pct")
-
-    ignition = bool(quality.get("liquidity_ignition"))
-    if not ignition:
-        ignition = quality.get("volatility_ignition_entry_price") is not None
-    if not ignition:
-        entry_opt = quality.get("entry_optimizer") or st.session_state.get("room2_entry_optimizer") or {}
-        ignition = bool(entry_opt.get("liquidity_ignition")) or (
-            entry_opt.get("selected_candidate") == "volatility_ignition"
-        )
-    if not ignition:
-        ignition = bool(quality.get("operator_coordinate_fallback"))
-    if not ignition:
-        selected = quality.get("entry_candidate_selected") or entry_opt.get("selected_candidate")
-        if selected in (
-            "volume_std_anchor",
-            "velocity_spike_anchor",
-            "structure_baseline",
-            "manual_anchor",
-            "operator_coordinate_fallback",
-        ):
-            ignition = True
-    if not ignition:
-        move = float(quality.get("structural_move_pct") or 0.0)
-        floor = float(quality.get("floor_pct") or 0.0)
-        if quality.get("passed") and move >= floor:
-            ignition = True
-    if not ignition:
-        reasons.append("no_volume_ignition")
-
     passed = len(reasons) == 0
     return {
         "passed": passed,
         "trashed": not passed,
         "chart_coupling_ok": passed,
-        "flatline": flatline,
-        "zero_velocity": zero_velocity,
+        "flatline": False,
+        "zero_velocity": False,
         "total_volume": round(total_volume, 0),
         "rejection_reasons": reasons,
         "trash_reason": "|".join(reasons) if reasons else None,
@@ -5585,6 +5543,87 @@ def _operator_window_frame(
         return window if not window.empty else None
     except Exception:
         return frame
+
+
+def _trim_operator_window_to_liquid_core(window):
+    """Skip thin/gappy edges — scan from the first bar with usable volume."""
+    if window is None or _dataframe_is_empty(window) or "Volume" not in window.columns:
+        return window
+    vols = window["Volume"].astype(float).fillna(0.0)
+    if float(vols.max() or 0.0) <= 0.0:
+        return window
+    floor_vol = max(500.0, float(vols.median() or 0.0) * 0.2)
+    liquid = vols >= floor_vol
+    if not bool(liquid.any()):
+        liquid = vols > 0
+    if not bool(liquid.any()):
+        return window
+    first_ix = liquid[liquid].index[0]
+    last_ix = liquid[liquid].index[-1]
+    return window.loc[first_ix:last_ix]
+
+
+def _operator_window_spike_metrics(
+    data_stream,
+    start_dt: datetime.datetime | None,
+    end_dt: datetime.datetime | None,
+) -> dict:
+    """
+    Measure the rally envelope inside the operator-drawn window (low -> high).
+    """
+    empty = {
+        "envelope_move_pct": 0.0,
+        "peak_giveback_pct": 0.0,
+        "window_minutes": 0,
+        "window_low": None,
+        "window_high": None,
+        "end_close": None,
+        "low_ts": None,
+        "high_ts": None,
+        "trimmed_bars": 0,
+    }
+    frame = _ensure_dataframe(data_stream)
+    if frame is None or start_dt is None or end_dt is None or end_dt <= start_dt:
+        return empty
+    try:
+        window = frame[(frame.index >= start_dt) & (frame.index <= end_dt)]
+        if not isinstance(window, pd.DataFrame) or window.empty:
+            return empty
+        raw_bars = len(window)
+        window = _trim_operator_window_to_liquid_core(window)
+        if not isinstance(window, pd.DataFrame) or window.empty:
+            return empty
+        if "Low" not in window.columns or "High" not in window.columns:
+            return empty
+        lows = window["Low"].astype(float)
+        highs = window["High"].astype(float)
+        low_ts = lows.idxmin()
+        high_ts = highs.idxmax()
+        window_low = float(lows.min())
+        window_high = float(highs.max())
+        end_close = float(window["Close"].astype(float).iloc[-1])
+        if window_low <= 0 or window_high <= 0:
+            return empty
+        envelope_move_pct = (window_high - window_low) / window_low * 100.0
+        peak_giveback_pct = (
+            (window_high - end_close) / window_high * 100.0
+            if end_close < window_high
+            else 0.0
+        )
+        window_minutes = max(1, int((end_dt - start_dt).total_seconds() // 60))
+        return {
+            "envelope_move_pct": round(envelope_move_pct, 4),
+            "peak_giveback_pct": round(peak_giveback_pct, 4),
+            "window_minutes": window_minutes,
+            "window_low": round(window_low, 6),
+            "window_high": round(window_high, 6),
+            "end_close": round(end_close, 6),
+            "low_ts": str(low_ts),
+            "high_ts": str(high_ts),
+            "trimmed_bars": max(0, raw_bars - len(window)),
+        }
+    except Exception:
+        return empty
 
 
 def evaluate_session_data_quality(
