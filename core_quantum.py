@@ -21,6 +21,7 @@ import requests
 import streamlit as st
 
 import cloud_offload
+import vault_bridge
 
 try:
     import pandas as pd
@@ -5029,13 +5030,33 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
     quality = st.session_state.get("room2_playbook_quality") or {}
     if not coupling.get("passed") or not quality.get("passed"):
         return False, "VAULT BLOCKED — chart coupling or quality gate failed (PRE-STORAGE TRASH)."
-    try:
-        supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
-        supabase_key = st.secrets["SUPABASE_KEY"]
-    except Exception:
-        return False, "Supabase offline. Add SUPABASE_URL and SUPABASE_KEY to `.streamlit/secrets.toml`."
 
-    table = _supabase_table_name()
+    def _align_legacy_forensic_pattern_row(body: dict) -> dict:
+        """Map new vault fields onto legacy NOT NULL columns (pattern_type, trigger_timestamp)."""
+        row = dict(body)
+        ts = row.get("timestamp") or row.get("trigger_timestamp")
+        if ts:
+            row.setdefault("trigger_timestamp", ts)
+            row.setdefault("timestamp", ts)
+        category = row.get("pattern_category") or row.get("pattern_type") or "VALIDATED"
+        row.setdefault("pattern_type", str(category)[:50])
+        row.setdefault("pattern_category", str(category))
+        tf = row.get("timeframe_resolution") or row.get("timeframe") or "15-Minute"
+        row.setdefault("timeframe", str(tf)[:10])
+        row.setdefault("timeframe_resolution", str(tf))
+        return row
+
+    payload = _align_legacy_forensic_pattern_row(payload)
+    cfg = vault_bridge.supabase_settings()
+    if not cfg["ready"]:
+        return False, (
+            "Supabase offline. Add SUPABASE_URL and SUPABASE_KEY to `.streamlit/secrets.toml` "
+            "(pattern saved to local disk cache on this machine)."
+        )
+
+    supabase_url = cfg["url"]
+    supabase_key = cfg["key"]
+    table = cfg["table"]
     extended_fields = (
         "timeframe_resolution",
         "macro_weather_layout",

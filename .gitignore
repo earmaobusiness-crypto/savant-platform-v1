@@ -1,4 +1,5 @@
 .streamlit/secrets.toml
+.streamlit/matrix_vault_cache.json
 __pycache__/
 .venv/
 .env

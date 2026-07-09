@@ -12,6 +12,7 @@ from xml.etree import ElementTree
 import cloud_offload
 import core_quantum
 import self_surgery
+import vault_bridge
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -819,12 +820,10 @@ if "purgatory_signature" not in st.session_state: st.session_state.purgatory_sig
 if "room2_text_matrix_string" not in st.session_state: st.session_state.room2_text_matrix_string = ""
 if "room2_deep_research_audit" not in st.session_state: st.session_state.room2_deep_research_audit = {}
 if "supabase_ready" not in st.session_state:
-    try:
-        st.session_state.supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
-        st.session_state.supabase_key = st.secrets["SUPABASE_KEY"]
-        st.session_state.supabase_ready = True
-    except Exception:
-        st.session_state.supabase_ready = False
+    _sb_cfg = vault_bridge.supabase_settings()
+    st.session_state.supabase_url = _sb_cfg["url"]
+    st.session_state.supabase_key = _sb_cfg["key"]
+    st.session_state.supabase_ready = _sb_cfg["ready"]
 if "sidebar_collapsed" not in st.session_state: st.session_state.sidebar_collapsed = False
 if "terminal_hub" not in st.session_state: st.session_state.terminal_hub = ROOM1_LABEL
 
@@ -1588,14 +1587,10 @@ TRASH_VAULT_BULK_NOTICE = (
 
 
 def _ensure_supabase_session() -> None:
-    if st.session_state.get("supabase_ready"):
-        return
-    try:
-        st.session_state.supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
-        st.session_state.supabase_key = st.secrets["SUPABASE_KEY"]
-        st.session_state.supabase_ready = True
-    except Exception:
-        st.session_state.supabase_ready = False
+    cfg = vault_bridge.supabase_settings()
+    st.session_state.supabase_url = cfg["url"]
+    st.session_state.supabase_key = cfg["key"]
+    st.session_state.supabase_ready = cfg["ready"]
 
 
 def _supabase_rest_headers() -> dict:
@@ -1607,10 +1602,7 @@ def _supabase_rest_headers() -> dict:
 
 
 def _forensic_patterns_table() -> str:
-    try:
-        return st.secrets["SUPABASE_PATTERN_TABLE"]
-    except (KeyError, FileNotFoundError, AttributeError):
-        return "forensic_patterns"
+    return str(vault_bridge.supabase_settings().get("table") or "forensic_patterns")
 
 
 def _pattern_archive_query_suffix(*, active_only: bool = True, trash_only: bool = False) -> str:
@@ -2000,11 +1992,26 @@ def _merge_vault_inventory_rows(
 
 def _collect_matrix_inventory_rows() -> list[dict]:
     cloud_rows = _fetch_all_active_pattern_rows(limit=50)
+    local_rows = vault_bridge.local_pattern_rows()
     registry = [
         row for row in (st.session_state.get("room2_deploy_registry") or []) if isinstance(row, dict)
     ]
     session_rows = _session_inventory_rows()
     merged = _merge_vault_inventory_rows(cloud_rows, registry)
+    for row in local_rows:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").strip().upper()
+        if not ticker:
+            continue
+        key = f"local|{ticker}|{str(row.get('timestamp') or '')[:19]}"
+        if not any(
+            str(existing.get("ticker") or "").upper() == ticker
+            and str(existing.get("timestamp") or "")[:19]
+            == str(row.get("timestamp") or "")[:19]
+            for existing in merged
+        ):
+            merged.append(row)
     if merged:
         return merged
     if session_rows:
@@ -2016,8 +2023,9 @@ def _sync_matrix_active_pattern_count_from_cloud() -> int:
     """Keep session count aligned with actual vault rows (header count can lie)."""
     rows = _fetch_all_active_pattern_rows(limit=100)
     session_rows = _session_inventory_rows()
+    local_n = len(vault_bridge.local_pattern_rows())
     header_count = _count_cloud_pattern_rows(trash_only=False)
-    active = max(len(rows), len(session_rows), int(header_count or 0))
+    active = max(len(rows), len(session_rows), local_n, int(header_count or 0))
     st.session_state.matrix_active_pattern_count = active
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
     return active
@@ -2139,74 +2147,79 @@ def _parse_matrix_chat_blob(raw: str) -> tuple[list, dict, list]:
 
 
 def _sync_matrix_chat_to_cloud() -> None:
-    """Persist Room 2 lab chat so the Matrix remembers across refresh and devices."""
+    """Persist Room 2 lab chat — local disk always, Supabase when configured."""
+    vault_bridge.sync_local_lab_state(
+        chat_messages=st.session_state.room2_chat_history,
+        deploy_snapshot=st.session_state.get("room2_last_successful_deploy") or {},
+        deploy_registry=st.session_state.get("room2_deploy_registry") or [],
+        terminal=str(st.session_state.get("quantum_terminal_output", "")),
+    )
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
+        st.session_state.matrix_chat_cloud_sync_ok = False
         return
-    table = _forensic_patterns_table()
-    base = st.session_state.supabase_url
     chat_blob = _encode_matrix_chat_blob()
     terminal_snapshot = str(st.session_state.get("quantum_terminal_output", ""))[:12000]
-    payload = {
-        "ticker": MATRIX_CHAT_LOG_TICKER,
-        "pattern_category": MATRIX_CHAT_LOG_CATEGORY,
-        "operator_context": chat_blob,
-        "quantum_report": terminal_snapshot,
-        "source_room": "forensic_pattern_lab",
-        "state": "active",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    headers = {**_supabase_rest_headers(), "Prefer": "return=minimal"}
-    try:
-        lookup = requests.get(
-            f"{base}/rest/v1/{table}?ticker=eq.{MATRIX_CHAT_LOG_TICKER}"
-            f"&pattern_category=eq.{MATRIX_CHAT_LOG_CATEGORY}"
-            f"&select=id&order=timestamp.desc&limit=1",
-            headers=_supabase_rest_headers(),
-            timeout=12,
+    ok, _err = vault_bridge.supabase_sync_chat_blob(chat_blob, terminal_snapshot)
+    st.session_state.matrix_chat_cloud_sync_ok = bool(ok)
+    if ok:
+        st.session_state.matrix_chat_cloud_sync_at = datetime.now(timezone.utc).isoformat()
+
+
+def _load_matrix_memory_from_local() -> None:
+    """Restore chat + deploy registry from on-disk cache (survives browser refresh)."""
+    cache = vault_bridge.load_local_cache()
+    if not isinstance(cache, dict):
+        return
+    parsed_messages, deploy_snap, deploy_registry = _parse_matrix_chat_blob(
+        json.dumps(
+            {
+                "v": 2,
+                "messages": cache.get("chat_messages") or [],
+                "deploy_snapshot": cache.get("deploy_snapshot") or {},
+                "deploy_registry": cache.get("deploy_registry") or [],
+            }
         )
-        if lookup.ok and lookup.json():
-            row_id = lookup.json()[0]["id"]
-            resp = requests.patch(
-                f"{base}/rest/v1/{table}?id=eq.{row_id}",
-                headers=headers,
-                json=payload,
-                timeout=12,
-            )
-        else:
-            resp = requests.post(
-                f"{base}/rest/v1/{table}",
-                headers=headers,
-                json=[payload],
-                timeout=12,
-            )
-        st.session_state.matrix_chat_cloud_sync_ok = bool(resp.ok)
-        if resp.ok:
-            st.session_state.matrix_chat_cloud_sync_at = payload["timestamp"]
-    except Exception:
-        st.session_state.matrix_chat_cloud_sync_ok = False
+    )
+    if deploy_snap and str(deploy_snap.get("ticker") or "").strip():
+        st.session_state.room2_last_successful_deploy = deploy_snap
+    if deploy_registry:
+        existing = [
+            row
+            for row in (st.session_state.get("room2_deploy_registry") or [])
+            if isinstance(row, dict)
+        ]
+        st.session_state.room2_deploy_registry = _merge_deploy_registries(
+            existing,
+            deploy_registry if isinstance(deploy_registry, list) else [],
+        )
+    local = st.session_state.get("room2_chat_history") or []
+    if parsed_messages and (not local or len(parsed_messages) >= len(local)):
+        st.session_state.room2_chat_history = parsed_messages
+    saved_terminal = str(cache.get("terminal") or "").strip()
+    if saved_terminal and MATRIX_ENGINE_IDLE_MARKER not in saved_terminal:
+        st.session_state.quantum_terminal_output = saved_terminal
+        _window4_restore_vault_flags_from_report(saved_terminal)
+    for row in vault_bridge.local_pattern_rows():
+        if not isinstance(row, dict):
+            continue
+        _window4_append_deploy_registry_entry(
+            ticker=str(row.get("ticker") or ""),
+            layout=str(row.get("macro_weather_layout") or ""),
+            strategy=str(row.get("execution_strategy") or ""),
+            timeframe=str(row.get("timeframe_resolution") or ""),
+            structural_move=float(row.get("structural_move_pct") or 0.0),
+        )
 
 
 def _load_matrix_chat_from_cloud(*, force: bool = False) -> None:
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return
-    table = _forensic_patterns_table()
-    base = st.session_state.supabase_url
+    raw_chat, saved_terminal, _err = vault_bridge.supabase_load_chat_blob()
+    if not raw_chat and not saved_terminal:
+        return
     try:
-        resp = requests.get(
-            f"{base}/rest/v1/{table}?ticker=eq.{MATRIX_CHAT_LOG_TICKER}"
-            f"&pattern_category=eq.{MATRIX_CHAT_LOG_CATEGORY}"
-            f"&select=operator_context,quantum_report,timestamp&order=timestamp.desc&limit=1",
-            headers=_supabase_rest_headers(),
-            timeout=12,
-        )
-        if not resp.ok:
-            return
-        rows = resp.json()
-        if not rows:
-            return
-        raw_chat = rows[0].get("operator_context") or "[]"
         parsed_messages, deploy_snap, deploy_registry = _parse_matrix_chat_blob(str(raw_chat))
         if deploy_snap and str(deploy_snap.get("ticker") or "").strip():
             st.session_state.room2_last_successful_deploy = deploy_snap
@@ -2247,42 +2260,45 @@ def _load_matrix_chat_from_cloud(*, force: bool = False) -> None:
                 normalized.append(row)
             if force or not local or len(normalized) >= len(local):
                 st.session_state.room2_chat_history = normalized
-        saved_terminal = str(rows[0].get("quantum_report") or "").strip()
         if saved_terminal and MATRIX_ENGINE_IDLE_MARKER not in saved_terminal:
             st.session_state.quantum_terminal_output = saved_terminal
             _window4_restore_vault_flags_from_report(saved_terminal)
-        st.session_state.matrix_chat_cloud_loaded_at = str(rows[0].get("timestamp") or "")
+        st.session_state.matrix_chat_cloud_loaded_at = datetime.now(timezone.utc).isoformat()
     except Exception:
         pass
 
 
 def _refresh_matrix_cloud_wire(*, reload_chat: bool = False) -> None:
-    """Live Supabase pull — Window 4 and the header count must not rely on session-only memory."""
+    """Live vault pull — cloud when configured, local disk always."""
+    _load_matrix_memory_from_local()
     _ensure_supabase_session()
-    if not st.session_state.get("supabase_ready"):
-        return
-    if reload_chat:
+    if reload_chat and st.session_state.get("supabase_ready"):
         _load_matrix_chat_from_cloud(force=not bool(st.session_state.get("room2_chat_history")))
-    cloud_rows = _fetch_all_active_pattern_rows(limit=50)
-    if cloud_rows:
-        cloud_registry = [_registry_entry_from_pattern_row(row) for row in cloud_rows]
-        session_reg = [
-            row for row in (st.session_state.get("room2_deploy_registry") or []) if isinstance(row, dict)
-        ]
-        st.session_state.room2_deploy_registry = _merge_deploy_registries(
-            session_reg,
-            cloud_registry,
-        )
+    cloud_rows: list[dict] = []
+    if st.session_state.get("supabase_ready"):
+        cloud_rows = _fetch_all_active_pattern_rows(limit=50)
+        if cloud_rows:
+            cloud_registry = [_registry_entry_from_pattern_row(row) for row in cloud_rows]
+            session_reg = [
+                row
+                for row in (st.session_state.get("room2_deploy_registry") or [])
+                if isinstance(row, dict)
+            ]
+            st.session_state.room2_deploy_registry = _merge_deploy_registries(
+                session_reg,
+                cloud_registry,
+            )
     st.session_state.matrix_active_pattern_count = _sync_matrix_active_pattern_count_from_cloud()
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
 
 
 def _hydrate_matrix_memory_from_cloud() -> None:
-    """Load Matrix pattern archive + lab chat from Supabase once per session."""
+    """Load Matrix pattern archive + lab chat from local disk and Supabase once per session."""
     if st.session_state.get("matrix_cloud_hydrated"):
         return
     st.session_state.matrix_cloud_hydrated = True
 
+    _load_matrix_memory_from_local()
     _purge_expired_trash_vault()
     _purge_expired_anomaly_incubation()
     core_quantum.hydrate_layout_library_from_vault()
@@ -2931,14 +2947,21 @@ def _window4_format_session_deploy_inventory(session: dict, *, trash: int) -> st
 
 
 def _window4_latest_saved_pattern_row() -> dict | None:
-    """Latest non-chat-log pattern row from cloud — survives browser refresh."""
+    """Latest non-chat-log pattern row — cloud first, then local disk cache."""
     row = _fetch_latest_active_pattern_row()
-    if not row:
-        return None
-    ticker = str(row.get("ticker") or "").strip().upper()
-    if not ticker or ticker == MATRIX_CHAT_LOG_TICKER:
-        return None
-    return _pattern_row_effective_fields(row)
+    if row:
+        ticker = str(row.get("ticker") or "").strip().upper()
+        if ticker and ticker != MATRIX_CHAT_LOG_TICKER:
+            return _pattern_row_effective_fields(row)
+    local_rows = vault_bridge.local_pattern_rows()
+    if local_rows:
+        latest = sorted(
+            local_rows,
+            key=lambda r: str(r.get("timestamp") or ""),
+            reverse=True,
+        )[0]
+        return _pattern_row_effective_fields(latest)
+    return None
 
 
 def _window4_restore_vault_flags_from_report(report: str) -> None:
@@ -2981,34 +3004,37 @@ def _window4_append_vault_roster_reply() -> None:
 
 
 def _window4_build_vault_inventory_reply() -> str:
-    """Deterministic vault inventory — cloud rows + verified session deploys."""
+    """Deterministic vault inventory — cloud rows + local disk + verified session deploys."""
     _refresh_matrix_cloud_wire(reload_chat=False)
     _ensure_supabase_session()
-    if not st.session_state.get("supabase_ready"):
-        return (
-            "Cloud vault is offline — Supabase is not configured, so I cannot list saved patterns."
-        )
+    supabase_ready = bool(st.session_state.get("supabase_ready"))
 
     trash = _count_cloud_pattern_rows(trash_only=True)
     rows = _collect_matrix_inventory_rows()
     if rows:
-        cloud_n = len(_fetch_all_active_pattern_rows(limit=50))
-        session_only = cloud_n == 0 and any(row.get("_source") for row in rows)
+        cloud_n = len(_fetch_all_active_pattern_rows(limit=50)) if supabase_ready else 0
+        local_n = len(vault_bridge.local_pattern_rows())
         body = _format_vault_pattern_roster(rows, trash=trash)
-        if session_only:
+        if not supabase_ready:
             body += (
-                "\n\n*(Cloud read returned 0 rows — showing verified session deploys. "
+                "\n\n⚠️ **Supabase is not configured** — showing patterns saved to "
+                "`.streamlit/matrix_vault_cache.json` on this machine. Add "
+                "`SUPABASE_URL` and `SUPABASE_KEY` to `.streamlit/secrets.toml` for cloud sync."
+            )
+        elif cloud_n == 0 and local_n > 0:
+            body += (
+                "\n\n*(Cloud read returned 0 rows — showing local disk backup. "
                 "If this persists after VAULT SYNC OK, check Supabase RLS read policy.)*"
             )
         fetch_err = st.session_state.get("matrix_vault_fetch_error")
-        if fetch_err and cloud_n == 0:
+        if fetch_err and supabase_ready and cloud_n == 0:
             body += f"\n\n*Fetch note: `{fetch_err}`*"
         return body
 
     active = int(st.session_state.get("matrix_active_pattern_count") or 0)
     if active > 0:
         return (
-            f"**{active} active pattern(s)** reported in cloud vault ({trash} in Trash Vault), "
+            f"**{active} active pattern(s)** reported in vault ({trash} in Trash Vault), "
             "but the roster fetch returned empty — check Supabase read permissions (RLS)."
         )
 
@@ -3022,6 +3048,10 @@ def _window4_build_vault_inventory_reply() -> str:
             "Deploy is still running in Window 1 — nothing has been written to the vault yet."
         )
     hints: list[str] = []
+    if not supabase_ready:
+        hints.append(
+            "Supabase is offline — add SUPABASE_URL and SUPABASE_KEY to `.streamlit/secrets.toml`."
+        )
     if st.session_state.get("polygon_lockout"):
         hints.append("API throttle is active — wait ~60s, then redeploy.")
     report = str(st.session_state.get("room2_quantum_report") or "")
@@ -3031,7 +3061,7 @@ def _window4_build_vault_inventory_reply() -> str:
         hints.append("Last deploy did not fetch bars — use a past session date and regular hours.")
     hint = f" {' '.join(hints)}" if hints else ""
     return (
-        f"No active patterns in the cloud vault ({trash} in Trash Vault).{hint} "
+        f"No active patterns in the matrix vault ({trash} in Trash Vault).{hint} "
         "Submitting the form only queues a deploy — patterns appear here after Window 1 "
         "completes vault sync."
     )
@@ -3292,15 +3322,16 @@ def _window4_conversational_context_tags() -> str:
     """Light session tags so conversational Groq does not contradict vault inventory."""
     bits: list[str] = []
     _refresh_matrix_cloud_wire(reload_chat=False)
-    if st.session_state.get("supabase_ready"):
-        rows = _collect_matrix_inventory_rows()
-        if rows:
-            tickers = sorted(
-                {str(row.get("ticker") or "").strip().upper() for row in rows if row.get("ticker")}
-            )
-            if tickers:
-                bits.append(f"[VAULT_TICKERS {', '.join(tickers)}]")
-            bits.append(f"[VAULT_INVENTORY active_patterns={len(rows)}]")
+    rows = _collect_matrix_inventory_rows()
+    if rows:
+        tickers = sorted(
+            {str(row.get("ticker") or "").strip().upper() for row in rows if row.get("ticker")}
+        )
+        if tickers:
+            bits.append(f"[VAULT_TICKERS {', '.join(tickers)}]")
+        bits.append(f"[VAULT_INVENTORY active_patterns={len(rows)}]")
+    if not st.session_state.get("supabase_ready"):
+        bits.append("[SUPABASE offline — inventory from local disk cache]")
     if _window4_last_deploy_verified():
         ticker = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
         if ticker:
@@ -4323,6 +4354,24 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
 
     ok, vault_message = core_quantum.stream_payload_to_vault(payload)
     vault_synced_ui = False
+    if quality.get("passed") and chart_coupling.get("passed"):
+        saved_at = datetime.now(timezone.utc).isoformat()
+        vault_bridge.append_local_pattern(
+            {
+                "ticker": ticker,
+                "layout": macro_weather_layout,
+                "strategy": execution_strategy,
+                "timeframe": timeframe_resolution,
+                "structural_move": structural_move,
+                "saved_at": saved_at,
+            }
+        )
+        vault_bridge.sync_local_lab_state(
+            chat_messages=st.session_state.get("room2_chat_history") or [],
+            deploy_snapshot=st.session_state.get("room2_last_successful_deploy") or {},
+            deploy_registry=st.session_state.get("room2_deploy_registry") or [],
+            terminal=str(st.session_state.get("quantum_terminal_output", "")),
+        )
     if ok:
         readback = _fetch_pattern_rows_for_ticker(ticker, limit=3)
         st.session_state.matrix_last_vault_readback = readback
@@ -4387,7 +4436,13 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
         else:
             vault_line = vault_message
     else:
-        vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
+        if quality.get("passed") and chart_coupling.get("passed") and not ok:
+            vault_line = (
+                f"LOCAL VAULT SAVED — **{ticker}** persisted on this machine. "
+                f"Cloud sync pending: {vault_message}"
+            )
+        else:
+            vault_line = vault_message if ok else f"VAULT ERROR — {vault_message}"
 
     if ok and quality.get("passed"):
         velocity = st.session_state.get("room2_last_velocity") or {}
@@ -4430,12 +4485,26 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
             f"{quantum_report}\n\n{incubation_msg}",
             vault_line if ok else None,
         )
-    elif ok and quality.get("passed") and chart_coupling.get("passed"):
-        confirm = (
-            f"✅ VAULT SYNC OK — {ticker} · {timeframe_resolution} · "
-            f"{structural_move:.2f}% structural move · "
-            f"bars={st.session_state.room2_bar_count} · Massive REST lane live."
-        )
+    elif quality.get("passed") and chart_coupling.get("passed"):
+        if ok:
+            confirm = (
+                f"✅ VAULT SYNC OK — {ticker} · {timeframe_resolution} · "
+                f"{structural_move:.2f}% structural move · "
+                f"bars={st.session_state.room2_bar_count} · Massive REST lane live."
+            )
+            sync_note = str(
+                (st.session_state.get("room2_strategy_trust") or {}).get("message")
+                or "Cloud vault synced."
+            )
+        else:
+            confirm = (
+                f"✅ LOCAL VAULT OK — {ticker} · {timeframe_resolution} · "
+                f"{structural_move:.2f}% structural move · saved on this machine."
+            )
+            sync_note = (
+                "Saved to local matrix cache (survives refresh). "
+                "Add SUPABASE_URL and SUPABASE_KEY for cloud sync."
+            )
         final_terminal = _assign_matrix_terminal_output(
             quantum_report,
             f"{vault_line}\n{confirm}",
@@ -4456,7 +4525,7 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
         deploy_note = (
             f"✅ **Pattern saved** — **{ticker}** · **{macro_weather_layout}** · "
             f"**{execution_strategy}** · {structural_move:.2f}% structural move. "
-            f"{str((st.session_state.get('room2_strategy_trust') or {}).get('message') or 'Cloud vault synced.')}"
+            f"{sync_note}"
         )
         st.session_state.room2_chat_history.append(
             {
@@ -4468,7 +4537,7 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
     else:
         final_terminal = _assign_matrix_terminal_output(quantum_report, vault_line if ok else None)
 
-    if ok and not vault_synced_ui:
+    if (ok or (quality.get("passed") and chart_coupling.get("passed"))) and not vault_synced_ui:
         _window4_record_deploy_snapshot(
             ticker=ticker,
             layout=macro_weather_layout,
@@ -4478,7 +4547,7 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
             vault_synced=True,
         )
 
-    if ok:
+    if ok or (quality.get("passed") and chart_coupling.get("passed")):
         _window4_append_deploy_registry_entry(
             ticker=ticker,
             layout=macro_weather_layout,
@@ -4489,7 +4558,11 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
 
     core_quantum.complete_processing_heartbeat(final_terminal)
     st.session_state.room2_quantum_report = final_terminal
-    st.session_state.room2_vault_flash = vault_line if ok else ""
+    st.session_state.room2_vault_flash = (
+        vault_line
+        if ok or (quality.get("passed") and chart_coupling.get("passed"))
+        else ""
+    )
     st.session_state.matrix_satellites_ready = True
     st.session_state.matrix_active_pattern_count = _sync_matrix_active_pattern_count_from_cloud()
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
@@ -5309,6 +5382,19 @@ def render_room2_forensic_lab():
         f"☁️ **Winning-DNA Memory (cloud-synced):** {active_count} active layouts · "
         f"{trash_count} in {RESCUE_VAULT_RETENTION_DAYS}-day Trash Vault."
     )
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        st.error(
+            "🔌 **Matrix vault offline** — Supabase is not configured on this machine. "
+            "Patterns and chat are saved locally to `.streamlit/matrix_vault_cache.json` "
+            "(survives refresh on this Mac). Add `SUPABASE_URL` and `SUPABASE_KEY` to "
+            "`.streamlit/secrets.toml` for internet vault sync."
+        )
+    elif st.session_state.get("matrix_vault_fetch_error"):
+        st.warning(
+            f"☁️ Supabase connected but last pattern fetch failed: "
+            f"`{st.session_state.matrix_vault_fetch_error}`"
+        )
     _render_market_weather_banner()
     st.caption(
         "🧬 **Matrix core (Room 2):** market weather → layout buckets → strategies inside each bucket. "
