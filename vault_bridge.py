@@ -304,6 +304,39 @@ def append_local_pattern(entry: dict) -> None:
     save_local_cache(cache)
 
 
+def clear_local_vault_cache(*, patterns: bool = True, deploy_registry: bool = True) -> None:
+    """Wipe local pattern backup — used when operator clears the matrix vault."""
+    cache = load_local_cache()
+    if patterns:
+        cache["patterns"] = []
+    if deploy_registry:
+        cache["deploy_registry"] = []
+        cache["deploy_snapshot"] = {}
+    save_local_cache(cache)
+
+
+def remove_latest_local_pattern(*, ticker: str | None = None) -> bool:
+    """Drop the most recent local backup row — optional ticker filter."""
+    cache = load_local_cache()
+    patterns = [row for row in (cache.get("patterns") or []) if isinstance(row, dict)]
+    if not patterns:
+        return False
+    want = str(ticker or "").strip().upper()
+    if want:
+        for idx in range(len(patterns) - 1, -1, -1):
+            row = patterns[idx]
+            if str(row.get("ticker") or "").strip().upper() == want:
+                patterns.pop(idx)
+                cache["patterns"] = patterns
+                save_local_cache(cache)
+                return True
+        return False
+    patterns.pop()
+    cache["patterns"] = patterns
+    save_local_cache(cache)
+    return True
+
+
 def sync_local_lab_state(
     *,
     chat_messages: list | None = None,
