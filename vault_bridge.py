@@ -246,18 +246,50 @@ def supabase_rest(
         return 0, None, str(exc)
 
 
-def supabase_fetch_patterns(*, limit: int = 50) -> tuple[list[dict], str | None]:
+def supabase_probe() -> tuple[bool, str | None]:
+    """Quick read test — returns (ok, error_message)."""
+    status, body, err = supabase_rest(
+        "GET",
+        "",
+        params="?select=ticker&limit=1",
+        timeout=10,
+    )
+    if status and 200 <= status < 300:
+        return True, None
+    if err and ("<!DOCTYPE html>" in err or "data-next-head" in err):
+        return False, (
+            "wrong SUPABASE_URL — use https://YOUR-PROJECT.supabase.co "
+            "(Settings → API), not supabase.com/dashboard/..."
+        )
+    return False, err or f"HTTP {status}"
+
+
+def supabase_fetch_raw_rows(*, limit: int = 100) -> tuple[list[dict], str | None]:
+    """Unfiltered table pull for inventory + trash counts."""
     status, body, err = supabase_rest(
         "GET",
         "",
         params=f"?select=*&order=timestamp.desc&limit={int(limit)}",
+        timeout=12,
     )
     if not status or err:
+        if err and ("<!DOCTYPE html>" in str(err) or "data-next-head" in str(err)):
+            return [], (
+                "wrong SUPABASE_URL — use https://YOUR-PROJECT.supabase.co "
+                "(Settings → API), not supabase.com/dashboard/..."
+            )
         return [], err
     if not isinstance(body, list):
-        return [], err or "invalid_response"
-    rows: list[dict] = []
-    for row in body:
+        return [], "invalid_response"
+    return body, None
+
+
+def supabase_fetch_patterns(*, limit: int = 50) -> tuple[list[dict], str | None]:
+    rows, err = supabase_fetch_raw_rows(limit=int(limit))
+    if err:
+        return [], err
+    filtered: list[dict] = []
+    for row in rows:
         if not isinstance(row, dict):
             continue
         ticker = str(row.get("ticker") or "").strip().upper()
@@ -267,8 +299,8 @@ def supabase_fetch_patterns(*, limit: int = 50) -> tuple[list[dict], str | None]
             continue
         if str(row.get("state") or "").strip().lower() == "soft_deleted":
             continue
-        rows.append(row)
-    return rows, None
+        filtered.append(row)
+    return filtered, None
 
 
 def supabase_write_pattern(payload: dict) -> tuple[bool, str]:

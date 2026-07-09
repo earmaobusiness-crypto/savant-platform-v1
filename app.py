@@ -826,6 +826,9 @@ st.session_state.supabase_url = _sb_cfg["url"]
 st.session_state.supabase_key = _sb_cfg["key"]
 st.session_state.supabase_ready = _sb_cfg["ready"]
 st.session_state.supabase_url_misconfigured = bool(_sb_cfg.get("url_misconfigured"))
+_vault_ok, _vault_err = vault_bridge.supabase_probe() if _sb_cfg["ready"] else (False, None)
+st.session_state.matrix_vault_probe_ok = bool(_vault_ok)
+st.session_state.matrix_vault_fetch_error = _vault_err if not _vault_ok else None
 if "sidebar_collapsed" not in st.session_state: st.session_state.sidebar_collapsed = False
 if "terminal_hub" not in st.session_state: st.session_state.terminal_hub = ROOM1_LABEL
 
@@ -1601,11 +1604,8 @@ def _normalize_supabase_rest_base(url: str) -> str:
 
 
 def _supabase_rest_headers() -> dict:
-    return {
-        "apikey": st.session_state.supabase_key,
-        "Authorization": f"Bearer {st.session_state.supabase_key}",
-        "Content-Type": "application/json",
-    }
+    cfg = vault_bridge.supabase_settings()
+    return vault_bridge.supabase_headers(cfg["key"])
 
 
 def _forensic_patterns_table() -> str:
@@ -1627,7 +1627,7 @@ def _purge_expired_anomaly_incubation() -> None:
         return
     cutoff = datetime.now(timezone.utc).isoformat()
     table = _forensic_patterns_table()
-    base = st.session_state.supabase_url
+    base = vault_bridge.supabase_settings()["url"]
     try:
         requests.delete(
             f"{base}/rest/v1/{table}?state=eq.{VAULT_STATE_INCUBATION}"
@@ -1710,7 +1710,7 @@ def _purge_expired_trash_vault() -> None:
         datetime.now(timezone.utc) - timedelta(days=RESCUE_VAULT_RETENTION_DAYS)
     ).isoformat()
     table = _forensic_patterns_table()
-    base = st.session_state.supabase_url
+    base = vault_bridge.supabase_settings()["url"]
     try:
         requests.delete(
             f"{base}/rest/v1/{table}?state=eq.soft_deleted"
@@ -1819,38 +1819,18 @@ def _is_archived_pattern_row(row: dict, *, trash_only: bool = False) -> bool:
 
 
 def _supabase_fetch_raw_pattern_rows(*, limit: int = 100) -> tuple[list[dict], str | None]:
-    """Raw Supabase pull — filter in Python so PostgREST state quirks cannot hide rows."""
+    """Raw Supabase pull — always via vault_bridge (project secrets.toml)."""
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return [], "supabase_offline"
-    table = _forensic_patterns_table()
-    base = _normalize_supabase_rest_base(st.session_state.supabase_url)
-    headers = _supabase_rest_headers()
-    errors: list[str] = []
-    for query_suffix in (
-        f"?select=*&order=timestamp.desc&limit={int(limit)}",
-        f"?select=*{_pattern_archive_query_suffix(active_only=False)}"
-        f"&order=timestamp.desc&limit={int(limit)}",
-    ):
-        try:
-            resp = requests.get(f"{base}/rest/v1/{table}{query_suffix}", headers=headers, timeout=12)
-            if not resp.ok:
-                snippet = resp.text[:120]
-                if "<!DOCTYPE html>" in snippet or "data-next-head" in snippet:
-                    errors.append(
-                        "HTTP 404: wrong SUPABASE_URL — use API URL "
-                        "(https://YOUR-PROJECT.supabase.co), not the dashboard browser link"
-                    )
-                else:
-                    errors.append(f"HTTP {resp.status_code}: {snippet}")
-                continue
-            payload = resp.json()
-            if isinstance(payload, list):
-                st.session_state.matrix_vault_fetch_error = None
-                return payload, None
-        except Exception as exc:
-            errors.append(str(exc))
-    return [], "; ".join(errors) if errors else "empty_response"
+    rows, err = vault_bridge.supabase_fetch_raw_rows(limit=int(limit))
+    if err:
+        st.session_state.matrix_vault_probe_ok = False
+        st.session_state.matrix_vault_fetch_error = err
+    else:
+        st.session_state.matrix_vault_probe_ok = True
+        st.session_state.matrix_vault_fetch_error = None
+    return rows, err
 
 
 def _fetch_all_active_pattern_rows(*, limit: int = 50) -> list[dict]:
@@ -1875,7 +1855,7 @@ def _fetch_pattern_rows_for_ticker(ticker: str, *, limit: int = 5) -> list[dict]
     if not st.session_state.get("supabase_ready"):
         return []
     table = _forensic_patterns_table()
-    base = st.session_state.supabase_url
+    base = vault_bridge.supabase_settings()["url"]
     try:
         resp = requests.get(
             f"{base}/rest/v1/{table}?ticker=eq.{clean}"
@@ -2471,7 +2451,7 @@ def _soft_delete_latest_pattern_to_vault() -> str:
         return "⚠️ Trash Vault offline — add SUPABASE_URL and SUPABASE_KEY to secrets."
 
     table = _forensic_patterns_table()
-    base = st.session_state.supabase_url
+    base = vault_bridge.supabase_settings()["url"]
     try:
         lookup = requests.get(
             f"{base}/rest/v1/{table}?select=id,ticker,pattern_category"
@@ -2512,7 +2492,7 @@ def _soft_delete_all_patterns_to_vault() -> str:
         return "⚠️ Trash Vault offline — add SUPABASE_URL and SUPABASE_KEY to secrets."
 
     table = _forensic_patterns_table()
-    base = st.session_state.supabase_url
+    base = vault_bridge.supabase_settings()["url"]
     deleted_at = datetime.now(timezone.utc).isoformat()
     try:
         patch = requests.patch(
@@ -2541,7 +2521,7 @@ def _restore_soft_deleted_pattern_from_vault(restore_all: bool = False) -> str:
         return "⚠️ Trash Vault offline — add SUPABASE_URL and SUPABASE_KEY to secrets."
 
     table = _forensic_patterns_table()
-    base = st.session_state.supabase_url
+    base = vault_bridge.supabase_settings()["url"]
 
     try:
         if restore_all:
@@ -5308,7 +5288,7 @@ def _fetch_active_layout_folders() -> list[str]:
     if not st.session_state.get("supabase_ready"):
         return []
     table = _forensic_patterns_table()
-    base = st.session_state.supabase_url
+    base = vault_bridge.supabase_settings()["url"]
     try:
         resp = requests.get(
             f"{base}/rest/v1/{table}?select=macro_weather_layout"
@@ -5426,11 +5406,13 @@ def render_room2_forensic_lab():
             "`https://lvjfurlinzxzgczwoitp.supabase.co` (ends in `.supabase.co`). "
             "Do **not** use the dashboard link from your browser (`supabase.com/dashboard/...`)."
         )
-    elif st.session_state.get("matrix_vault_fetch_error"):
+    elif not st.session_state.get("matrix_vault_probe_ok", True):
         st.warning(
             f"☁️ Supabase connected but last pattern fetch failed: "
-            f"`{st.session_state.matrix_vault_fetch_error}`"
+            f"`{st.session_state.get('matrix_vault_fetch_error', 'unknown')}`"
         )
+    else:
+        st.caption("☁️ **Matrix vault online** — Supabase read/write connected.")
     _render_market_weather_banner()
     st.caption(
         "🧬 **Matrix core (Room 2):** market weather → layout buckets → strategies inside each bucket. "
