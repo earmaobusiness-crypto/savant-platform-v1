@@ -4370,9 +4370,23 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
     exit_coord = snap.get("exit_coord", "")
     payload = proc.get("payload") or {}
 
+    raw_operator_notes = str(payload.get("_raw_operator_notes") or snap.get("notes") or "").strip()
     ok, vault_message = core_quantum.stream_payload_to_vault(payload)
     vault_synced_ui = False
-    if quality.get("passed") and chart_coupling.get("passed"):
+    vault_deduped = "VAULT DEDUP" in str(vault_message or "")
+    pattern_fingerprint = vault_bridge.vault_pattern_fingerprint(
+        ticker=ticker,
+        entry_coordinate=entry_coord or payload.get("entry_coordinate"),
+        exit_coordinate=exit_coord or payload.get("exit_coordinate"),
+        entry_time=start_time or str(payload.get("entry_time") or ""),
+        exit_time=end_time or str(payload.get("exit_time") or ""),
+        timeframe_resolution=timeframe_resolution,
+        macro_weather_layout=macro_weather_layout,
+        execution_strategy=execution_strategy,
+        pattern_category=pattern_category,
+        raw_operator_notes=raw_operator_notes,
+    )
+    if quality.get("passed") and chart_coupling.get("passed") and not vault_deduped:
         saved_at = datetime.now(timezone.utc).isoformat()
         vault_bridge.append_local_pattern(
             {
@@ -4382,6 +4396,7 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
                 "timeframe": timeframe_resolution,
                 "structural_move": structural_move,
                 "saved_at": saved_at,
+                "fingerprint": pattern_fingerprint,
             }
         )
         vault_bridge.sync_local_lab_state(
@@ -4504,7 +4519,13 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
             vault_line if ok else None,
         )
     elif quality.get("passed") and chart_coupling.get("passed"):
-        if ok:
+        if vault_deduped:
+            confirm = (
+                f"♻️ DUPLICATE SKIPPED — **{ticker}** is already in the matrix "
+                f"with the same window, coordinates, layout, strategy, and notes."
+            )
+            sync_note = "No redundant copy was saved."
+        elif ok:
             confirm = (
                 f"✅ VAULT SYNC OK — {ticker} · {timeframe_resolution} · "
                 f"{structural_move:.2f}% structural move · "
@@ -4532,19 +4553,26 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
         st.session_state.room2_forensic_ticker = ticker
         st.session_state.matrix_window1_rejection_text = ""
         vault_synced_ui = True
-        _window4_record_deploy_snapshot(
-            ticker=ticker,
-            layout=macro_weather_layout,
-            strategy=execution_strategy,
-            timeframe=timeframe_resolution,
-            structural_move=structural_move,
-            vault_synced=True,
-        )
-        deploy_note = (
-            f"✅ **Pattern saved** — **{ticker}** · **{macro_weather_layout}** · "
-            f"**{execution_strategy}** · {structural_move:.2f}% structural move. "
-            f"{sync_note}"
-        )
+        if not vault_deduped:
+            _window4_record_deploy_snapshot(
+                ticker=ticker,
+                layout=macro_weather_layout,
+                strategy=execution_strategy,
+                timeframe=timeframe_resolution,
+                structural_move=structural_move,
+                vault_synced=True,
+            )
+        if vault_deduped:
+            deploy_note = (
+                f"♻️ **Duplicate skipped** — **{ticker}** is already archived with "
+                "identical coordinates and notes. Matrix kept the existing copy."
+            )
+        else:
+            deploy_note = (
+                f"✅ **Pattern saved** — **{ticker}** · **{macro_weather_layout}** · "
+                f"**{execution_strategy}** · {structural_move:.2f}% structural move. "
+                f"{sync_note}"
+            )
         st.session_state.room2_chat_history.append(
             {
                 "speaker": "Forensic Expert",
@@ -4565,7 +4593,7 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
             vault_synced=True,
         )
 
-    if ok or (quality.get("passed") and chart_coupling.get("passed")):
+    if (ok or (quality.get("passed") and chart_coupling.get("passed"))) and not vault_deduped:
         _window4_append_deploy_registry_entry(
             ticker=ticker,
             layout=macro_weather_layout,

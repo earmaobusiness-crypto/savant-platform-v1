@@ -5047,6 +5047,19 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
         return row
 
     payload = _align_legacy_forensic_pattern_row(payload)
+    raw_operator_notes = str(payload.pop("_raw_operator_notes", "") or "").strip()
+    duplicate = vault_bridge.find_active_vault_duplicate(
+        payload,
+        raw_operator_notes=raw_operator_notes,
+    )
+    if duplicate:
+        ticker = str(payload.get("ticker") or "UNKNOWN").upper()
+        return True, (
+            f"VAULT DEDUP — identical {ticker} pattern already in the matrix "
+            f"(same ticker, window, coordinates, layout, strategy, and notes). "
+            "Skipped redundant copy."
+        )
+
     cfg = vault_bridge.supabase_settings()
     if not cfg["ready"]:
         return False, (
@@ -6743,4 +6756,5 @@ def build_vault_payload(
     }
     if day_blob and day_blob != "{}":
         body["day_context_json"] = day_blob
+    body["_raw_operator_notes"] = operator_notes.strip()
     return body

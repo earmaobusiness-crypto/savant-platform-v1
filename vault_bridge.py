@@ -123,6 +123,126 @@ def supabase_status_message() -> str:
     )
 
 
+def _extract_raw_operator_notes(operator_context: str) -> str:
+    """Strip auto-injected matrix blobs — compare only operator-typed notes."""
+    ctx = str(operator_context or "").strip()
+    for marker in (" | DAY_CONTEXT:", "DAY_CONTEXT:", " | TEXT_MATRIX|", "TEXT_MATRIX|", " | TRUST_TIER:", "MATRIX_META:"):
+        if marker in ctx:
+            ctx = ctx.split(marker)[0]
+    return ctx.strip()
+
+
+def _norm_vault_coord(value: Any) -> str:
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value or "").strip()
+
+
+def _norm_vault_time(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip().upper())
+
+
+def vault_pattern_fingerprint(
+    *,
+    ticker: str,
+    entry_coordinate: Any = "",
+    exit_coordinate: Any = "",
+    entry_time: str = "",
+    exit_time: str = "",
+    timeframe_resolution: str = "",
+    macro_weather_layout: str = "",
+    execution_strategy: str = "",
+    pattern_category: str = "",
+    raw_operator_notes: str = "",
+) -> str:
+    """Identity key for duplicate deploy detection — same inputs = same pattern."""
+    parts = [
+        str(ticker or "").strip().upper(),
+        _norm_vault_coord(entry_coordinate),
+        _norm_vault_coord(exit_coordinate),
+        _norm_vault_time(entry_time),
+        _norm_vault_time(exit_time),
+        str(timeframe_resolution or "").strip(),
+        str(macro_weather_layout or "").strip().upper(),
+        str(execution_strategy or "").strip().upper(),
+        str(pattern_category or "VALIDATED").strip().upper(),
+        str(raw_operator_notes or "").strip(),
+    ]
+    return "|".join(parts)
+
+
+def vault_fingerprint_from_row(row: dict) -> str:
+    raw_notes = str(row.get("_raw_operator_notes") or "").strip()
+    if not raw_notes:
+        raw_notes = _extract_raw_operator_notes(str(row.get("operator_context") or ""))
+    return vault_pattern_fingerprint(
+        ticker=str(row.get("ticker") or ""),
+        entry_coordinate=row.get("entry_coordinate"),
+        exit_coordinate=row.get("exit_coordinate"),
+        entry_time=str(row.get("entry_time") or ""),
+        exit_time=str(row.get("exit_time") or ""),
+        timeframe_resolution=str(row.get("timeframe_resolution") or row.get("timeframe") or ""),
+        macro_weather_layout=str(row.get("macro_weather_layout") or ""),
+        execution_strategy=str(row.get("execution_strategy") or ""),
+        pattern_category=str(row.get("pattern_category") or row.get("pattern_type") or ""),
+        raw_operator_notes=raw_notes,
+    )
+
+
+def find_active_vault_duplicate(payload: dict, *, raw_operator_notes: str = "") -> dict | None:
+    """Return an existing active vault row with the same forensic fingerprint, if any."""
+    fingerprint = vault_pattern_fingerprint(
+        ticker=str(payload.get("ticker") or ""),
+        entry_coordinate=payload.get("entry_coordinate"),
+        exit_coordinate=payload.get("exit_coordinate"),
+        entry_time=str(payload.get("entry_time") or ""),
+        exit_time=str(payload.get("exit_time") or ""),
+        timeframe_resolution=str(payload.get("timeframe_resolution") or payload.get("timeframe") or ""),
+        macro_weather_layout=str(payload.get("macro_weather_layout") or ""),
+        execution_strategy=str(payload.get("execution_strategy") or ""),
+        pattern_category=str(payload.get("pattern_category") or payload.get("pattern_type") or ""),
+        raw_operator_notes=raw_operator_notes,
+    )
+    ticker = str(payload.get("ticker") or "").strip().upper()
+    if not ticker:
+        return None
+
+    for entry in load_local_cache().get("patterns") or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("ticker") or "").upper() != ticker:
+            continue
+        if str(entry.get("fingerprint") or "") == fingerprint:
+            return {"ticker": ticker, "source": "local_cache", "fingerprint": fingerprint}
+
+    cfg = supabase_settings()
+    if not cfg["ready"]:
+        return None
+    status, body, err = supabase_rest(
+        "GET",
+        "",
+        params=(
+            f"?ticker=eq.{ticker}"
+            f"&select=id,ticker,entry_coordinate,exit_coordinate,entry_time,exit_time,"
+            f"timeframe_resolution,macro_weather_layout,execution_strategy,pattern_category,"
+            f"pattern_type,operator_context,state"
+            f"&order=timestamp.desc&limit=30"
+        ),
+        timeout=12,
+    )
+    if not status or err or not isinstance(body, list):
+        return None
+    for row in body:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("state") or "").strip().lower() == "soft_deleted":
+            continue
+        if vault_fingerprint_from_row(row) == fingerprint:
+            return row
+    return None
+
+
 def _empty_cache() -> dict:
     return {
         "v": CACHE_VERSION,
@@ -161,16 +281,24 @@ def append_local_pattern(entry: dict) -> None:
     ticker = str(entry.get("ticker") or "").strip().upper()
     if not ticker or ticker == MATRIX_CHAT_LOG_TICKER:
         return
+    fingerprint = str(entry.get("fingerprint") or "").strip()
     cache = load_local_cache()
     patterns = [row for row in (cache.get("patterns") or []) if isinstance(row, dict)]
-    patterns = [
-        row
-        for row in patterns
-        if not (
-            str(row.get("ticker") or "").upper() == ticker
-            and str(row.get("saved_at") or "")[:16] == str(entry.get("saved_at") or "")[:16]
-        )
-    ]
+    if fingerprint:
+        patterns = [
+            row
+            for row in patterns
+            if str(row.get("fingerprint") or "") != fingerprint
+        ]
+    else:
+        patterns = [
+            row
+            for row in patterns
+            if not (
+                str(row.get("ticker") or "").upper() == ticker
+                and str(row.get("saved_at") or "")[:16] == str(entry.get("saved_at") or "")[:16]
+            )
+        ]
     patterns.append(dict(entry))
     cache["patterns"] = patterns[-80:]
     save_local_cache(cache)
