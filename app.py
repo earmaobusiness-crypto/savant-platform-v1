@@ -820,10 +820,12 @@ if "purgatory_signature" not in st.session_state: st.session_state.purgatory_sig
 if "room2_text_matrix_string" not in st.session_state: st.session_state.room2_text_matrix_string = ""
 if "room2_deep_research_audit" not in st.session_state: st.session_state.room2_deep_research_audit = {}
 if "supabase_ready" not in st.session_state:
-    _sb_cfg = vault_bridge.supabase_settings()
-    st.session_state.supabase_url = _sb_cfg["url"]
-    st.session_state.supabase_key = _sb_cfg["key"]
-    st.session_state.supabase_ready = _sb_cfg["ready"]
+    st.session_state.supabase_ready = False
+_sb_cfg = vault_bridge.supabase_settings()
+st.session_state.supabase_url = _sb_cfg["url"]
+st.session_state.supabase_key = _sb_cfg["key"]
+st.session_state.supabase_ready = _sb_cfg["ready"]
+st.session_state.supabase_url_misconfigured = bool(_sb_cfg.get("url_misconfigured"))
 if "sidebar_collapsed" not in st.session_state: st.session_state.sidebar_collapsed = False
 if "terminal_hub" not in st.session_state: st.session_state.terminal_hub = ROOM1_LABEL
 
@@ -5373,10 +5375,25 @@ def _purge_room2_deck_inputs() -> None:
         st.session_state.pop(key, None)
 
 
+def _probe_matrix_vault_connection() -> bool:
+    """Live health check — clears stale fetch errors when cloud read succeeds."""
+    _ensure_supabase_session()
+    if not st.session_state.get("supabase_ready"):
+        st.session_state.matrix_vault_fetch_error = None
+        return False
+    _rows, err = _supabase_fetch_raw_pattern_rows(limit=1)
+    if err:
+        st.session_state.matrix_vault_fetch_error = err
+        return False
+    st.session_state.matrix_vault_fetch_error = None
+    return True
+
+
 def render_room2_forensic_lab():
     _apply_pending_room2_form_patches()
     _hydrate_matrix_memory_from_cloud()
     _refresh_matrix_cloud_wire(reload_chat=False)
+    _probe_matrix_vault_connection()
     _apply_pending_room2_form_patches()
     _ensure_room2_widget_defaults()
 

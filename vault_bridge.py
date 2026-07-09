@@ -19,10 +19,35 @@ import requests
 MATRIX_CHAT_LOG_TICKER = "_LAB_SESSION_"
 MATRIX_CHAT_LOG_CATEGORY = "MATRIX_CHAT_LOG"
 CACHE_VERSION = 1
-CACHE_PATH = Path(__file__).resolve().parent / ".streamlit" / "matrix_vault_cache.json"
+PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_SECRETS_PATH = PROJECT_ROOT / ".streamlit" / "secrets.toml"
+CACHE_PATH = PROJECT_ROOT / ".streamlit" / "matrix_vault_cache.json"
+_PROJECT_SECRETS_CACHE: dict[str, str] | None = None
+
+
+def _load_project_secrets() -> dict[str, str]:
+    global _PROJECT_SECRETS_CACHE
+    if _PROJECT_SECRETS_CACHE is not None:
+        return _PROJECT_SECRETS_CACHE
+    secrets: dict[str, str] = {}
+    try:
+        if PROJECT_SECRETS_PATH.is_file():
+            for line in PROJECT_SECRETS_PATH.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                name, value = stripped.split("=", 1)
+                secrets[name.strip()] = value.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    _PROJECT_SECRETS_CACHE = secrets
+    return secrets
 
 
 def _secret_or_env(key: str, default: str = "") -> str:
+    project_val = _load_project_secrets().get(key, "")
+    if project_val not in (None, ""):
+        return str(project_val).strip()
     try:
         import streamlit as st
 
