@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,16 +34,38 @@ def _secret_or_env(key: str, default: str = "") -> str:
     return str(os.environ.get(key, default) or "").strip()
 
 
+def _normalize_supabase_url(url: str) -> str:
+    """Accept API URL or dashboard URL; always return project root (no /rest/v1)."""
+    clean = str(url or "").strip().rstrip("/")
+    if not clean:
+        return ""
+    if "supabase.com/dashboard" in clean:
+        match = re.search(r"/project/([a-z0-9]+)", clean, flags=re.IGNORECASE)
+        if match:
+            clean = f"https://{match.group(1)}.supabase.co"
+    clean = re.sub(r"/rest/v1/?$", "", clean, flags=re.IGNORECASE).rstrip("/")
+    return clean
+
+
 def supabase_settings() -> dict[str, Any]:
-    url = _secret_or_env("SUPABASE_URL")
+    url = _normalize_supabase_url(_secret_or_env("SUPABASE_URL"))
     key = _secret_or_env("SUPABASE_KEY")
     table = _secret_or_env("SUPABASE_PATTERN_TABLE", "forensic_patterns") or "forensic_patterns"
+    raw_url = _secret_or_env("SUPABASE_URL")
+    url_misconfigured = bool(
+        raw_url
+        and (
+            "supabase.com/dashboard" in raw_url
+            or raw_url.rstrip("/").lower().endswith("/rest/v1")
+        )
+    )
     return {
-        "url": url.rstrip("/"),
+        "url": url,
         "key": key,
         "table": table,
         "ready": bool(url and key),
         "missing": [name for name, val in (("SUPABASE_URL", url), ("SUPABASE_KEY", key)) if not val],
+        "url_misconfigured": url_misconfigured,
     }
 
 

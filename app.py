@@ -1591,6 +1591,11 @@ def _ensure_supabase_session() -> None:
     st.session_state.supabase_url = cfg["url"]
     st.session_state.supabase_key = cfg["key"]
     st.session_state.supabase_ready = cfg["ready"]
+    st.session_state.supabase_url_misconfigured = bool(cfg.get("url_misconfigured"))
+
+
+def _normalize_supabase_rest_base(url: str) -> str:
+    return vault_bridge._normalize_supabase_url(url)
 
 
 def _supabase_rest_headers() -> dict:
@@ -1817,7 +1822,7 @@ def _supabase_fetch_raw_pattern_rows(*, limit: int = 100) -> tuple[list[dict], s
     if not st.session_state.get("supabase_ready"):
         return [], "supabase_offline"
     table = _forensic_patterns_table()
-    base = st.session_state.supabase_url
+    base = _normalize_supabase_rest_base(st.session_state.supabase_url)
     headers = _supabase_rest_headers()
     errors: list[str] = []
     for query_suffix in (
@@ -1828,10 +1833,18 @@ def _supabase_fetch_raw_pattern_rows(*, limit: int = 100) -> tuple[list[dict], s
         try:
             resp = requests.get(f"{base}/rest/v1/{table}{query_suffix}", headers=headers, timeout=12)
             if not resp.ok:
-                errors.append(f"HTTP {resp.status_code}: {resp.text[:120]}")
+                snippet = resp.text[:120]
+                if "<!DOCTYPE html>" in snippet or "data-next-head" in snippet:
+                    errors.append(
+                        "HTTP 404: wrong SUPABASE_URL — use API URL "
+                        "(https://YOUR-PROJECT.supabase.co), not the dashboard browser link"
+                    )
+                else:
+                    errors.append(f"HTTP {resp.status_code}: {snippet}")
                 continue
             payload = resp.json()
             if isinstance(payload, list):
+                st.session_state.matrix_vault_fetch_error = None
                 return payload, None
         except Exception as exc:
             errors.append(str(exc))
@@ -5389,6 +5402,12 @@ def render_room2_forensic_lab():
             "Patterns and chat are saved locally to `.streamlit/matrix_vault_cache.json` "
             "(survives refresh on this Mac). Add `SUPABASE_URL` and `SUPABASE_KEY` to "
             "`.streamlit/secrets.toml` for internet vault sync."
+        )
+    elif st.session_state.get("supabase_url_misconfigured"):
+        st.error(
+            "🔌 **Wrong Supabase URL in secrets** — use the **API URL** from Settings → API: "
+            "`https://lvjfurlinzxzgczwoitp.supabase.co` (ends in `.supabase.co`). "
+            "Do **not** use the dashboard link from your browser (`supabase.com/dashboard/...`)."
         )
     elif st.session_state.get("matrix_vault_fetch_error"):
         st.warning(
