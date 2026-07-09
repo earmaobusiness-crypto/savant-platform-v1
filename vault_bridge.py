@@ -60,14 +60,19 @@ def _secret_or_env(key: str, default: str = "") -> str:
 
 
 def _normalize_supabase_url(url: str) -> str:
-    """Accept API URL or dashboard URL; always return project root (no /rest/v1)."""
-    clean = str(url or "").strip().rstrip("/")
+    """Accept API URL, dashboard URL, or bare project ref — return project root."""
+    clean = str(url or "").strip().strip('"').strip("'").rstrip("/")
     if not clean:
         return ""
-    if "supabase.com/dashboard" in clean:
+    host_match = re.search(r"(https?://[a-z0-9]+\.supabase\.co)", clean, flags=re.IGNORECASE)
+    if host_match:
+        clean = host_match.group(1)
+    elif "supabase.com/dashboard" in clean:
         match = re.search(r"/project/([a-z0-9]+)", clean, flags=re.IGNORECASE)
         if match:
             clean = f"https://{match.group(1)}.supabase.co"
+    elif re.fullmatch(r"[a-z0-9]{8,32}", clean, flags=re.IGNORECASE):
+        clean = f"https://{clean}.supabase.co"
     clean = re.sub(r"/rest/v1/?$", "", clean, flags=re.IGNORECASE).rstrip("/")
     return clean
 
@@ -82,15 +87,20 @@ def supabase_settings() -> dict[str, Any]:
         and (
             "supabase.com/dashboard" in raw_url
             or raw_url.rstrip("/").lower().endswith("/rest/v1")
+            or (
+                ".supabase.co" not in raw_url
+                and not re.fullmatch(r"[a-z0-9]{8,32}", raw_url.strip(), flags=re.IGNORECASE)
+            )
         )
     )
     return {
         "url": url,
         "key": key,
         "table": table,
-        "ready": bool(url and key),
+        "ready": bool(url and key and ".supabase.co" in url),
         "missing": [name for name, val in (("SUPABASE_URL", url), ("SUPABASE_KEY", key)) if not val],
         "url_misconfigured": url_misconfigured,
+        "raw_url": raw_url,
     }
 
 
@@ -256,10 +266,12 @@ def supabase_probe() -> tuple[bool, str | None]:
     )
     if status and 200 <= status < 300:
         return True, None
-    if err and ("<!DOCTYPE html>" in err or "data-next-head" in err):
+    if err and ("<!DOCTYPE html>" in str(err) or "data-next-head" in str(err)):
+        resolved = supabase_settings().get("url") or "unknown"
         return False, (
-            "wrong SUPABASE_URL — use https://YOUR-PROJECT.supabase.co "
-            "(Settings → API), not supabase.com/dashboard/..."
+            f"wrong SUPABASE_URL in secrets (resolved to `{resolved}`). "
+            "Set SUPABASE_URL = \"https://lvjfurlinzxzgczwoitp.supabase.co\" "
+            "in Streamlit Cloud → Settings → Secrets."
         )
     return False, err or f"HTTP {status}"
 
@@ -274,9 +286,11 @@ def supabase_fetch_raw_rows(*, limit: int = 100) -> tuple[list[dict], str | None
     )
     if not status or err:
         if err and ("<!DOCTYPE html>" in str(err) or "data-next-head" in str(err)):
+            resolved = supabase_settings().get("url") or "unknown"
             return [], (
-                "wrong SUPABASE_URL — use https://YOUR-PROJECT.supabase.co "
-                "(Settings → API), not supabase.com/dashboard/..."
+                f"wrong SUPABASE_URL in secrets (resolved to `{resolved}`). "
+                "Set SUPABASE_URL = \"https://lvjfurlinzxzgczwoitp.supabase.co\" "
+                "in Streamlit Cloud → Settings → Secrets."
             )
         return [], err
     if not isinstance(body, list):

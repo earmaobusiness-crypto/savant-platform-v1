@@ -5433,9 +5433,11 @@ def render_room2_forensic_lab():
         )
     elif st.session_state.get("supabase_url_misconfigured"):
         st.error(
-            "🔌 **Wrong Supabase URL in secrets** — use the **API URL** from Settings → API: "
-            "`https://lvjfurlinzxzgczwoitp.supabase.co` (ends in `.supabase.co`). "
-            "Do **not** use the dashboard link from your browser (`supabase.com/dashboard/...`)."
+            "🔌 **Wrong Supabase URL in secrets** — open **Streamlit Cloud → Settings → Secrets** "
+            "and set exactly:\n\n"
+            "`SUPABASE_URL = \"https://lvjfurlinzxzgczwoitp.supabase.co\"`\n\n"
+            "Do **not** use the browser dashboard link (`supabase.com/dashboard/...`) "
+            "or `/rest/v1/` at the end."
         )
     elif not st.session_state.get("matrix_vault_probe_ok", True):
         st.warning(
