@@ -208,14 +208,6 @@ def find_active_vault_duplicate(payload: dict, *, raw_operator_notes: str = "") 
     if not ticker:
         return None
 
-    for entry in load_local_cache().get("patterns") or []:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("ticker") or "").upper() != ticker:
-            continue
-        if str(entry.get("fingerprint") or "") == fingerprint:
-            return {"ticker": ticker, "source": "local_cache", "fingerprint": fingerprint}
-
     cfg = supabase_settings()
     if not cfg["ready"]:
         return None

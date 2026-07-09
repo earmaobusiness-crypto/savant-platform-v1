@@ -5063,8 +5063,8 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
     cfg = vault_bridge.supabase_settings()
     if not cfg["ready"]:
         return False, (
-            "Supabase offline. Add SUPABASE_URL and SUPABASE_KEY to `.streamlit/secrets.toml` "
-            "(pattern saved to local disk cache on this machine)."
+            "VAULT SYNC FAILED — Supabase is not configured. "
+            "Add SUPABASE_URL and SUPABASE_KEY to secrets. Pattern was NOT saved."
         )
 
     supabase_url = cfg["url"]
