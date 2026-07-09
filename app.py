@@ -29,6 +29,7 @@ if "room2_chat_history" not in st.session_state:
     st.session_state.room2_chat_history = []
 elif not isinstance(st.session_state.room2_chat_history, list):
     st.session_state.room2_chat_history = list(st.session_state.room2_chat_history)
+# Window 4 chat is session RAM only — a full page refresh starts with an empty chat.
 if "market_weather_snapshot" not in st.session_state:
     st.session_state.market_weather_snapshot = {}
 if "quantum_terminal_output" not in st.session_state:
@@ -2128,6 +2129,7 @@ def _seed_room2_form_from_pattern_row(row: dict) -> None:
 
 
 def _encode_matrix_chat_blob() -> str:
+    """Persist deploy registry only — Window 4 chat is session RAM, not restored on refresh."""
     snap = st.session_state.get("room2_last_successful_deploy") or {}
     if not isinstance(snap, dict):
         snap = {}
@@ -2137,7 +2139,7 @@ def _encode_matrix_chat_blob() -> str:
     return json.dumps(
         {
             "v": 2,
-            "messages": st.session_state.room2_chat_history[-80:],
+            "messages": [],
             "deploy_snapshot": snap,
             "deploy_registry": registry[-40:],
         },
@@ -2165,9 +2167,8 @@ def _parse_matrix_chat_blob(raw: str) -> tuple[list, dict, list]:
 
 
 def _sync_matrix_chat_to_cloud() -> None:
-    """Persist Room 2 lab chat — local disk always, Supabase when configured."""
+    """Persist deploy registry + terminal — Window 4 chat stays in session until refresh."""
     vault_bridge.sync_local_lab_state(
-        chat_messages=st.session_state.room2_chat_history,
         deploy_snapshot=st.session_state.get("room2_last_successful_deploy") or {},
         deploy_registry=st.session_state.get("room2_deploy_registry") or [],
         terminal=str(st.session_state.get("quantum_terminal_output", "")),
@@ -2184,24 +2185,16 @@ def _sync_matrix_chat_to_cloud() -> None:
         st.session_state.matrix_chat_cloud_sync_at = datetime.now(timezone.utc).isoformat()
 
 
-def _load_matrix_memory_from_local() -> None:
-    """Restore chat + deploy registry from on-disk cache (survives browser refresh)."""
+def _hydrate_matrix_deploy_registry_from_local() -> None:
+    """Restore deploy registry from disk — never reload Window 4 chat on refresh."""
     cache = vault_bridge.load_local_cache()
     if not isinstance(cache, dict):
         return
-    parsed_messages, deploy_snap, deploy_registry = _parse_matrix_chat_blob(
-        json.dumps(
-            {
-                "v": 2,
-                "messages": cache.get("chat_messages") or [],
-                "deploy_snapshot": cache.get("deploy_snapshot") or {},
-                "deploy_registry": cache.get("deploy_registry") or [],
-            }
-        )
-    )
-    if deploy_snap and str(deploy_snap.get("ticker") or "").strip():
+    deploy_snap = cache.get("deploy_snapshot") or {}
+    deploy_registry = cache.get("deploy_registry") or []
+    if isinstance(deploy_snap, dict) and str(deploy_snap.get("ticker") or "").strip():
         st.session_state.room2_last_successful_deploy = deploy_snap
-    if deploy_registry:
+    if isinstance(deploy_registry, list) and deploy_registry:
         existing = [
             row
             for row in (st.session_state.get("room2_deploy_registry") or [])
@@ -2209,15 +2202,8 @@ def _load_matrix_memory_from_local() -> None:
         ]
         st.session_state.room2_deploy_registry = _merge_deploy_registries(
             existing,
-            deploy_registry if isinstance(deploy_registry, list) else [],
+            deploy_registry,
         )
-    local = st.session_state.get("room2_chat_history") or []
-    if parsed_messages and (not local or len(parsed_messages) >= len(local)):
-        st.session_state.room2_chat_history = parsed_messages
-    saved_terminal = str(cache.get("terminal") or "").strip()
-    if saved_terminal and MATRIX_ENGINE_IDLE_MARKER not in saved_terminal:
-        st.session_state.quantum_terminal_output = saved_terminal
-        _window4_restore_vault_flags_from_report(saved_terminal)
     for row in vault_bridge.local_pattern_rows():
         if not isinstance(row, dict):
             continue
@@ -2230,15 +2216,22 @@ def _load_matrix_memory_from_local() -> None:
         )
 
 
+def _load_matrix_memory_from_local() -> None:
+    """Backward-compatible alias — registry only, no chat replay."""
+    _hydrate_matrix_deploy_registry_from_local()
+
+
 def _load_matrix_chat_from_cloud(*, force: bool = False) -> None:
+    """Restore deploy registry from cloud — Window 4 chat is not reloaded on refresh."""
+    _ = force
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return
-    raw_chat, saved_terminal, _err = vault_bridge.supabase_load_chat_blob()
-    if not raw_chat and not saved_terminal:
+    raw_chat, _saved_terminal, _err = vault_bridge.supabase_load_chat_blob()
+    if not raw_chat:
         return
     try:
-        parsed_messages, deploy_snap, deploy_registry = _parse_matrix_chat_blob(str(raw_chat))
+        _parsed_messages, deploy_snap, deploy_registry = _parse_matrix_chat_blob(str(raw_chat))
         if deploy_snap and str(deploy_snap.get("ticker") or "").strip():
             st.session_state.room2_last_successful_deploy = deploy_snap
         if deploy_registry:
@@ -2251,47 +2244,14 @@ def _load_matrix_chat_from_cloud(*, force: bool = False) -> None:
                 existing,
                 deploy_registry if isinstance(deploy_registry, list) else [],
             )
-        local = st.session_state.get("room2_chat_history") or []
-        if parsed_messages:
-            normalized: list[dict] = []
-            for msg in parsed_messages:
-                if not isinstance(msg, dict):
-                    continue
-                row = dict(msg)
-                if row.get("speaker") == "Forensic Expert" and not any(
-                    row.get(flag)
-                    for flag in (
-                        "vault_safe",
-                        "status_reply",
-                        "conversational",
-                        "data_fallback",
-                        "data_reply",
-                    )
-                ):
-                    row["vault_safe"] = bool(
-                        "Pattern saved" in str(row.get("text") or "")
-                        or "active pattern" in str(row.get("text") or "").lower()
-                        or "cloud vault" in str(row.get("text") or "").lower()
-                    )
-                    if not row["vault_safe"]:
-                        row["conversational"] = True
-                normalized.append(row)
-            if force or not local or len(normalized) >= len(local):
-                st.session_state.room2_chat_history = normalized
-        if saved_terminal and MATRIX_ENGINE_IDLE_MARKER not in saved_terminal:
-            st.session_state.quantum_terminal_output = saved_terminal
-            _window4_restore_vault_flags_from_report(saved_terminal)
-        st.session_state.matrix_chat_cloud_loaded_at = datetime.now(timezone.utc).isoformat()
     except Exception:
         pass
 
 
 def _refresh_matrix_cloud_wire(*, reload_chat: bool = False) -> None:
-    """Live vault pull — cloud when configured, local disk always."""
-    _load_matrix_memory_from_local()
-    _ensure_supabase_session()
-    if reload_chat and st.session_state.get("supabase_ready"):
-        _load_matrix_chat_from_cloud(force=not bool(st.session_state.get("room2_chat_history")))
+    """Live vault pull — cloud when configured. Chat reload is intentionally disabled."""
+    _ = reload_chat
+    _hydrate_matrix_deploy_registry_from_local()
     cloud_rows: list[dict] = []
     if st.session_state.get("supabase_ready"):
         cloud_rows = _fetch_all_active_pattern_rows(limit=50)
@@ -2311,19 +2271,19 @@ def _refresh_matrix_cloud_wire(*, reload_chat: bool = False) -> None:
 
 
 def _hydrate_matrix_memory_from_cloud() -> None:
-    """Load Matrix pattern archive + lab chat from local disk and Supabase once per session."""
+    """Load pattern archive from Supabase once per session — not Window 4 chat."""
     if st.session_state.get("matrix_cloud_hydrated"):
         return
     st.session_state.matrix_cloud_hydrated = True
 
-    _load_matrix_memory_from_local()
+    _hydrate_matrix_deploy_registry_from_local()
     _purge_expired_trash_vault()
     _purge_expired_anomaly_incubation()
     core_quantum.hydrate_layout_library_from_vault()
     self_surgery.ensure_purgatory_hub_session()
     self_surgery.hydrate_repair_bay_from_cloud()
     self_surgery.purge_expired_repair_bay_profiles()
-    _load_matrix_chat_from_cloud(force=True)
+    _load_matrix_chat_from_cloud(force=False)
 
     latest = _window4_latest_saved_pattern_row()
     if latest:
@@ -4400,7 +4360,6 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
             }
         )
         vault_bridge.sync_local_lab_state(
-            chat_messages=st.session_state.get("room2_chat_history") or [],
             deploy_snapshot=st.session_state.get("room2_last_successful_deploy") or {},
             deploy_registry=st.session_state.get("room2_deploy_registry") or [],
             terminal=str(st.session_state.get("quantum_terminal_output", "")),
