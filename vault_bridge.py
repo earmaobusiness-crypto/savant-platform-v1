@@ -45,9 +45,6 @@ def _load_project_secrets() -> dict[str, str]:
 
 
 def _secret_or_env(key: str, default: str = "") -> str:
-    project_val = _load_project_secrets().get(key, "")
-    if project_val not in (None, ""):
-        return str(project_val).strip()
     try:
         import streamlit as st
 
@@ -56,6 +53,9 @@ def _secret_or_env(key: str, default: str = "") -> str:
             return str(val).strip()
     except Exception:
         pass
+    project_val = _load_project_secrets().get(key, "")
+    if project_val not in (None, ""):
+        return str(project_val).strip()
     return str(os.environ.get(key, default) or "").strip()
 
 
