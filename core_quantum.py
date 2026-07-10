@@ -2351,7 +2351,21 @@ def log_strategy_execution_with_fallback(**kwargs) -> dict:
         execution_strategy=kwargs.get("execution_strategy", ""),
         timeframe_resolution=kwargs.get("timeframe_resolution", ""),
     )
-    ok, _detail = record_strategy_execution(**kwargs)
+    ledger_kwargs = {
+        key: kwargs[key]
+        for key in (
+            "ticker",
+            "macro_weather_layout",
+            "execution_strategy",
+            "timeframe_resolution",
+            "margin_pct",
+            "pattern_category",
+            "layout_match_pct",
+            "structural_move_pct",
+        )
+        if key in kwargs
+    }
+    ok, _detail = record_strategy_execution(**ledger_kwargs)
     if not ok:
         _append_local_alpha_decay_sample(
             timeline_key,
