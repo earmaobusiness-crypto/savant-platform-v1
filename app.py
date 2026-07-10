@@ -793,7 +793,6 @@ if "r2_good_end_date" not in st.session_state:
 if "room2_vault_flash" not in st.session_state: st.session_state.room2_vault_flash = ""
 if "room2_last_rescue_vault_id" not in st.session_state: st.session_state.room2_last_rescue_vault_id = None
 if "matrix_cloud_hydrated" not in st.session_state: st.session_state.matrix_cloud_hydrated = False
-if "matrix_form_seeded" not in st.session_state: st.session_state.matrix_form_seeded = False
 if "matrix_active_pattern_count" not in st.session_state: st.session_state.matrix_active_pattern_count = 0
 if "matrix_trash_vault_count" not in st.session_state: st.session_state.matrix_trash_vault_count = 0
 if "matrix_cascade_active" not in st.session_state: st.session_state.matrix_cascade_active = False
@@ -2166,15 +2165,16 @@ def _queue_room2_form_ticker(ticker: str) -> None:
     st.session_state["_pending_r2_good_ticker"] = str(ticker or "").strip().upper()
 
 
-def _queue_room2_form_reset(*, ticker: str = "") -> None:
+def _queue_room2_form_reset() -> None:
+    """Clear the deploy form on next pre-widget pass — never prefill from vault."""
     st.session_state["_pending_room2_form_reset"] = True
-    _queue_room2_form_ticker(ticker)
 
 
 def _apply_pending_room2_form_patches() -> None:
     """Must run before any Room 2 widget with key r2_good_ticker is drawn."""
     if st.session_state.pop("_pending_room2_form_reset", False):
         for key in (
+            "r2_good_ticker",
             "r2_good_start_date",
             "r2_good_start_time",
             "r2_good_end_date",
@@ -2182,32 +2182,43 @@ def _apply_pending_room2_form_patches() -> None:
             "r2_single_notes_field",
         ):
             st.session_state.pop(key, None)
+        return
     if "_pending_r2_good_ticker" in st.session_state:
         ticker = str(st.session_state.pop("_pending_r2_good_ticker") or "").strip().upper()
         if ticker:
             st.session_state.r2_good_ticker = ticker
-        else:
-            st.session_state.pop("r2_good_ticker", None)
 
 
 def _seed_room2_form_from_pattern_row(row: dict) -> None:
-    """Restore latest cloud pattern coordinates into the Room 2 input deck."""
+    """Manual-only helper — never auto-called on refresh (operator form stays blank)."""
     cat = str(row.get("pattern_category", "")).upper()
     ticker = str(row.get("ticker", "")).strip().upper()
-    if not ticker:
-        return
-    if cat != "VALIDATED":
+    if not ticker or cat != "VALIDATED":
         return
     prefix = "r2_good"
     notes_key = "r2_single_notes_field"
     _queue_room2_form_ticker(ticker)
-    if row.get("entry_time"):
-        st.session_state[f"{prefix}_start_time"] = str(row["entry_time"])
-    if row.get("exit_time"):
-        st.session_state[f"{prefix}_end_time"] = str(row["exit_time"])
-    notes = str(row.get("operator_context") or "").strip()
-    if notes:
-        st.session_state[notes_key] = notes
+    for time_key, date_key, raw_val in (
+        ("start_time", "start_date", row.get("entry_time")),
+        ("end_time", "end_date", row.get("exit_time")),
+    ):
+        if not raw_val:
+            continue
+        parsed = core_quantum._parse_session_datetime(None, str(raw_val))
+        if parsed is None and " " in str(raw_val):
+            parts = str(raw_val).strip().rsplit(" ", 2)
+            if len(parts) >= 3:
+                parsed = core_quantum._parse_session_datetime(parts[0], f"{parts[1]} {parts[2]}")
+        if parsed is not None:
+            st.session_state[f"{prefix}_{date_key}"] = parsed.date()
+            st.session_state[f"{prefix}_{time_key}"] = parsed.strftime("%I:%M %p").lstrip("0")
+        else:
+            normalized = _normalize_room2_timestamp(str(raw_val))
+            if normalized:
+                st.session_state[f"{prefix}_{time_key}"] = normalized
+    raw_notes = vault_bridge._extract_raw_operator_notes(str(row.get("operator_context") or ""))
+    if raw_notes:
+        st.session_state[notes_key] = raw_notes
 
 
 def _encode_matrix_chat_blob() -> str:
@@ -2401,12 +2412,6 @@ def _hydrate_matrix_memory_from_cloud() -> None:
                     else {}
                 ),
             }
-        if not st.session_state.get("matrix_form_seeded"):
-            _seed_room2_form_from_pattern_row(latest)
-            st.session_state.matrix_form_seeded = True
-        forensic_ticker = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
-        if forensic_ticker:
-            _queue_room2_form_ticker(forensic_ticker)
         if match_pct is not None:
             pct = int(match_pct)
             core_quantum._sync_window4_regime_flags(
@@ -5308,11 +5313,10 @@ def _validate_room2_deck() -> bool:
 
 
 def _ensure_room2_widget_defaults() -> None:
-    """Bind missing Room 2 widget keys before render (safe after form-buffer pop)."""
+    """Bind missing Room 2 widget keys — blank operator deck, never vault backfill."""
     today = date.today()
-    forensic = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
     bindings = {
-        "r2_good_ticker": forensic,
+        "r2_good_ticker": "",
         "r2_good_start_date": today,
         "r2_good_end_date": today,
         "r2_good_start_time": "09:31 AM",
@@ -5322,6 +5326,14 @@ def _ensure_room2_widget_defaults() -> None:
     for key, value in bindings.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+def _prepare_fresh_room2_deploy_form() -> None:
+    """Once per browser session — empty form even when Supabase has saved patterns."""
+    if st.session_state.get("room2_form_session_ready"):
+        return
+    st.session_state.room2_form_session_ready = True
+    _purge_room2_deck_inputs()
 
 
 def _prune_room2_commit_timestamps(now: float | None = None) -> list[float]:
@@ -5391,9 +5403,8 @@ def _render_room2_commit_throttle_banner() -> bool:
 
 
 def _clear_room2_form_buffers() -> None:
-    """Reset winning-deck form keys after deploy — deferred until pre-widget patch pass."""
-    forensic = str(st.session_state.get("room2_forensic_ticker") or "").strip().upper()
-    _queue_room2_form_reset(ticker=forensic)
+    """Reset winning-deck form keys after deploy — blank slate for the next pattern."""
+    _queue_room2_form_reset()
 
 
 def _handle_room2_deck_submit() -> None:
@@ -5514,6 +5525,7 @@ def _probe_matrix_vault_connection() -> bool:
 
 
 def render_room2_forensic_lab():
+    _prepare_fresh_room2_deploy_form()
     _apply_pending_room2_form_patches()
     _hydrate_matrix_memory_from_cloud()
     _refresh_matrix_cloud_wire(reload_chat=False)
