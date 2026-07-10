@@ -235,6 +235,104 @@ def find_active_vault_duplicate(payload: dict, *, raw_operator_notes: str = "") 
     return None
 
 
+def fetch_library_rows_for_ticker(ticker: str, *, limit: int = 40) -> list[dict]:
+    """Active + incubation rows for one ticker — Phase 2 collective compare."""
+    clean = str(ticker or "").strip().upper()
+    if not clean:
+        return []
+    cfg = supabase_settings()
+    if not cfg["ready"]:
+        return []
+    status, body, err = supabase_rest(
+        "GET",
+        "",
+        params=(
+            f"?ticker=eq.{clean}"
+            f"&select=id,ticker,timeframe_resolution,timeframe,state,macro_weather_layout,"
+            f"execution_strategy,layout_match_pct,structural_move_pct,timestamp,entry_time,exit_time,"
+            f"entry_coordinate,exit_coordinate,pattern_category,pattern_type,operator_context"
+            f"&order=timestamp.desc&limit={int(limit)}"
+        ),
+        timeout=12,
+    )
+    if not status or err or not isinstance(body, list):
+        return []
+    rows: list[dict] = []
+    for row in body:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("state") or "").strip().lower() == "soft_deleted":
+            continue
+        if str(row.get("ticker") or "").strip().upper() == MATRIX_CHAT_LOG_TICKER:
+            continue
+        rows.append(row)
+    return rows
+
+
+def evaluate_phase2_deploy_route(
+    payload: dict,
+    *,
+    raw_operator_notes: str = "",
+    layout_match_pct: int = 0,
+) -> dict:
+    """
+    Phase 2 — compare a new deploy against the existing library before writing.
+    Returns action: proceed | skip_duplicate
+    """
+    ticker = str(payload.get("ticker") or "").strip().upper()
+    timeframe = str(
+        payload.get("timeframe_resolution") or payload.get("timeframe") or ""
+    ).strip()
+    if not ticker:
+        return {
+            "action": "proceed",
+            "message": "",
+            "prior_total": 0,
+            "prior_same_timeframe": 0,
+            "library_tickers": [],
+        }
+
+    duplicate = find_active_vault_duplicate(payload, raw_operator_notes=raw_operator_notes)
+    if duplicate:
+        return {
+            "action": "skip_duplicate",
+            "message": (
+                f"PHASE 2 — identical {ticker} deploy already archived "
+                f"(same window, timeframe, layout, strategy). Skipped redundant copy."
+            ),
+            "prior_total": len(fetch_library_rows_for_ticker(ticker)),
+            "prior_same_timeframe": 0,
+            "library_tickers": [ticker],
+            "duplicate_row_id": duplicate.get("id"),
+        }
+
+    prior_rows = fetch_library_rows_for_ticker(ticker)
+    same_tf = [
+        row
+        for row in prior_rows
+        if str(row.get("timeframe_resolution") or row.get("timeframe") or "").strip()
+        == timeframe
+    ]
+    match_pct = int(layout_match_pct or payload.get("layout_match_pct") or 0)
+    if prior_rows:
+        message = (
+            f"PHASE 2 — library has {len(prior_rows)} prior save(s) for **{ticker}** "
+            f"({len(same_tf)} on **{timeframe or '—'}**). "
+            f"This feed scored **{match_pct}%** layout fit — archiving as new evidence."
+        )
+    else:
+        message = (
+            f"PHASE 2 — first library save for **{ticker}** on **{timeframe or '—'}**."
+        )
+    return {
+        "action": "proceed",
+        "message": message,
+        "prior_total": len(prior_rows),
+        "prior_same_timeframe": len(same_tf),
+        "library_tickers": [ticker],
+    }
+
+
 def _empty_cache() -> dict:
     return {
         "v": CACHE_VERSION,

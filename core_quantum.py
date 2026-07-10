@@ -5093,6 +5093,20 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
 
     payload = _align_legacy_forensic_pattern_row(payload)
     raw_operator_notes = str(payload.pop("_raw_operator_notes", "") or "").strip()
+    phase2_route = vault_bridge.evaluate_phase2_deploy_route(
+        payload,
+        raw_operator_notes=raw_operator_notes,
+        layout_match_pct=int(payload.get("layout_match_pct") or 0),
+    )
+    try:
+        st.session_state.room2_phase2_route = phase2_route
+    except Exception:
+        pass
+    if phase2_route.get("action") == "skip_duplicate":
+        ticker = str(payload.get("ticker") or "UNKNOWN").upper()
+        return True, (
+            f"VAULT DEDUP — {phase2_route.get('message') or f'identical {ticker} pattern already in the matrix.'}"
+        ), {"ticker": ticker, "id": phase2_route.get("duplicate_row_id")}
     duplicate = vault_bridge.find_active_vault_duplicate(
         payload,
         raw_operator_notes=raw_operator_notes,

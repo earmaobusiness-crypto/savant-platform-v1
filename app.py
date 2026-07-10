@@ -1587,8 +1587,8 @@ RESTORE_VAULT_SUCCESS = (
     "and restored to active Matrix memory."
 )
 TRASH_VAULT_BULK_NOTICE = (
-    f"⚠️ SYSTEM NOTICE: All active patterns moved to the Trash Vault. "
-    f"You have {RESCUE_VAULT_RETENTION_DAYS} days to restore them."
+    "✅ All pattern rows permanently removed from Supabase `forensic_patterns`. "
+    "Only the internal lab chat log row is kept."
 )
 
 
@@ -2121,23 +2121,43 @@ def _inventory_unique_tickers(rows: list[dict]) -> list[str]:
     )
 
 
+def _inventory_rows_by_state(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    active: list[dict] = []
+    incubation: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        state = str(row.get("state") or "active").strip().lower()
+        if state == "incubation":
+            incubation.append(row)
+        elif state != "soft_deleted":
+            active.append(row)
+    return active, incubation
+
+
 def _format_vault_pattern_roster(rows: list[dict], *, trash: int) -> str:
     rows = _dedupe_inventory_rows(rows)
+    active_rows, incubation_rows = _inventory_rows_by_state(rows)
     tickers = _inventory_unique_tickers(rows)
     stock_n = len(tickers)
-    pattern_n = len(rows)
-    if stock_n == pattern_n:
-        headline = f"**{stock_n} stock(s)** in Supabase ({trash} in Trash Vault)"
-    else:
-        headline = (
-            f"**{stock_n} stock(s)** in Supabase "
-            f"· {pattern_n} unique pattern(s) ({trash} in Trash Vault)"
-        )
+    deploy_n = len(active_rows) if active_rows else len(rows)
+    incubation_n = len(incubation_rows)
+    headline = f"**{stock_n} stock(s)** in Supabase"
+    parts = [f"**{deploy_n} active save(s)**"]
+    if incubation_n:
+        parts.append(f"**{incubation_n} in incubation**")
+    parts.append(f"({trash} in Trash Vault)")
+    headline += " · " + " · ".join(parts)
     lines = [headline + ":", ""]
     if tickers:
         lines.append(f"**Tickers:** {', '.join(tickers)}")
         lines.append("")
-    for row in rows[:12]:
+    lines.append(
+        "_Each save = one deploy commit. Same stock on 5M vs 15M = separate tracks._"
+    )
+    lines.append("")
+    display_rows = active_rows or rows
+    for row in display_rows[:12]:
         ticker = str(row.get("ticker") or "?").strip().upper()
         layout = str(
             row.get("macro_weather_layout") or row.get("execution_strategy") or "—"
@@ -2147,8 +2167,11 @@ def _format_vault_pattern_roster(rows: list[dict], *, trash: int) -> str:
         margin = row.get("structural_move_pct") or row.get("margin_pct")
         margin_bit = f" · {float(margin):.2f}% move" if margin is not None else ""
         lines.append(f"- **{ticker}** · {layout} · {tf}{margin_bit} · {ts}")
-    if pattern_n > 12:
-        lines.append(f"- …and {pattern_n - 12} more not shown.")
+    if len(display_rows) > 12:
+        lines.append(f"- …and {len(display_rows) - 12} more not shown.")
+    if incubation_n:
+        lines.append("")
+        lines.append(f"_{incubation_n} incubation row(s) not listed above — not TRUSTED yet._")
     return "\n".join(lines)
 
 
@@ -2410,6 +2433,7 @@ def _is_room2_delete_all_command(text: str) -> bool:
             "zero patterns",
             "get rid of everything",
             "get rid of all",
+            "get rid of it all",
             "remove all patterns",
             "erase everything",
         )
@@ -2539,8 +2563,19 @@ def _soft_delete_latest_pattern_to_vault() -> str:
         return f"⚠️ Trash Vault move failed: {exc}"
 
 
+def _count_supabase_vault_pattern_rows() -> int:
+    """Pattern rows in cloud — excludes the Matrix chat log ticker only."""
+    raw_rows, _ = _supabase_fetch_raw_pattern_rows(limit=200)
+    return sum(
+        1
+        for row in raw_rows
+        if isinstance(row, dict)
+        and str(row.get("ticker") or "").strip().upper() not in ("", MATRIX_CHAT_LOG_TICKER)
+    )
+
+
 def _soft_delete_all_patterns_to_vault() -> str:
-    """Move every active pattern row into the 15-day Trash Vault (not permanent delete)."""
+    """Permanently delete every pattern row from Supabase (not soft-delete — rows must vanish)."""
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         _clear_matrix_session_inventory()
@@ -2551,27 +2586,36 @@ def _soft_delete_all_patterns_to_vault() -> str:
 
     table = _forensic_patterns_table()
     base = vault_bridge.supabase_settings()["url"]
-    deleted_at = datetime.now(timezone.utc).isoformat()
+    before_n = _count_supabase_vault_pattern_rows()
     try:
-        patch = requests.patch(
-            f"{base}/rest/v1/{table}?{_pattern_archive_query_suffix(active_only=True)[1:]}"
-            f"&pattern_category=eq.VALIDATED",
-            headers={**_supabase_rest_headers(), "Prefer": "return=minimal"},
-            json={"state": "soft_deleted", "deleted_at": deleted_at},
+        delete = requests.delete(
+            f"{base}/rest/v1/{table}?ticker=neq.{MATRIX_CHAT_LOG_TICKER}",
+            headers={**_supabase_rest_headers(), "Prefer": "return=representation"},
             timeout=12,
         )
-        if patch.ok:
-            _clear_matrix_session_inventory()
-            st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
-            st.session_state.quantum_terminal_output = (
-                f"📡 [DATALINK: TRASH_VAULT] {TRASH_VAULT_BULK_NOTICE}"
+        if not delete.ok:
+            return f"⚠️ Supabase delete failed: {delete.status_code} {delete.text[:200]}"
+        deleted_body = delete.json() if delete.text else []
+        deleted_n = len(deleted_body) if isinstance(deleted_body, list) else before_n
+        after_n = _count_supabase_vault_pattern_rows()
+        _clear_matrix_session_inventory()
+        st.session_state.matrix_active_pattern_count = 0
+        st.session_state.matrix_trash_vault_count = 0
+        st.session_state.quantum_terminal_output = (
+            f"📡 [DATALINK: TRASH_VAULT] {TRASH_VAULT_BULK_NOTICE}"
+        )
+        if after_n > 0:
+            return (
+                f"⚠️ Supabase delete incomplete — {after_n} pattern row(s) still in "
+                f"`forensic_patterns` (removed {deleted_n}). Check RLS delete policy."
             )
-            return TRASH_VAULT_BULK_NOTICE
-        _clear_matrix_session_inventory()
-        return f"⚠️ Bulk Trash Vault move failed: {patch.status_code} {patch.text} (local backup cleared)"
+        if before_n == 0:
+            return "✅ Supabase vault was already empty — nothing to delete."
+        return (
+            f"{TRASH_VAULT_BULK_NOTICE} ({deleted_n} row(s) removed.)"
+        )
     except Exception as exc:
-        _clear_matrix_session_inventory()
-        return f"⚠️ Bulk Trash Vault move failed: {exc} (local backup cleared)"
+        return f"⚠️ Supabase delete failed: {exc}"
 
 
 def _restore_soft_deleted_pattern_from_vault(restore_all: bool = False) -> str:
@@ -4412,6 +4456,8 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
 
     raw_operator_notes = str(payload.get("_raw_operator_notes") or snap.get("notes") or "").strip()
     ok, vault_message, saved_row = core_quantum.stream_payload_to_vault(payload)
+    phase2_route = st.session_state.get("room2_phase2_route") or {}
+    phase2_note = str(phase2_route.get("message") or "").strip()
     vault_synced_ui = False
     vault_deduped = "VAULT DEDUP" in str(vault_message or "")
     pattern_fingerprint = vault_bridge.vault_pattern_fingerprint(
@@ -4580,6 +4626,8 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
                 f"{structural_move:.2f}% structural move · "
                 f"bars={st.session_state.room2_bar_count} · confirmed in Supabase."
             )
+            if phase2_note:
+                confirm = f"{confirm}\n{phase2_note}"
             sync_note = str(
                 (st.session_state.get("room2_strategy_trust") or {}).get("message")
                 or "Pattern confirmed in Supabase."
