@@ -1817,34 +1817,45 @@ def _fetch_big_dog_social_wire(ticker: str) -> dict:
     private_hit = private_match != "None"
 
     if active_spike:
-        status = "Velocity Spike Active"
+        status = f"Velocity Spike Active · {int(reddit.get('unique_15m') or 0)} authors now"
         status_color = "#FF3B30"
     elif recent_spike:
         age = _format_time_ago(float(reddit.get("peak_age_sec") or 0.0))
-        status = f"Velocity Spike Recent — peak {age}"
+        peak_n = int(reddit.get("peak_unique") or 0)
+        status = f"Velocity Spike Recent · peak {age} · {peak_n} authors"
         status_color = "#FF9500"
     elif building:
-        status = "Early Build — mentions rising"
+        status = "Early Build · mentions rising, below spike threshold"
         status_color = "#FFD60A"
     else:
-        status = "Social Quiet"
+        status = "Social Quiet · no burst in 6h lookback"
         status_color = "#8E8E93"
 
     if active_spike:
-        timeline = "Active coordination window — spike in progress now"
+        pct = int(max(float(reddit.get("spike_pct") or 0.0), 1))
+        reddit_line = (
+            f"{pct}% live spike · {int(reddit.get('unique_15m') or 0)} unique / 15m"
+        )
     elif recent_spike:
-        peak_n = int(reddit.get("peak_unique") or 0)
         age = _format_time_ago(float(reddit.get("peak_age_sec") or 0.0))
-        timeline = f"Documented burst — {peak_n} unique authors peaked {age}"
+        peak_n = int(reddit.get("peak_unique") or 0)
+        reddit_line = f"{peak_n} unique / 15m peak · fired {age} · 6h memory"
     elif building:
         last30 = int(reddit.get("last30") or 0)
         prior30 = int(reddit.get("prior30") or 0)
-        timeline = (
-            f"Pre-spike build — {last30} unique last 60m "
-            f"(up from {prior30}), below 5-author alert"
+        reddit_line = (
+            f"Baseline rising · {last30} unique last 60m (was {prior30}) · need 5+ to spike"
         )
+    elif str(reddit.get("reddit_metric", "Null")) != "Null":
+        reddit_line = f"{reddit.get('reddit_metric')} · 6h lookback clear"
     else:
-        timeline = "No documented burst in last 6h"
+        reddit_line = "Null · 6h lookback, no coordinated Reddit burst"
+
+    feeds = _configured_private_feeds()
+    if not feeds:
+        private_display = "None — Telegram/Discord feeds not connected"
+    else:
+        private_display = private_match
 
     if active_spike or private_hit or (alpha_hit and alpha_fresh):
         verdict = "CRITICAL: Coordinated pump active — immediate entry window"
@@ -1866,10 +1877,9 @@ def _fetch_big_dog_social_wire(ticker: str) -> dict:
         "ok": True,
         "status": status,
         "status_color": status_color,
-        "reddit_metric": reddit.get("reddit_metric", "Null"),
+        "reddit_metric": reddit_line,
         "micro_x": alpha_text,
-        "private_chat": private_match,
-        "timeline": timeline,
+        "private_chat": private_display,
         "verdict": verdict,
         "verdict_color": verdict_color,
     }
@@ -1887,7 +1897,6 @@ def _render_room1_big_dog_social_wire_panel(ticker: str) -> None:
     lines = [
         ("STATUS", str(wire.get("status", "Social Quiet")), status_color),
         ("REDDIT SWARM METRIC", str(wire.get("reddit_metric", "Null")), "#CCC"),
-        ("MOMENTUM TIMELINE", str(wire.get("timeline", "No documented burst in last 6h")), "#AAA"),
         ("MICRO-INFLUENCER (X)", str(wire.get("micro_x", "None")), "#5AC8FA"),
         ("PRIVATE CHAT MATCH (TELEGRAM/DISCORD)", str(wire.get("private_chat", "None")), "#CCC"),
         ("ACTIONABLE VERDICT", str(wire.get("verdict", "STABLE: No front-running detected")), verdict_color),
