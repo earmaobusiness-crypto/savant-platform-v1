@@ -5031,6 +5031,37 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
     if not coupling.get("passed") or not quality.get("passed"):
         return False, "VAULT BLOCKED — chart coupling or quality gate failed (PRE-STORAGE TRASH)."
 
+    def _is_numeric_coordinate(value) -> bool:
+        if value in (None, ""):
+            return False
+        try:
+            float(str(value).replace(",", "").strip())
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    def _sanitize_legacy_coordinate_fields(row: dict) -> dict:
+        """Legacy forensic_patterns stores prices in *_coordinate and datetimes in *_time."""
+        row = dict(row)
+        for coord_key, time_key in (
+            ("entry_coordinate", "entry_time"),
+            ("exit_coordinate", "exit_time"),
+        ):
+            val = row.get(coord_key)
+            if val in (None, ""):
+                continue
+            if _is_numeric_coordinate(val):
+                try:
+                    row[coord_key] = float(str(val).replace(",", "").strip())
+                except (TypeError, ValueError):
+                    row.pop(coord_key, None)
+                continue
+            dt_str = str(val).strip()
+            if dt_str and not str(row.get(time_key) or "").strip():
+                row[time_key] = dt_str
+            row.pop(coord_key, None)
+        return row
+
     def _align_legacy_forensic_pattern_row(body: dict) -> dict:
         """Map new vault fields onto legacy NOT NULL columns (pattern_type, trigger_timestamp)."""
         row = dict(body)
@@ -5044,7 +5075,7 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
         tf = row.get("timeframe_resolution") or row.get("timeframe") or "15-Minute"
         row.setdefault("timeframe", str(tf)[:10])
         row.setdefault("timeframe_resolution", str(tf))
-        return row
+        return _sanitize_legacy_coordinate_fields(row)
 
     payload = _align_legacy_forensic_pattern_row(payload)
     raw_operator_notes = str(payload.pop("_raw_operator_notes", "") or "").strip()

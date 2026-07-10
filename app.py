@@ -4929,6 +4929,20 @@ def _advance_room2_processor() -> str:
             research_audit = proc.get("research_audit") or {}
             entry_coord = snap.get("entry_coord", "")
             exit_coord = snap.get("exit_coord", "")
+            entry_time_full = entry_coord or f"{start_date} {start_time}".strip()
+            exit_time_full = exit_coord or f"{end_date} {end_time}".strip()
+            entry_price = quality.get("volatility_ignition_entry_price") or quality.get(
+                "anchor_price"
+            )
+            exit_price = quality.get("exit_price") or quality.get("raw_exit_price")
+
+            def _vault_numeric_coord(value) -> str:
+                if value in (None, ""):
+                    return ""
+                try:
+                    return str(round(float(value), 6))
+                except (TypeError, ValueError):
+                    return ""
 
             text_matrix_string = research_audit.get("text_matrix_string", "")
             forensic_dragnet_blob = research_audit.get("forensic_dragnet_blob", "")
@@ -5045,10 +5059,10 @@ def _advance_room2_processor() -> str:
             payload = core_quantum.build_vault_payload(
                 ticker=ticker,
                 pattern_category=pattern_category,
-                entry_coordinate=entry_coord or "",
-                exit_coordinate=exit_coord or "",
-                entry_time=start_time,
-                exit_time=end_time,
+                entry_coordinate=_vault_numeric_coord(entry_price),
+                exit_coordinate=_vault_numeric_coord(exit_price),
+                entry_time=entry_time_full,
+                exit_time=exit_time_full,
                 operator_notes=notes,
                 quantum_report=quantum_report,
                 bar_count=st.session_state.room2_bar_count,
