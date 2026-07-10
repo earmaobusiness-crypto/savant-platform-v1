@@ -1088,18 +1088,73 @@ def _room1_reset_volatile_memory() -> None:
     st.session_state.data_payload_string = ""
 
 
+ROOM1_CASUAL_PHRASES = (
+    "hello", "hi ", "hi!", "hey ", "how are you", "how's it going", "hows it going",
+    "good morning", "good evening", "good afternoon", "what's up", "whats up",
+    "thanks", "thank you", "nice to meet", "how do you do", "joke", "bored",
+    "tell me a joke", "you there", "are you there",
+)
+ROOM1_TICKER_IGNORE = {
+    "ARE", "WHY", "HOW", "WHEN", "CAN", "WHAT", "YOUR", "INFO", "MOVE", "PRICE", "TRADE",
+    "ASSET", "ALPHA", "BETA", "THIS", "LOOK", "THAT", "THEIR", "THEM", "WITH", "FROM",
+    "JOKE", "TELL", "GIVE", "SOME", "SHOW", "CHART", "MORE", "AGAIN", "VIEW", "PLOT",
+    "HELLO", "DOING", "WELL", "FEEL", "GOOD", "FINE", "THANK", "THANKS", "HEY", "SUP",
+    "YO", "THE", "AND", "FOR", "BUT", "NOT", "YOU", "ALL", "HER", "WAS", "ONE", "OUR",
+    "OUT", "DAY", "GET", "HAS", "HIM", "HIS", "ITS", "MAY", "NEW", "NOW", "OLD", "SEE",
+    "WAY", "WHO", "BOY", "DID", "LET", "PUT", "SAY", "SHE", "TOO", "USE", "ASK", "BUY",
+    "RUN", "TOP", "LOW", "HIGH", "OPEN", "WHERE", "WILL", "JUST", "LIKE", "THAN", "THEN",
+    "THEY", "HAVE", "BEEN", "STOCK", "SHARE", "ABOUT", "INTO", "OVER", "ALSO", "ONLY",
+    "VERY", "MUCH", "ME", "VS", "VERSUS",
+}
+
+
+def is_room1_casual_intent(text: str) -> bool:
+    low = text.strip().lower()
+    if not low:
+        return False
+    if any(phrase in low for phrase in ROOM1_CASUAL_PHRASES):
+        return True
+    if re.match(r"^(hi|hey|yo|sup|hello)[\s!.,?]*$", low):
+        return True
+    return False
+
+
+def is_room1_fresh_ticker_setup(text: str, ticker: str | None) -> bool:
+    """Rule A — explicit new single-ticker setup only (not follow-ups or casual)."""
+    if not ticker or is_room1_casual_intent(text):
+        return False
+    bare = ticker.upper()
+    words = [w.upper() for w in re.findall(r"\b[A-Za-z]{2,5}\b", text)]
+    extra = [w for w in words if w not in ROOM1_TICKER_IGNORE and w != bare]
+    if not extra:
+        return True
+    low = text.lower()
+    return any(
+        kw in low
+        for kw in (
+            "analyze", "analysis", "setup", "scan", "look at", "tell me about",
+            "what about", "break down", "deep dive", "thoughts on",
+        )
+    )
+
+
 def extract_ticker(text):
-    ignore = [
-        "ARE", "WHY", "HOW", "WHEN", "CAN", "WHAT", "YOUR", "INFO", "MOVE", "PRICE", "TRADE",
-        "ASSET", "ALPHA", "BETA", "THIS", "LOOK", "THAT", "THEIR", "THEM", "WITH", "FROM",
-        "JOKE", "TELL", "GIVE", "SOME", "SHOW", "CHART", "MORE", "AGAIN", "VIEW", "PLOT",
-    ]
+    if is_room1_casual_intent(text):
+        return None
+    ignore = ROOM1_TICKER_IGNORE
     cash = re.search(r"\$([A-Za-z]{1,5})\b", text)
     if cash and cash.group(1).upper() not in ignore:
         return cash.group(1).upper()
-    for word in re.findall(r"\b[A-Z]{3,5}\b", text):
-        if word not in ignore:
-            return word
+    parens = re.search(r"\(([A-Za-z]{1,5})\)", text)
+    if parens and parens.group(1).upper() not in ignore:
+        return parens.group(1).upper()
+    tagged = re.search(r"\b(?:NASDAQ|NYSE|AMEX):([A-Za-z]{1,5})\b", text, re.I)
+    if tagged and tagged.group(1).upper() not in ignore:
+        return tagged.group(1).upper()
+    for word in re.findall(r"\b[A-Za-z]{3,5}\b", text):
+        key = word.upper()
+        if key not in ignore:
+            return key
     return None
 
 
@@ -1503,12 +1558,34 @@ def run_groq(messages):
         return f"Core System Interruption: {exc}"
 
 
-def _build_groq_message_stack(user_text: str, payload: str) -> list[dict]:
+def _build_groq_message_stack(
+    user_text: str,
+    payload: str,
+    *,
+    response_mode: str = "rule_b",
+) -> list[dict]:
     system_msg = st.session_state.llm_memory[0]
     dialog = [m for m in st.session_state.llm_memory[1:] if m["role"] in ("user", "assistant")]
     recent = dialog[-3:] if len(dialog) > 3 else dialog
+    mode_hint = {
+        "rule_a": (
+            "[RESPONSE MODE: RULE A] Fresh single-ticker setup — enforce the 6-bullet deep-dive "
+            "framework exactly as specified."
+        ),
+        "chitchat": (
+            "[RESPONSE MODE: CHITCHAT] Casual human conversation. Reply in 1–3 short natural "
+            "sentences like a sharp trading peer. No bullet framework. No unsolicited market lecture."
+        ),
+        "rule_b": (
+            "[RESPONSE MODE: RULE B] Follow-up, macro, or general context — multi-paragraph prose "
+            "only. Do not use the 6-bullet template."
+        ),
+    }.get(response_mode, "")
     groq_msgs = [
-        {"role": "system", "content": f"{system_msg['content']}\n{TOKEN_GUARD}"},
+        {
+            "role": "system",
+            "content": f"{system_msg['content']}\n{TOKEN_GUARD}\n{mode_hint}".strip(),
+        },
         *[{"role": m["role"], "content": m["content"]} for m in recent[:-1]],
     ]
     latest = user_text
@@ -1523,7 +1600,8 @@ def process_chat_submission():
     if not user_text:
         return
 
-    new_ticker = extract_ticker(user_text)
+    casual = is_room1_casual_intent(user_text)
+    new_ticker = None if casual else extract_ticker(user_text)
     if new_ticker and new_ticker != st.session_state.current_ticker:
         st.session_state.current_ticker = new_ticker
         st.session_state.llm_memory = st.session_state.llm_memory[:1]
@@ -1532,11 +1610,16 @@ def process_chat_submission():
     st.session_state.llm_memory.append({"role": "user", "content": user_text})
 
     payload = ""
-    if st.session_state.current_ticker:
-        get_live_tape_data(st.session_state.current_ticker)
-        payload = st.session_state.data_payload_string
+    response_mode = "chitchat" if casual else "rule_b"
+    active_ticker = st.session_state.current_ticker
 
-    groq_msgs = _build_groq_message_stack(user_text, payload)
+    if not casual and active_ticker:
+        get_live_tape_data(active_ticker)
+        payload = st.session_state.data_payload_string
+        if is_room1_fresh_ticker_setup(user_text, new_ticker or active_ticker):
+            response_mode = "rule_a"
+
+    groq_msgs = _build_groq_message_stack(user_text, payload, response_mode=response_mode)
     ai_text = run_groq(groq_msgs)
     st.session_state.llm_memory.append({"role": "assistant", "content": ai_text})
     st.session_state.chat_history.append({"speaker": "Savant", "text": ai_text})
@@ -4121,13 +4204,17 @@ def _render_room1_forensic_front_desk():
                 st.rerun()
 
         if st.session_state.current_ticker:
-            p, pct, v, vw, name = _fetch_tape_metrics(st.session_state.current_ticker)
+            tk = st.session_state.current_ticker
+            p, pct, v, vw, name = _fetch_tape_metrics(tk)
+            if not st.session_state.active_news_wire and not st.session_state.data_payload_string:
+                get_live_tape_data(tk)
+                p, pct, v, vw, name = _fetch_tape_metrics(tk)
             color_choice = "#34C759" if pct >= 0 else "#FF3B30"
             st.markdown(
                 f"""
                 <div style="background:#111;padding:12px;border-radius:6px;border:1px solid #1F1F1F;margin-bottom:15px;">
                     <div class="metric-label" style="font-size:10px;color:#555;font-weight:700;">
-                        Exchange Tape Metrics — {name} ({st.session_state.current_ticker})
+                        Exchange Tape Metrics — {name} ({tk})
                     </div>
                     <div class="metric-grid">
                         <div class="metric-card"><div class="metric-label">Price</div>
@@ -4143,6 +4230,30 @@ def _render_room1_forensic_front_desk():
                 """,
                 unsafe_allow_html=True,
             )
+            if st.session_state.institutional_accumulation_detected:
+                st.markdown(
+                    '<div style="background:#0D1A12;border:1px solid #1F3D2B;border-radius:6px;'
+                    'padding:8px 12px;margin:-8px 0 15px 0;font-size:11px;font-weight:700;'
+                    'letter-spacing:0.06em;color:#34C759;">INSTITUTIONAL ACCUMULATION SIGNAL DETECTED</div>',
+                    unsafe_allow_html=True,
+                )
+            headlines = st.session_state.active_news_wire or []
+            if headlines:
+                wire_items = "".join(
+                    f'<li style="margin:4px 0;color:#AAA;font-size:12px;line-height:1.4;">{escape(h)}</li>'
+                    for h in headlines[:4]
+                )
+                st.markdown(
+                    f"""
+                    <div style="background:#0A0A0A;padding:10px 12px;border-radius:6px;border:1px solid #1A1A1A;margin-bottom:15px;">
+                        <div class="metric-label" style="font-size:9px;color:#555;font-weight:700;margin-bottom:6px;">
+                            LIVE NEWS WIRE — {tk}
+                        </div>
+                        <ul style="margin:0;padding-left:16px;">{wire_items}</ul>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
         if not st.session_state.chat_history:
             st.markdown("<div style='height: 18vh;'></div>", unsafe_allow_html=True)
