@@ -1105,7 +1105,50 @@ ROOM1_TICKER_IGNORE = {
     "RUN", "TOP", "LOW", "HIGH", "OPEN", "WHERE", "WILL", "JUST", "LIKE", "THAN", "THEN",
     "THEY", "HAVE", "BEEN", "STOCK", "SHARE", "ABOUT", "INTO", "OVER", "ALSO", "ONLY",
     "VERY", "MUCH", "ME", "VS", "VERSUS",
+    "TRUMP", "TRUMO", "BIDEN", "ELON", "MUSK", "OBAMA", "PUTIN", "TESLA",
+    "APPLE", "GOOGLE", "AMAZON", "MICRO", "SOFT", "CRYPTO", "BITCOIN",
+    "STONKS", "MEME", "SHORT", "LONG", "BULL", "BEAR", "MOON", "PUMP", "DUMP",
 }
+
+
+def _message_contains_uppercase_ticker(text: str, ticker: str) -> bool:
+    """True only when the symbol appears in valid uppercase form in this message."""
+    sym = ticker.upper()
+    return bool(
+        re.search(rf"\${sym}\b", text)
+        or re.search(rf"\({sym}\)", text)
+        or re.search(rf"\b(?:NASDAQ|NYSE|AMEX):{sym}\b", text)
+        or re.search(rf"\b{sym}\b", text)
+    )
+
+
+def is_room1_plain_conversation(text: str) -> bool:
+    """Lowercase prose with no uppercase ticker token — not a symbol submission."""
+    if re.search(r"\$[A-Z]{1,5}\b", text):
+        return False
+    if re.search(r"\b(?:NASDAQ|NYSE|AMEX):[A-Z]{1,5}\b", text):
+        return False
+    if re.search(r"\([A-Z]{1,5}\)", text):
+        return False
+    if re.search(r"\b[A-Z]{3,5}\b", text):
+        return False
+    return bool(re.search(r"[a-z]", text))
+
+
+def is_room1_stock_follow_up(text: str, active_ticker: str | None) -> bool:
+    """Follow-up on the active session ticker without repeating the uppercase symbol."""
+    if not active_ticker or is_room1_casual_intent(text) or is_room1_plain_conversation(text):
+        return False
+    if extract_ticker(text):
+        return False
+    low = text.lower()
+    follow_markers = (
+        "why ", "how ", "what ", "move", "moving", "volume", "vwap", "news",
+        "catalyst", "trend", "session", "tomorrow", "up today", "down today",
+        " it ", " this ", "that stock", "the stock", "same name", "still",
+        "breakout", "support", "resistance", "float", "squeeze",
+    )
+    return any(m in low for m in follow_markers)
 
 
 def is_room1_casual_intent(text: str) -> bool:
@@ -1121,7 +1164,9 @@ def is_room1_casual_intent(text: str) -> bool:
 
 def is_room1_fresh_ticker_setup(text: str, ticker: str | None) -> bool:
     """Rule A — explicit new single-ticker setup only (not follow-ups or casual)."""
-    if not ticker or is_room1_casual_intent(text):
+    if not ticker or is_room1_casual_intent(text) or is_room1_plain_conversation(text):
+        return False
+    if not _message_contains_uppercase_ticker(text, ticker):
         return False
     bare = ticker.upper()
     words = re.findall(r"\b[A-Z]{2,5}\b", text)
@@ -1599,7 +1644,8 @@ def process_chat_submission():
     if not user_text:
         return
 
-    casual = is_room1_casual_intent(user_text)
+    plain = is_room1_plain_conversation(user_text)
+    casual = is_room1_casual_intent(user_text) or plain
     new_ticker = None if casual else extract_ticker(user_text)
     if new_ticker and new_ticker != st.session_state.current_ticker:
         st.session_state.current_ticker = new_ticker
@@ -1612,11 +1658,14 @@ def process_chat_submission():
     response_mode = "chitchat" if casual else "rule_b"
     active_ticker = st.session_state.current_ticker
 
-    if not casual and active_ticker:
+    if not casual and new_ticker and is_room1_fresh_ticker_setup(user_text, new_ticker):
+        get_live_tape_data(new_ticker)
+        payload = st.session_state.data_payload_string
+        response_mode = "rule_a"
+    elif not casual and active_ticker and is_room1_stock_follow_up(user_text, active_ticker):
         get_live_tape_data(active_ticker)
         payload = st.session_state.data_payload_string
-        if is_room1_fresh_ticker_setup(user_text, new_ticker or active_ticker):
-            response_mode = "rule_a"
+        response_mode = "rule_b"
 
     groq_msgs = _build_groq_message_stack(user_text, payload, response_mode=response_mode)
     ai_text = run_groq(groq_msgs)
