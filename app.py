@@ -1623,24 +1623,16 @@ def _pattern_archive_query_suffix(*, active_only: bool = True, trash_only: bool 
     return "&" + "&".join(parts)
 
 
-def _purge_expired_anomaly_incubation() -> None:
-    """Hard-delete incubation nodes whose 30-day shelf expired without re-mint."""
-    _ensure_supabase_session()
+def _purge_expired_anomaly_incubation() -> int:
+    """Hard-delete incubation rows whose 30-day shelf expired without re-mint."""
     if not st.session_state.get("supabase_ready"):
-        return
-    cutoff = datetime.now(timezone.utc).isoformat()
-    table = _forensic_patterns_table()
-    base = vault_bridge.supabase_settings()["url"]
-    try:
-        requests.delete(
-            f"{base}/rest/v1/{table}?state=eq.{VAULT_STATE_INCUBATION}"
-            f"&shelf_expires_at=lt.{cutoff}"
-            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}",
-            headers=_supabase_rest_headers(),
-            timeout=12,
-        )
-    except Exception:
-        pass
+        return 0
+    deleted, err = vault_bridge.purge_expired_incubation_rows()
+    if deleted:
+        st.session_state.matrix_incubation_expired_purge_count = int(deleted)
+    if err:
+        st.session_state.matrix_incubation_purge_error = str(err)
+    return int(deleted or 0)
 
 
 def _anomaly_incubation_signature(
@@ -2134,13 +2126,24 @@ def _inventory_unique_tickers(rows: list[dict]) -> list[str]:
     )
 
 
+def _inventory_row_state(row: dict) -> str:
+    merged = _pattern_row_effective_fields(row)
+    state = str(merged.get("state") or "").strip().lower()
+    if state:
+        return state
+    tier = str(merged.get("strategy_trust_tier") or "").strip().lower()
+    if tier == "candidate":
+        return VAULT_STATE_INCUBATION
+    return "active"
+
+
 def _inventory_rows_by_state(rows: list[dict]) -> tuple[list[dict], list[dict]]:
     active: list[dict] = []
     incubation: list[dict] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
-        state = str(row.get("state") or "active").strip().lower()
+        state = _inventory_row_state(row)
         if state == "incubation":
             incubation.append(row)
         elif state != "soft_deleted":
@@ -2410,8 +2413,10 @@ def _hydrate_matrix_memory_from_cloud() -> None:
     st.session_state.matrix_cloud_hydrated = True
 
     _hydrate_matrix_deploy_registry_from_local()
+    purged = _purge_expired_anomaly_incubation()
+    if purged:
+        st.session_state.layout_library_hydrated = False
     _purge_expired_trash_vault()
-    _purge_expired_anomaly_incubation()
     core_quantum.hydrate_layout_library_from_vault()
     self_surgery.ensure_purgatory_hub_session()
     self_surgery.hydrate_repair_bay_from_cloud()
@@ -3125,6 +3130,9 @@ def _window4_build_vault_inventory_reply() -> str:
     draft_n = _unsynced_local_draft_count()
     if rows:
         body = _format_vault_pattern_roster(rows, trash=trash)
+        purge_n = int(st.session_state.get("matrix_incubation_expired_purge_count") or 0)
+        if purge_n > 0:
+            body += f"\n\n🧹 **{purge_n} expired incubation row(s)** auto-purged this session."
         if draft_n > 0:
             body += (
                 f"\n\n⚠️ **{draft_n} unsynced local draft(s)** on this server are **not** in Supabase "
@@ -4472,7 +4480,10 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
     raw_operator_notes = str(payload.get("_raw_operator_notes") or snap.get("notes") or "").strip()
     ok, vault_message, saved_row = core_quantum.stream_payload_to_vault(payload)
     phase2_route = st.session_state.get("room2_phase2_route") or {}
-    phase2_note = str(phase2_route.get("message") or "").strip()
+    collective_route = st.session_state.get("room2_phase2_collective_route") or {}
+    phase2_note = str(
+        collective_route.get("message") or phase2_route.get("message") or ""
+    ).strip()
     vault_synced_ui = False
     vault_deduped = "VAULT DEDUP" in str(vault_message or "")
     pattern_fingerprint = vault_bridge.vault_pattern_fingerprint(
@@ -4713,6 +4724,9 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
     st.session_state.matrix_satellites_ready = True
     st.session_state.matrix_active_pattern_count = _sync_matrix_active_pattern_count_from_cloud()
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
+    if ok and not vault_deduped:
+        st.session_state.layout_library_hydrated = False
+        core_quantum.hydrate_layout_library_from_vault()
     _sync_matrix_chat_to_cloud()
     _record_room2_successful_commit()
     _clear_room2_form_buffers()
@@ -5093,12 +5107,32 @@ def _advance_room2_processor() -> str:
                 margin_pct=net_margin,
             )
             st.session_state.room2_strategy_trust = trust
-            if not trust.get("trusted"):
-                vault_state = VAULT_STATE_INCUBATION
-                incubation_msg = str(trust.get("message") or incubation_msg)
-            elif trust.get("trusted") and vault_state == VAULT_STATE_INCUBATION:
-                vault_state = "active"
-                incubation_msg = str(trust.get("message") or incubation_msg)
+            collective = vault_bridge.evaluate_phase2_collective_route(
+                ticker=ticker,
+                timeframe_resolution=timeframe_resolution,
+                macro_weather_layout=macro_weather_layout,
+                execution_strategy=execution_strategy,
+                layout_match_pct=match_score,
+                trusted=bool(trust.get("trusted")),
+            )
+            st.session_state.room2_phase2_collective_route = collective
+            vault_state = str(collective.get("vault_state") or vault_state)
+            vault_track = str(collective.get("vault_track") or vault_track)
+            repeat_count = int(collective.get("anomaly_repeat_count") or repeat_count or 0)
+            collective_shelf = str(collective.get("shelf_expires_at") or "").strip()
+            if collective_shelf:
+                shelf_expires = collective_shelf
+            phase2_collective_msg = str(collective.get("message") or "").strip()
+            if vault_state == VAULT_STATE_INCUBATION:
+                incubation_msg = phase2_collective_msg or incubation_msg
+            elif phase2_collective_msg:
+                incubation_msg = phase2_collective_msg
+            if not trust.get("trusted") and vault_state == VAULT_STATE_INCUBATION:
+                incubation_msg = (
+                    f"{incubation_msg} {trust.get('message') or ''}".strip()
+                    if incubation_msg
+                    else str(trust.get("message") or "")
+                )
             payload = core_quantum.build_vault_payload(
                 ticker=ticker,
                 pattern_category=pattern_category,

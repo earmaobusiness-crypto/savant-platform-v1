@@ -5139,7 +5139,6 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
         "deleted_at",
         "layout_match_pct",
         "anomaly_repeat_count",
-        "shelf_expires_at",
         "structural_move_pct",
         "text_matrix_string",
         "forensic_dragnet_blob",
@@ -5173,14 +5172,29 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
             timeout=12,
         )
 
+    def _finalize_save(saved_row: dict | None, base_msg: str) -> tuple[bool, str, dict | None]:
+        route = {}
+        try:
+            route = dict(st.session_state.get("room2_phase2_collective_route") or {})
+        except Exception:
+            route = {}
+        if saved_row and route:
+            _, post_note = vault_bridge.apply_phase2_post_save(payload, route)
+            if post_note:
+                base_msg = f"{base_msg} · {post_note}"
+        return True, base_msg, saved_row
+
     try:
         resp = _post(payload)
         if resp.ok:
             saved_row = _first_inserted_row(resp.json())
-            return True, (
-                f"INTERNET VAULT SYNC CONFIRMED — `{table}` anchored for "
-                f"{payload.get('ticker', 'UNKNOWN')} @ {payload.get('timestamp', 'UTC')}."
-            ), saved_row
+            return _finalize_save(
+                saved_row,
+                (
+                    f"INTERNET VAULT SYNC CONFIRMED — `{table}` anchored for "
+                    f"{payload.get('ticker', 'UNKNOWN')} @ {payload.get('timestamp', 'UTC')}."
+                ),
+            )
 
         err_text = resp.text.lower()
         if resp.status_code in (400, 404) and (
@@ -5196,10 +5210,13 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
             retry = _post(slim)
             if retry.ok:
                 saved_row = _first_inserted_row(retry.json())
-                return True, (
-                    f"INTERNET VAULT SYNC CONFIRMED — `{table}` anchored (compact schema fallback) "
-                    f"for {payload.get('ticker', 'UNKNOWN')}."
-                ), saved_row
+                return _finalize_save(
+                    saved_row,
+                    (
+                        f"INTERNET VAULT SYNC CONFIRMED — `{table}` anchored (compact schema fallback) "
+                        f"for {payload.get('ticker', 'UNKNOWN')}."
+                    ),
+                )
             return False, f"Vault upload failed: {retry.status_code} {retry.text}", None
 
         return False, f"Vault upload failed: {resp.status_code} {resp.text}", None

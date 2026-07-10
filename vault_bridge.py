@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,12 @@ import requests
 MATRIX_CHAT_LOG_TICKER = "_LAB_SESSION_"
 MATRIX_CHAT_LOG_CATEGORY = "MATRIX_CHAT_LOG"
 CACHE_VERSION = 1
+LAYOUT_MATCH_THRESHOLD = 85
+ANOMALY_SHELF_DAYS = 30
+ANOMALY_PERMANENT_MINT_COUNT = 5
+VAULT_STATE_INCUBATION = "incubation"
+VAULT_STATE_ACTIVE = "active"
+PLACEHOLDER_LAYOUT_IDS = frozenset({"NEW_LAYOUT", "PURGATORY_PENDING", "—", "-", ""})
 PROJECT_ROOT = Path(__file__).resolve().parent
 PROJECT_SECRETS_PATH = PROJECT_ROOT / ".streamlit" / "secrets.toml"
 CACHE_PATH = PROJECT_ROOT / ".streamlit" / "matrix_vault_cache.json"
@@ -235,6 +241,346 @@ def find_active_vault_duplicate(payload: dict, *, raw_operator_notes: str = "") 
     return None
 
 
+def _merge_row_meta(row: dict) -> dict:
+    """Merge MATRIX_META blob into row when compact-schema columns are missing."""
+    merged = dict(row or {})
+    ctx = str(merged.get("operator_context") or "")
+    marker = "MATRIX_META:"
+    if marker not in ctx:
+        return merged
+    try:
+        blob = ctx.split(marker, 1)[1].strip()
+        if " | " in blob:
+            blob = blob.split(" | ", 1)[0]
+        meta = json.loads(blob)
+        if isinstance(meta, dict):
+            for key, value in meta.items():
+                if merged.get(key) in (None, ""):
+                    merged[key] = value
+    except Exception:
+        pass
+    return merged
+
+
+def row_vault_state(row: dict) -> str:
+    """Effective vault state — column, meta fallback, then CANDIDATE tier."""
+    merged = _merge_row_meta(row)
+    state = str(merged.get("state") or "").strip().lower()
+    if state:
+        return state
+    tier = str(merged.get("strategy_trust_tier") or "").strip().lower()
+    if tier == "candidate":
+        return VAULT_STATE_INCUBATION
+    return VAULT_STATE_ACTIVE
+
+
+def _is_real_layout(layout_id: str) -> bool:
+    clean = str(layout_id or "").strip().upper()
+    return bool(clean) and clean not in {x.upper() for x in PLACEHOLDER_LAYOUT_IDS if x}
+
+
+def _row_timeframe(row: dict) -> str:
+    return str(row.get("timeframe_resolution") or row.get("timeframe") or "").strip()
+
+
+def _incubation_shelf_iso(*, days: int = ANOMALY_SHELF_DAYS) -> str:
+    return (datetime.now(timezone.utc) + timedelta(days=int(days))).isoformat()
+
+
+def fetch_library_rows_all(*, limit: int = 200) -> list[dict]:
+    """Full collective library — active + incubation rows for cross-ticker compare."""
+    status, body, err = supabase_rest(
+        "GET",
+        "",
+        params=(
+            f"?select=id,ticker,timeframe_resolution,timeframe,state,macro_weather_layout,"
+            f"execution_strategy,layout_match_pct,structural_move_pct,timestamp,entry_time,"
+            f"exit_time,entry_coordinate,exit_coordinate,pattern_category,pattern_type,"
+            f"operator_context,strategy_trust_tier,shelf_expires_at,anomaly_repeat_count,vault_track"
+            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"
+            f"&order=timestamp.desc&limit={int(limit)}"
+        ),
+        timeout=15,
+    )
+    if not status or err or not isinstance(body, list):
+        return []
+    rows: list[dict] = []
+    for row in body:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("ticker") or "").strip().upper() == MATRIX_CHAT_LOG_TICKER:
+            continue
+        if row_vault_state(row) == "soft_deleted":
+            continue
+        rows.append(_merge_row_meta(row))
+    return rows
+
+
+def purge_expired_incubation_rows() -> tuple[int, str | None]:
+    """Hard-delete incubation rows past shelf_expires_at (and stale null-shelf rows)."""
+    cfg = supabase_settings()
+    if not cfg["ready"]:
+        return 0, "supabase_not_configured"
+    cutoff = datetime.now(timezone.utc).isoformat()
+    stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=ANOMALY_SHELF_DAYS)).isoformat()
+    deleted = 0
+    last_err: str | None = None
+
+    status, body, err = supabase_rest(
+        "DELETE",
+        "",
+        params=(
+            f"?state=eq.{VAULT_STATE_INCUBATION}"
+            f"&shelf_expires_at=lt.{cutoff}"
+            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"
+        ),
+        prefer="return=representation",
+        timeout=15,
+    )
+    if status and 200 <= status < 300 and isinstance(body, list):
+        deleted += len(body)
+    elif err:
+        last_err = err
+
+    status2, body2, err2 = supabase_rest(
+        "DELETE",
+        "",
+        params=(
+            f"?state=eq.{VAULT_STATE_INCUBATION}"
+            f"&shelf_expires_at=is.null"
+            f"&timestamp=lt.{stale_cutoff}"
+            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"
+        ),
+        prefer="return=representation",
+        timeout=15,
+    )
+    if status2 and 200 <= status2 < 300 and isinstance(body2, list):
+        deleted += len(body2)
+    elif err2:
+        last_err = err2
+
+    return deleted, last_err
+
+
+def _cluster_rhyme_rows(
+    library: list[dict],
+    *,
+    macro_weather_layout: str,
+    timeframe_resolution: str,
+) -> list[dict]:
+    layout_key = str(macro_weather_layout or "").strip().upper()
+    if not _is_real_layout(layout_key):
+        return []
+    tf = str(timeframe_resolution or "").strip()
+    hits: list[dict] = []
+    for row in library:
+        if str(row.get("macro_weather_layout") or "").strip().upper() != layout_key:
+            continue
+        if _row_timeframe(row) != tf:
+            continue
+        hits.append(row)
+    return hits
+
+
+def _library_has_layout_lane(
+    library: list[dict],
+    *,
+    macro_weather_layout: str,
+    timeframe_resolution: str,
+) -> bool:
+    return bool(
+        _cluster_rhyme_rows(
+            library,
+            macro_weather_layout=macro_weather_layout,
+            timeframe_resolution=timeframe_resolution,
+        )
+    )
+
+
+def promote_incubation_cluster_to_active(
+    *,
+    macro_weather_layout: str,
+    timeframe_resolution: str,
+) -> tuple[int, str | None]:
+    """Promote every incubation row in a matured layout lane to active."""
+    layout = str(macro_weather_layout or "").strip()
+    tf = str(timeframe_resolution or "").strip()
+    if not _is_real_layout(layout) or not tf:
+        return 0, None
+    status, body, err = supabase_rest(
+        "PATCH",
+        "",
+        params=(
+            f"?state=eq.{VAULT_STATE_INCUBATION}"
+            f"&macro_weather_layout=eq.{layout}"
+            f"&timeframe_resolution=eq.{tf}"
+            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"
+        ),
+        json_body={
+            "state": VAULT_STATE_ACTIVE,
+            "vault_track": "track_1_validated",
+            "shelf_expires_at": None,
+        },
+        prefer="return=representation",
+        timeout=15,
+    )
+    if status and 200 <= status < 300 and isinstance(body, list):
+        return len(body), None
+    return 0, err
+
+
+def touch_incubation_cluster_shelf(
+    *,
+    macro_weather_layout: str,
+    timeframe_resolution: str,
+    shelf_expires_at: str,
+) -> tuple[int, str | None]:
+    """Reset 30-day shelf on a matching incubation cluster when a new rhyme arrives."""
+    layout = str(macro_weather_layout or "").strip()
+    tf = str(timeframe_resolution or "").strip()
+    if not _is_real_layout(layout) or not tf:
+        return 0, None
+    status, body, err = supabase_rest(
+        "PATCH",
+        "",
+        params=(
+            f"?state=eq.{VAULT_STATE_INCUBATION}"
+            f"&macro_weather_layout=eq.{layout}"
+            f"&timeframe_resolution=eq.{tf}"
+            f"&pattern_category=neq.{MATRIX_CHAT_LOG_CATEGORY}"
+        ),
+        json_body={"shelf_expires_at": shelf_expires_at},
+        prefer="return=representation",
+        timeout=15,
+    )
+    if status and 200 <= status < 300 and isinstance(body, list):
+        return len(body), None
+    return 0, err
+
+
+def apply_phase2_post_save(
+    payload: dict,
+    route: dict,
+) -> tuple[int, str]:
+    """After a confirmed save — promote or extend incubation clusters in Supabase."""
+    layout = str(payload.get("macro_weather_layout") or route.get("macro_weather_layout") or "")
+    tf = str(payload.get("timeframe_resolution") or payload.get("timeframe") or "")
+    notes: list[str] = []
+    promoted = 0
+
+    if route.get("promote_cluster"):
+        count, err = promote_incubation_cluster_to_active(
+            macro_weather_layout=layout,
+            timeframe_resolution=tf,
+        )
+        if count:
+            promoted += count
+            notes.append(f"PHASE 2 — promoted {count} incubation row(s) to **active** layout lane.")
+        elif err:
+            notes.append(f"PHASE 2 promote note: `{err}`")
+
+    shelf = str(route.get("shelf_expires_at") or "").strip()
+    if shelf and route.get("vault_state") == VAULT_STATE_INCUBATION and not route.get("promote_cluster"):
+        touched, err = touch_incubation_cluster_shelf(
+            macro_weather_layout=layout,
+            timeframe_resolution=tf,
+            shelf_expires_at=shelf,
+        )
+        if touched:
+            notes.append(f"PHASE 2 — reset 30-day shelf on {touched} incubation rhyme(s).")
+        elif err:
+            notes.append(f"PHASE 2 shelf note: `{err}`")
+
+    return promoted, " ".join(notes).strip()
+
+
+def evaluate_phase2_collective_route(
+    *,
+    ticker: str,
+    timeframe_resolution: str,
+    macro_weather_layout: str,
+    execution_strategy: str,
+    layout_match_pct: int,
+    trusted: bool,
+) -> dict:
+    """
+    Phase 2 collective fit — compare new deploy against the full library.
+    Routes: active (layout click / mint / trusted) vs incubation (waiting room).
+    """
+    clean_ticker = str(ticker or "").strip().upper()
+    tf = str(timeframe_resolution or "").strip()
+    layout = str(macro_weather_layout or "").strip()
+    match_pct = int(layout_match_pct or 0)
+    library = fetch_library_rows_all()
+
+    rhyme_rows = _cluster_rhyme_rows(
+        library,
+        macro_weather_layout=layout,
+        timeframe_resolution=tf,
+    )
+    rhyme_count = len(rhyme_rows) + 1
+    has_lane = _library_has_layout_lane(
+        library,
+        macro_weather_layout=layout,
+        timeframe_resolution=tf,
+    )
+    layout_click = match_pct >= LAYOUT_MATCH_THRESHOLD and has_lane
+    mint_ready = rhyme_count >= ANOMALY_PERMANENT_MINT_COUNT and _is_real_layout(layout)
+    promote_cluster = mint_ready
+
+    if trusted or layout_click or mint_ready:
+        vault_state = VAULT_STATE_ACTIVE
+        shelf_expires_at = ""
+        if mint_ready:
+            route_msg = (
+                f"PHASE 2 — **{rhyme_count}/{ANOMALY_PERMANENT_MINT_COUNT} layout rhymes** "
+                f"for **{layout}** on **{tf}** — cluster promoted to **active** layout lane."
+            )
+        elif layout_click:
+            route_msg = (
+                f"PHASE 2 — **{match_pct}%** layout fit — **{clean_ticker}** clicks into "
+                f"existing **{layout}** lane on **{tf}** (**active** vault)."
+            )
+        else:
+            route_msg = (
+                f"PHASE 2 — strategy **TRUSTED** — **{clean_ticker}** saved to **active** vault."
+            )
+    else:
+        vault_state = VAULT_STATE_INCUBATION
+        shelf_expires_at = _incubation_shelf_iso()
+        if not library:
+            route_msg = (
+                f"PHASE 2 — first save in empty library — **{clean_ticker}** on **{tf}** "
+                f"held in **incubation** ({match_pct}% layout fit · "
+                f"rhyme {rhyme_count}/{ANOMALY_PERMANENT_MINT_COUNT})."
+            )
+        elif rhyme_count > 1:
+            route_msg = (
+                f"PHASE 2 — **{rhyme_count}/{ANOMALY_PERMANENT_MINT_COUNT}** layout rhymes "
+                f"for **{layout}** on **{tf}** ({match_pct}% fit) — still **incubation** "
+                f"until {LAYOUT_MATCH_THRESHOLD}% click-in or {ANOMALY_PERMANENT_MINT_COUNT} rhymes."
+            )
+        else:
+            route_msg = (
+                f"PHASE 2 — **{match_pct}%** layout fit on **{tf}** — **incubation** "
+                f"(no layout click yet · {rhyme_count}/{ANOMALY_PERMANENT_MINT_COUNT} rhymes)."
+            )
+
+    return {
+        "vault_state": vault_state,
+        "vault_track": "track_1_validated" if vault_state == VAULT_STATE_ACTIVE else "track_1_anomaly_incubation",
+        "shelf_expires_at": shelf_expires_at,
+        "anomaly_repeat_count": rhyme_count,
+        "rhyme_count": rhyme_count,
+        "layout_click": layout_click,
+        "promote_cluster": promote_cluster,
+        "library_size": len(library),
+        "message": route_msg,
+        "macro_weather_layout": layout,
+        "timeframe_resolution": tf,
+    }
+
+
 def fetch_library_rows_for_ticker(ticker: str, *, limit: int = 40) -> list[dict]:
     """Active + incubation rows for one ticker — Phase 2 collective compare."""
     clean = str(ticker or "").strip().upper()
@@ -261,11 +607,11 @@ def fetch_library_rows_for_ticker(ticker: str, *, limit: int = 40) -> list[dict]
     for row in body:
         if not isinstance(row, dict):
             continue
-        if str(row.get("state") or "").strip().lower() == "soft_deleted":
+        if row_vault_state(row) == "soft_deleted":
             continue
         if str(row.get("ticker") or "").strip().upper() == MATRIX_CHAT_LOG_TICKER:
             continue
-        rows.append(row)
+        rows.append(_merge_row_meta(row))
     return rows
 
 
