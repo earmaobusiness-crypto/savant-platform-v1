@@ -5619,7 +5619,7 @@ def render_room2_forensic_lab():
             f"🔌 **Supabase connection failed** — patterns are **not** being saved. "
             f"Last error: `{st.session_state.get('matrix_vault_fetch_error', 'unknown')}`"
         )
-    elif active_count == 0:
+    elif stock_count == 0:
         draft_n = _unsynced_local_draft_count()
         st.warning(
             "☁️ **Supabase connected · 0 patterns in `forensic_patterns`.** "
@@ -5632,7 +5632,7 @@ def render_room2_forensic_lab():
         )
     else:
         st.caption(
-            f"☁️ **Supabase connected** — {active_count} stock(s) confirmed in `forensic_patterns`."
+            f"☁️ **Supabase connected** — {stock_count} stock(s) confirmed in `forensic_patterns`."
         )
     _render_market_weather_banner()
     st.caption(
