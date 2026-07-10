@@ -152,36 +152,25 @@ R2_COMMIT_WINDOW_SEC = 60
 R2_COMMIT_MAX_PER_WINDOW = 3
 R2_COMMIT_THROTTLE_BANNER = "POLYGON API THROTTLE PROTECTION ACTIVE."
 ROOM1_SYSTEM_PROMPT = (
-    "You are Savant — Room 1 Global Research Desk. Definitive, data-grounded analysis only. "
-    "Zero greetings, zero filler, zero generic warnings, zero pre-trained price memory.\n\n"
-    "DATA CONTRACT — MANDATORY:\n"
-    "• You MUST build every single-stock answer exclusively from injected live payloads: "
-    "[ROOM1_LIVE_DRAGNET], [12L_DATA_PAYLOAD], [QUERY_INTENT], [TERMINOLOGY_MAP], [RESPONSE_DIRECTIVE].\n"
-    "• Never cite training-data prices, dates, or filings. If a field is missing, state the exact missing lane — do not guess.\n"
-    "• Sources are Yahoo Finance live tape (Room 1 default) plus Massive REST "
-    "(5m/15m lanes when available) and SEC EDGAR.\n\n"
-    "DESK / NO-TICKER MODE:\n"
-    "• When [12L_DATA_PAYLOAD] contains MODE:desk_general, answer brief desk or status questions "
-    "directly — no ticker or live dragnet required.\n\n"
-    "THROTTLE / EMPTY DATA:\n"
-    "• When [ROOM1_LIVE_DRAGNET] reports FAULT:MASSIVE_THROTTLE or STATUS:MASSIVE_EMPTY, tell the "
-    "operator live bar data is temporarily unavailable and to retry in ~60 seconds — do not claim "
-    "injected lanes are missing.\n\n"
-    "FLUID CONTEXTUAL FRAMEWORK — NO FIXED BULLET TEMPLATE:\n"
-    "• Read [QUERY_INTENT] and [RESPONSE_DIRECTIVE] and shape the entire reply around the operator's actual question.\n"
-    "• layer1_velocity → lead with price velocity, peak/mean bar velocity, acceleration; cite 5m lane stats only.\n"
-    "• layer3_vwap_macro → lead with native VWAP bias, 48-bar 15m structural context, macro lane envelopes.\n"
-    "• layer2_volume_envelope → lead with volume σ envelopes, institutional block signals, share-per-minute floors.\n"
-    "• layer4_ignition_structure → lead with Candidate C structural lows, volatility ignition thresholds, hill-interceptor logic.\n"
-    "• adaptive_general → concise adaptive prose; pick the 1–2 most relevant layers for the question — never a canned 6-bullet list.\n\n"
-    "TERMINOLOGY COMPREHENSION:\n"
-    "• Translate operator slang ONLY through [TERMINOLOGY_MAP] bindings to our architecture (never generic textbook definitions).\n"
-    "• 'Institutional buying' = Volume Std Dev Envelopes + block-flow baseline.\n"
-    "• 'Support' = Candidate C structural low.\n"
-    "• 'Breakout' = Volatility Ignition threshold breach.\n\n"
-    "MACRO / MULTI-ASSET (no single-ticker live dragnet):\n"
-    "• Use vault read-only context when present; stay qualitative on indices unless live data is injected.\n"
-    "• Never force single-stock lane data into macro answers."
+    "You are Savant — Room 1 Global Research Desk. You sound like a professional stock "
+    "researcher, not a software bot.\n\n"
+    "WHEN LIVE STOCK DATA IS INJECTED (price, change %, volume, headlines, SEC):\n"
+    "• Answer the operator's question directly about that ticker.\n"
+    "• Typical asks: what's going on, why is it moving/up/down, volume, macro impact, news.\n"
+    "• Lead with price and change %, then explain using ONLY fields in the injected payload.\n"
+    "• Follow-up questions (no ticker repeated) still refer to the active session ticker.\n\n"
+    "WHEN NO TICKER DATA IS INJECTED:\n"
+    "• Answer brief desk/status questions normally in plain English.\n\n"
+    "HARD RULES:\n"
+    "• NEVER mention desk_general, modes, lanes, payloads, QUERY_INTENT, or system architecture.\n"
+    "• NEVER say 'missing lane' when price/data fields are present in the message.\n"
+    "• No greetings, filler, or generic AI disclaimers.\n"
+    "• Never cite training-memory prices — use injected data only.\n\n"
+    "LAYER HINTS (use only when relevant to the question):\n"
+    "• Velocity/momentum questions → price velocity and session change.\n"
+    "• Volume/institutional → volume and headline/filing context.\n"
+    "• VWAP/macro → VWAP bias and broader tape context if present.\n"
+    "• Structure/support/breakout → structural levels when in payload.\n"
 )
 
 st.set_page_config(
@@ -922,6 +911,22 @@ def classify_room1_query_intent(user_text: str) -> str:
             scores[layer] = scores.get(layer, 0) + 2
     if any(w in low for w in ("velocity", "momentum", "speed", "acceleration", "how fast")):
         scores["layer1_velocity"] += 3
+    if any(
+        w in low
+        for w in (
+            "moving",
+            "going down",
+            "going up",
+            "why is",
+            "what's going",
+            "whats going",
+            "what is going",
+            "why down",
+            "why up",
+        )
+    ):
+        scores["layer1_velocity"] += 3
+        scores["layer2_volume_envelope"] += 1
     if any(w in low for w in ("vwap", "macro", "trend", "12-hour", "12 hour", "48-bar", "48 bar", "structural")):
         scores["layer3_vwap_macro"] += 3
     if any(w in low for w in ("volume", "institutional", "order flow", "accumulation", "liquidity")):
@@ -970,10 +975,9 @@ def _room1_response_directive(intent: str) -> str:
             "thresholds, and hill-interceptor entry logic."
         ),
         "adaptive_general": (
-            "Answer in clear plain English. When Yahoo/Massive live data is injected, lead with "
-            "price, change %, volume, and VWAP — then address the operator's question directly. "
-            "When MODE:desk_general, give a brief natural desk reply. Never output raw lane tags "
-            "or gibberish protocol tokens."
+            "Answer the operator's stock question directly: price, change %, volume, why it may be "
+            "moving, news/filings if present. Plain English only — never mention system modes or "
+            "data pipelines."
         ),
     }
     return directives.get(intent, directives["adaptive_general"])
@@ -995,13 +999,10 @@ def _is_room1_macro_only_query(user_text: str) -> bool:
 
 
 def _is_room1_single_stock_inquiry(user_text: str, ticker: str | None) -> bool:
+    """Any active ticker session question — including follow-ups without repeating the symbol."""
     if not ticker:
         return False
     if _is_room1_macro_only_query(user_text):
-        return False
-    symbols = re.findall(r"\$?[A-Z]{1,5}\b", user_text.upper())
-    symbols = [s.lstrip("$") for s in symbols if s.lstrip("$") not in {"I", "A"}]
-    if len(set(symbols)) > 2:
         return False
     return True
 
@@ -1059,7 +1060,7 @@ def _build_room1_desk_payload(
     """Payload for conversational / macro desk queries without a live dragnet."""
     ticker_bit = f"|TK:{ticker}" if ticker else ""
     blocks = [
-        f"12L|MODE:{mode}{ticker_bit}|STATUS:desk_online|NOTE:no_live_dragnet_required",
+        f"12L|MODE:desk_status|STATUS:online",
         _build_room1_context_blocks(intent=intent, terminology=terminology),
     ]
     vault_ctx = _room1_readonly_layout_context()
@@ -1505,14 +1506,10 @@ def process_chat_submission():
     audit_ticker = new_ticker or st.session_state.current_ticker
     intent = classify_room1_query_intent(user_text)
     terminology = map_room1_trading_terminology(user_text)
-    payload = _build_room1_desk_payload(
-        user_text=user_text,
-        intent=intent,
-        terminology=terminology,
-    )
+    payload = ""
 
-    if audit_ticker and st.session_state.get("polygon_lockout") and not _is_room1_single_stock_inquiry(
-        user_text, audit_ticker
+    if audit_ticker and st.session_state.get("polygon_lockout") and _is_room1_macro_only_query(
+        user_text
     ):
         st.session_state.messages.append(
             {"role": "assistant", "content": _room1_throttle_reply(ticker=audit_ticker)}
@@ -1547,6 +1544,12 @@ def process_chat_submission():
                 _build_room1_context_blocks(intent=intent, terminology=terminology),
             )
             if part
+        )
+    else:
+        payload = _build_room1_desk_payload(
+            user_text=user_text,
+            intent=intent,
+            terminology=terminology,
         )
 
     groq_msgs = _build_groq_message_stack(payload)

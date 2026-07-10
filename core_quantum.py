@@ -3917,10 +3917,14 @@ def run_room1_yahoo_tape_dragnet(ticker: str, user_query: str = "") -> dict:
     vwap_native = float(snap.get("vwap_native") or 0.0)
     headlines = _fetch_research_news_headlines(ticker_clean, limit=6)
     headline_preview = " | ".join(headlines[:4]) if headlines else "NONE"
+    sec_dragnet = _scrape_sec_regulatory_dragnet(ticker_clean, days=30)
+    sec_preview = ", ".join(
+        f"{f.get('form')}@{f.get('filing_date')}" for f in (sec_dragnet.get("filings") or [])[:4]
+    ) or "NONE"
     payload_string = (
         f"12L|TK:{ticker_clean}|SRC:YAHOO_FINANCE|CO:{snap.get('name', ticker_clean)}|"
         f"P:{price:.2f}|CHG:{pct:+.2f}%|V:{raw_vol:,}|VW:{vwap_native:.2f}|"
-        f"WIRE:{headline_preview}"
+        f"SEC:{sec_preview}|WIRE:{headline_preview}"
     )
     report_lines = [
         f"ROOM1_LIVE_DRAGNET|TK:{ticker_clean}|SRC:yahoo_finance",
@@ -3928,6 +3932,7 @@ def run_room1_yahoo_tape_dragnet(ticker: str, user_query: str = "") -> dict:
         f"LIVE_CHG_PCT:{pct:+.4f}",
         f"LIVE_VOL:{raw_vol}",
         f"SESS_VWAP_PROXY:{vwap_native:.4f}",
+        f"SEC_TIMELINE:{sec_preview}",
         f"LIVE_HEADLINES:{headline_preview}",
     ]
     if user_query.strip():
