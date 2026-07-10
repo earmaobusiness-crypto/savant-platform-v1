@@ -5090,6 +5090,9 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
         "semantic_catalyst_json",
         "day_context_json",
         "strategy_trust_tier",
+        "form4_insider_summary",
+        "institutional_block_accumulation",
+        "polygon_calls_remaining",
     )
 
     def _post(body: dict):

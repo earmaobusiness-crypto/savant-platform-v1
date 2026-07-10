@@ -28,6 +28,9 @@ ALTER TABLE public.forensic_patterns ADD COLUMN IF NOT EXISTS metric_envelopes_j
 ALTER TABLE public.forensic_patterns ADD COLUMN IF NOT EXISTS semantic_catalyst_json text;
 ALTER TABLE public.forensic_patterns ADD COLUMN IF NOT EXISTS day_context_json text;
 ALTER TABLE public.forensic_patterns ADD COLUMN IF NOT EXISTS strategy_trust_tier text DEFAULT 'candidate';
+ALTER TABLE public.forensic_patterns ADD COLUMN IF NOT EXISTS form4_insider_summary text;
+ALTER TABLE public.forensic_patterns ADD COLUMN IF NOT EXISTS institutional_block_accumulation boolean DEFAULT false;
+ALTER TABLE public.forensic_patterns ADD COLUMN IF NOT EXISTS polygon_calls_remaining integer;
 
 CREATE INDEX IF NOT EXISTS forensic_patterns_ticker_ts_idx
     ON public.forensic_patterns (ticker, timestamp DESC);
