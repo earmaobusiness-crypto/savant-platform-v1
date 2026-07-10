@@ -7,6 +7,7 @@ import urllib.parse
 import json
 from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
+from email.utils import parsedate_to_datetime
 from html import escape
 from xml.etree import ElementTree
 
@@ -779,6 +780,7 @@ if "cross_asset_correlation_context" not in st.session_state: st.session_state.c
 if "institutional_accumulation_detected" not in st.session_state: st.session_state.institutional_accumulation_detected = False
 if "room1_sec_filing_cards" not in st.session_state: st.session_state.room1_sec_filing_cards = []
 if "room1_big_dog_wire" not in st.session_state: st.session_state.room1_big_dog_wire = {}
+if "room1_social_spike_memory" not in st.session_state: st.session_state.room1_social_spike_memory = {}
 if "polygon_lockout" not in st.session_state: st.session_state.polygon_lockout = False
 if "room2_commit_timestamps" not in st.session_state: st.session_state.room2_commit_timestamps = []
 if "room2_commit_throttle_until" not in st.session_state: st.session_state.room2_commit_throttle_until = 0.0
@@ -1422,21 +1424,112 @@ SEC_FORM_HINTS = {
     "424B5": "Shelf offering tap",
     "DEF 14A": "Proxy / shareholder vote",
 }
-ROOM1_BIG_DOG_HANDLES = (
-    ("PeterLBrandt", "Macro chart veteran"),
-    ("RevShark", "Active swing trader"),
-    ("Ripster47", "Momentum map trader"),
-    ("OptionsHawk", "Options flow spotter"),
-    ("TraderStewie", "Day-trade setups"),
-    ("JoshuaTenet", "Small-cap hunter"),
-    ("stocktalkweekly", "Retail newsletter"),
-    ("MikeDiaz", "Retail flow tracker"),
+ROOM1_MICRO_INFLUENCER_WHITELIST = (
+    ("JoshuaTenet", "Small-cap momentum caller"),
+    ("stocktalkweekly", "Retail penny newsletter"),
+    ("MrZackMorris", "Low-float momentum caller"),
+    ("smallaxequity", "Micro-cap setup hunter"),
+    ("PennystockGuru", "Penny stock alert account"),
+    ("TradeWithAlerts", "Retail entry callouts"),
+    ("Equity4K", "Sub-30k follower alpha"),
+    ("OTCWatchList", "OTC / penny watchlist"),
 )
 ROOM1_REDDIT_SWARM_SUBS = ("wallstreetbets", "stocks", "pennystocks", "smallstreetbets")
 ROOM1_MEDIA_HANDLE_BLOCK = frozenset({
     "bloomberg", "reuters", "wsj", "cnbc", "financialtimes", "marketwatch",
     "business", "yahoofinance", "forbes", "nytimes", "ap", "stocktwits",
+    "peterlbrandt", "unusual_whales",
 })
+ROOM1_REDDIT_BOT_AUTHORS = frozenset({
+    "automoderator", "[deleted]", "deleted", "bot", "moderator", "news-bot",
+})
+ROOM1_VELOCITY_WINDOW_SEC = 15 * 60
+ROOM1_SOCIAL_SPIKE_LOOKBACK_SEC = 6 * 3600
+ROOM1_SOCIAL_SPIKE_RECENT_SEC = 3 * 3600
+ROOM1_X_ALPHA_MAX_AGE_SEC = 48 * 3600
+ROOM1_REDDIT_SEARCH_LIMIT = 50
+
+
+def _format_time_ago(seconds: float) -> str:
+    s = int(max(0, seconds))
+    if s < 60:
+        return f"{s}s ago"
+    if s < 3600:
+        return f"{s // 60}m ago"
+    hours, mins = divmod(s // 60, 60)
+    return f"{hours}h {mins}m ago" if mins else f"{hours}h ago"
+
+
+def _reddit_window_unique(
+    events: list[tuple[float, str]], window_end: float, window_sec: float,
+) -> int:
+    window_start = window_end - window_sec
+    return len({author for ts, author in events if window_start <= ts <= window_end})
+
+
+def _collect_reddit_mention_events(ticker: str) -> list[tuple[float, str]]:
+    clean = ticker.upper()
+    now = time.time()
+    events: list[tuple[float, str]] = []
+    for sub in ROOM1_REDDIT_SWARM_SUBS:
+        try:
+            resp = requests.get(
+                f"https://www.reddit.com/r/{sub}/search.json",
+                params={
+                    "q": clean,
+                    "restrict_sr": "1",
+                    "sort": "new",
+                    "limit": str(ROOM1_REDDIT_SEARCH_LIMIT),
+                },
+                headers={"User-Agent": SEC_HEADERS["User-Agent"]},
+                timeout=6,
+            )
+            if not resp.ok:
+                continue
+            for post in resp.json().get("data", {}).get("children", []) or []:
+                data = post.get("data", {}) or {}
+                author = str(data.get("author") or "").strip().lower()
+                if not author or author in ROOM1_REDDIT_BOT_AUTHORS:
+                    continue
+                title = str(data.get("title") or "")
+                body = str(data.get("selftext") or "")
+                blob = f"{title} {body}".upper()
+                if clean not in blob and f"${clean}" not in blob:
+                    continue
+                created = float(data.get("created_utc") or 0.0)
+                if not created or (now - created) > 86400:
+                    continue
+                events.append((created, author))
+        except Exception:
+            continue
+    return events
+
+
+def _find_peak_spike_window(
+    events: list[tuple[float, str]],
+    now: float,
+    lookback_sec: float,
+    window_sec: float,
+    min_unique: int = 5,
+) -> dict | None:
+    best: dict | None = None
+    cutoff = now - lookback_sec
+    step = 300
+    window_end = int(now)
+    while window_end >= cutoff:
+        unique = _reddit_window_unique(events, float(window_end), window_sec)
+        if unique >= min_unique and (
+            best is None
+            or unique > best["unique"]
+            or (unique == best["unique"] and window_end > best["window_end"])
+        ):
+            best = {
+                "unique": unique,
+                "window_end": float(window_end),
+                "window_start": float(window_end) - window_sec,
+            }
+        window_end -= step
+    return best
 
 
 def _days_since_iso(date_str: str) -> int | None:
@@ -1508,50 +1601,122 @@ def _sec_form_hint(form: str) -> str:
     return SEC_FORM_HINTS.get(base, "Recent regulatory filing")
 
 
-def _reddit_swarm_pulse(ticker: str) -> list[dict]:
-    rows: list[dict] = []
-    for sub in ROOM1_REDDIT_SWARM_SUBS:
-        try:
-            resp = requests.get(
-                f"https://www.reddit.com/r/{sub}/search.json",
-                params={"q": ticker, "restrict_sr": "1", "sort": "new", "limit": "8"},
-                headers={"User-Agent": SEC_HEADERS["User-Agent"]},
-                timeout=6,
-            )
-            if not resp.ok:
-                continue
-            posts = resp.json().get("data", {}).get("children", []) or []
-            count = len(posts)
-            sample = ""
-            if posts:
-                sample = str(posts[0].get("data", {}).get("title", "")).strip()[:120]
-            if count >= 5:
-                heat = "HOT"
-            elif count >= 2:
-                heat = "WARM"
-            else:
-                heat = "QUIET"
-            rows.append(
-                {
-                    "platform": "Reddit",
-                    "channel": f"r/{sub}",
-                    "count": count,
-                    "heat": heat,
-                    "sample": sample,
-                }
-            )
-        except Exception:
-            continue
-    return rows
+def _reddit_velocity_scan(ticker: str) -> dict:
+    """Live + lookback Reddit velocity — documents active, recent, and building phases."""
+    clean = ticker.upper()
+    now = time.time()
+    events = _collect_reddit_mention_events(clean)
+    unique_15m = _reddit_window_unique(events, now, ROOM1_VELOCITY_WINDOW_SEC)
+    daily_mentions = len(events)
+
+    hist_map = st.session_state.setdefault("room1_reddit_velocity_hist", {})
+    prior = list(hist_map.get(clean, []))
+    baseline = statistics.mean(prior) if prior else max(1.0, daily_mentions / 96.0)
+    hist_map[clean] = (prior + [float(unique_15m)])[-30:]
+    spike_pct = ((unique_15m - baseline) / baseline) * 100.0 if baseline > 0 else 0.0
+    active_spike = unique_15m >= 5 or spike_pct >= 150.0
+
+    peak = _find_peak_spike_window(
+        events, now, ROOM1_SOCIAL_SPIKE_LOOKBACK_SEC, ROOM1_VELOCITY_WINDOW_SEC,
+    )
+    mem_map = st.session_state.setdefault("room1_social_spike_memory", {})
+    ticker_mem = dict(mem_map.get(clean, {}) or {})
+    if active_spike:
+        ticker_mem = {
+            "peak_unique": unique_15m,
+            "peak_window_end": now,
+            "recorded_at": now,
+        }
+    elif peak and (
+        not ticker_mem
+        or peak["window_end"] >= float(ticker_mem.get("peak_window_end", 0.0))
+    ):
+        ticker_mem = {
+            "peak_unique": peak["unique"],
+            "peak_window_end": peak["window_end"],
+            "recorded_at": now,
+        }
+    if ticker_mem:
+        mem_map[clean] = ticker_mem
+
+    last30 = _reddit_window_unique(events, now, 1800)
+    prior30 = _reddit_window_unique(events, now - 1800, 1800)
+    building = (
+        not active_spike
+        and 2 <= unique_15m < 5
+        and last30 > prior30
+    ) or (
+        not active_spike
+        and 3 <= last30 < 5
+        and unique_15m < 5
+    )
+
+    documented_peak = peak or (
+        {
+            "unique": int(ticker_mem.get("peak_unique", 0)),
+            "window_end": float(ticker_mem.get("peak_window_end", 0.0)),
+        }
+        if int(ticker_mem.get("peak_unique", 0)) >= 5
+        else None
+    )
+    recent_spike = False
+    peak_age_sec = None
+    if documented_peak and int(documented_peak.get("unique", 0)) >= 5:
+        peak_age_sec = now - float(documented_peak["window_end"])
+        recent_spike = (
+            not active_spike
+            and peak_age_sec <= ROOM1_SOCIAL_SPIKE_RECENT_SEC
+        )
+
+    if active_spike and spike_pct > 0:
+        reddit_metric = f"{int(max(spike_pct, 1))}% Spike over 15-Mins (live)"
+    elif active_spike:
+        reddit_metric = f"{unique_15m} unique / 15m (live)"
+    elif documented_peak and int(documented_peak["unique"]) >= 5:
+        age_label = _format_time_ago(peak_age_sec or 0.0)
+        reddit_metric = (
+            f"{documented_peak['unique']} unique / 15m peak — {age_label}"
+        )
+    elif building:
+        reddit_metric = f"Baseline — {last30} unique last 60m, rising"
+    elif unique_15m > 0 or daily_mentions > 0:
+        reddit_metric = "Baseline"
+    else:
+        reddit_metric = "Null"
+
+    if active_spike:
+        phase = "active"
+    elif recent_spike:
+        phase = "recent"
+    elif building:
+        phase = "building"
+    else:
+        phase = "quiet"
+
+    return {
+        "unique_15m": unique_15m,
+        "velocity_spike": active_spike,
+        "recent_spike": recent_spike,
+        "building": building,
+        "phase": phase,
+        "reddit_metric": reddit_metric,
+        "spike_pct": round(spike_pct, 1),
+        "peak_unique": int(documented_peak["unique"]) if documented_peak else 0,
+        "peak_age_sec": peak_age_sec,
+        "last30": last30,
+        "prior30": prior30,
+    }
 
 
-def _big_dog_x_pulse(ticker: str) -> list[dict]:
-    hits: list[dict] = []
-    for handle, role in ROOM1_BIG_DOG_HANDLES:
+def _micro_influencer_x_alpha_hit(ticker: str) -> dict:
+    """Whitelist micro-influencer hit — recent posts only, no mainstream wires."""
+    clean = ticker.upper()
+    now = time.time()
+    for handle, _role in ROOM1_MICRO_INFLUENCER_WHITELIST:
         if handle.lower() in ROOM1_MEDIA_HANDLE_BLOCK:
             continue
         try:
-            q = urllib.parse.quote(f"{ticker} {handle}", safe="")
+            q = urllib.parse.quote(f"${clean} {handle}", safe="")
             rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
             resp = requests.get(
                 rss_url, timeout=5, headers={"User-Agent": SEC_HEADERS["User-Agent"]},
@@ -1559,20 +1724,78 @@ def _big_dog_x_pulse(ticker: str) -> list[dict]:
             if not resp.ok:
                 continue
             root = ElementTree.fromstring(resp.content)
-            titles = [n.text.strip() for n in root.findall(".//item/title")[:2] if n.text]
-            if not titles:
-                continue
-            hits.append(
-                {
-                    "platform": "X",
-                    "handle": f"@{handle}",
-                    "role": role,
-                    "snippet": titles[0][:140],
+            for item in root.findall(".//item")[:4]:
+                title_node = item.find("title")
+                pub_node = item.find("pubDate")
+                title = (title_node.text or "").strip() if title_node is not None else ""
+                if not title:
+                    continue
+                title_upper = title.upper()
+                if clean not in title_upper and f"${clean}" not in title_upper:
+                    continue
+                age_sec = None
+                if pub_node is not None and pub_node.text:
+                    try:
+                        pub_dt = parsedate_to_datetime(pub_node.text.strip())
+                        if pub_dt.tzinfo is None:
+                            pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+                        age_sec = now - pub_dt.timestamp()
+                    except Exception:
+                        age_sec = None
+                if age_sec is not None and age_sec > ROOM1_X_ALPHA_MAX_AGE_SEC:
+                    continue
+                age_label = _format_time_ago(age_sec) if age_sec is not None else "time unverified"
+                return {
+                    "text": f"@{handle} — {title[:140]} ({age_label})",
+                    "fresh": age_sec is not None and age_sec <= 7200,
+                    "age_sec": age_sec,
                 }
-            )
         except Exception:
             continue
-    return hits
+    return {"text": "None", "fresh": False, "age_sec": None}
+
+
+def _configured_private_feeds() -> list[tuple[str, str]]:
+    feeds: list[tuple[str, str]] = []
+    try:
+        for key, label in (
+            ("room1_telegram_feed_urls", "Telegram Link"),
+            ("room1_discord_feed_urls", "Discord Link"),
+        ):
+            if key not in st.secrets:
+                continue
+            raw = st.secrets[key]
+            urls = [raw] if isinstance(raw, str) else list(raw or [])
+            for idx, url in enumerate(urls, 1):
+                clean_url = str(url or "").strip()
+                if clean_url:
+                    feeds.append((f"{label} #{idx}", clean_url))
+    except Exception:
+        pass
+    return feeds
+
+
+def _scan_private_chat_feeds(ticker: str) -> str:
+    clean = ticker.upper()
+    feeds = _configured_private_feeds()
+    if not feeds:
+        return "None"
+    buy_markers = ("buy", "entry", "callout", "alert", "load", "starter", "breaking")
+    for label, url in feeds:
+        try:
+            resp = requests.get(
+                url, timeout=6, headers={"User-Agent": SEC_HEADERS["User-Agent"]},
+            )
+            if not resp.ok:
+                continue
+            text = resp.text.lower()
+            if clean.lower() not in text and f"${clean.lower()}" not in text:
+                continue
+            if any(marker in text for marker in buy_markers):
+                return f"Active Chat Match Found in {label}"
+        except Exception:
+            continue
+    return "None"
 
 
 def _fetch_big_dog_social_wire(ticker: str) -> dict:
@@ -1580,26 +1803,112 @@ def _fetch_big_dog_social_wire(ticker: str) -> dict:
     if not clean:
         st.session_state.room1_big_dog_wire = {}
         return {}
-    reddit = _reddit_swarm_pulse(clean)
-    x_hits = _big_dog_x_pulse(clean)
-    total_reddit = sum(int(r.get("count", 0)) for r in reddit)
-    if total_reddit >= 8 or any(r.get("heat") == "HOT" for r in reddit):
-        swarm_label, swarm_color = "RETAIL SWARM HEATING UP", "#FF9F0A"
-    elif total_reddit >= 2:
-        swarm_label, swarm_color = "RETAIL CHATTER ACTIVE", "#FFCC00"
+
+    reddit = _reddit_velocity_scan(clean)
+    x_hit = _micro_influencer_x_alpha_hit(clean)
+    private_match = _scan_private_chat_feeds(clean)
+
+    active_spike = bool(reddit.get("velocity_spike"))
+    recent_spike = bool(reddit.get("recent_spike"))
+    building = bool(reddit.get("building"))
+    alpha_text = str(x_hit.get("text", "None"))
+    alpha_hit = alpha_text != "None"
+    alpha_fresh = bool(x_hit.get("fresh"))
+    private_hit = private_match != "None"
+
+    if active_spike:
+        status = "Velocity Spike Active"
+        status_color = "#FF3B30"
+    elif recent_spike:
+        age = _format_time_ago(float(reddit.get("peak_age_sec") or 0.0))
+        status = f"Velocity Spike Recent — peak {age}"
+        status_color = "#FF9500"
+    elif building:
+        status = "Early Build — mentions rising"
+        status_color = "#FFD60A"
     else:
-        swarm_label, swarm_color = "SOCIAL QUIET", "#8E8E93"
+        status = "Social Quiet"
+        status_color = "#8E8E93"
+
+    if active_spike:
+        timeline = "Active coordination window — spike in progress now"
+    elif recent_spike:
+        peak_n = int(reddit.get("peak_unique") or 0)
+        age = _format_time_ago(float(reddit.get("peak_age_sec") or 0.0))
+        timeline = f"Documented burst — {peak_n} unique authors peaked {age}"
+    elif building:
+        last30 = int(reddit.get("last30") or 0)
+        prior30 = int(reddit.get("prior30") or 0)
+        timeline = (
+            f"Pre-spike build — {last30} unique last 60m "
+            f"(up from {prior30}), below 5-author alert"
+        )
+    else:
+        timeline = "No documented burst in last 6h"
+
+    if active_spike or private_hit or (alpha_hit and alpha_fresh):
+        verdict = "CRITICAL: Coordinated pump active — immediate entry window"
+        verdict_color = "#FF3B30"
+    elif recent_spike or building or alpha_hit:
+        if recent_spike:
+            age = _format_time_ago(float(reddit.get("peak_age_sec") or 0.0))
+            verdict = f"WATCH: Spike documented {age} — momentum may have started earlier"
+        elif building:
+            verdict = "WATCH: Early build detected — not yet at spike threshold"
+        else:
+            verdict = "WATCH: Micro-influencer mention on file — verify timing"
+        verdict_color = "#FF9500"
+    else:
+        verdict = "STABLE: No front-running detected"
+        verdict_color = "#8E8E93"
+
     wire = {
         "ok": True,
-        "swarm_label": swarm_label,
-        "swarm_color": swarm_color,
-        "reddit": reddit,
-        "x_hits": x_hits,
-        "x_count": len(x_hits),
-        "note": "Individual traders only — excludes Bloomberg/Reuters/CNBC wires.",
+        "status": status,
+        "status_color": status_color,
+        "reddit_metric": reddit.get("reddit_metric", "Null"),
+        "micro_x": alpha_text,
+        "private_chat": private_match,
+        "timeline": timeline,
+        "verdict": verdict,
+        "verdict_color": verdict_color,
     }
     st.session_state.room1_big_dog_wire = wire
     return wire
+
+
+def _render_room1_big_dog_social_wire_panel(ticker: str) -> None:
+    tk = str(ticker or "").strip().upper()
+    wire = st.session_state.room1_big_dog_wire or {}
+    if not wire.get("ok"):
+        return
+    status_color = wire.get("status_color", "#8E8E93")
+    verdict_color = wire.get("verdict_color", status_color)
+    lines = [
+        ("STATUS", str(wire.get("status", "Social Quiet")), status_color),
+        ("REDDIT SWARM METRIC", str(wire.get("reddit_metric", "Null")), "#CCC"),
+        ("MOMENTUM TIMELINE", str(wire.get("timeline", "No documented burst in last 6h")), "#AAA"),
+        ("MICRO-INFLUENCER (X)", str(wire.get("micro_x", "None")), "#5AC8FA"),
+        ("PRIVATE CHAT MATCH (TELEGRAM/DISCORD)", str(wire.get("private_chat", "None")), "#CCC"),
+        ("ACTIONABLE VERDICT", str(wire.get("verdict", "STABLE: No front-running detected")), verdict_color),
+    ]
+    body = "".join(
+        f'<div style="margin:6px 0;font-size:11px;line-height:1.5;">'
+        f'<span style="color:#666;font-weight:700;letter-spacing:0.04em;">■ {escape(label)}:</span> '
+        f'<span style="color:{color};">{escape(value)}</span></div>'
+        for label, value, color in lines
+    )
+    st.markdown(
+        f"""
+        <div style="background:#0A0A0A;padding:10px 12px;border-radius:6px;border:1px solid #1A1A1A;margin-bottom:15px;">
+            <div class="metric-label" style="font-size:9px;color:#555;font-weight:700;margin-bottom:6px;">
+                BIG DOG SOCIAL WIRE — {tk}
+            </div>
+            {body}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _render_room1_intel_addon_panels(ticker: str) -> None:
@@ -1650,62 +1959,7 @@ def _render_room1_intel_addon_panels(ticker: str) -> None:
                 unsafe_allow_html=True,
             )
 
-    wire = st.session_state.room1_big_dog_wire or {}
-    if wire.get("ok"):
-        swarm_color = wire.get("swarm_color", "#8E8E93")
-        swarm_label = escape(str(wire.get("swarm_label", "SOCIAL QUIET")))
-        note = escape(str(wire.get("note", "")))
-        reddit_rows = []
-        for row in wire.get("reddit") or []:
-            heat = str(row.get("heat", "QUIET"))
-            heat_color = {"HOT": "#FF9F0A", "WARM": "#FFCC00", "QUIET": "#666"}.get(heat, "#666")
-            sample = escape(str(row.get("sample", "")))
-            sample_line = (
-                f"<div style='font-size:10px;color:#777;margin-top:2px;'>{sample}</div>"
-                if sample
-                else ""
-            )
-            reddit_rows.append(
-                f"<li style='margin:4px 0;font-size:12px;color:#AAA;'>"
-                f"<span style='color:{heat_color};font-weight:700;'>{heat}</span> · "
-                f"{escape(str(row.get('channel', '')))} · {int(row.get('count', 0))} recent posts"
-                f"{sample_line}</li>"
-            )
-        x_rows = []
-        for hit in (wire.get("x_hits") or [])[:4]:
-            x_rows.append(
-                f"<li style='margin:4px 0;font-size:12px;color:#CCC;'>"
-                f"<span style='color:#5AC8FA;font-weight:700;'>{escape(str(hit.get('handle', '')))}</span>"
-                f" · {escape(str(hit.get('role', '')))}"
-                f"<div style='font-size:10px;color:#888;margin-top:2px;'>"
-                f"{escape(str(hit.get('snippet', '')))}</div></li>"
-            )
-        reddit_block = (
-            f"<ul style='margin:6px 0 0 0;padding-left:16px;'>{''.join(reddit_rows)}</ul>"
-            if reddit_rows
-            else "<div style='font-size:11px;color:#666;margin-top:6px;'>No Reddit swarm detected.</div>"
-        )
-        x_block = (
-            f"<ul style='margin:6px 0 0 0;padding-left:16px;'>{''.join(x_rows)}</ul>"
-            if x_rows
-            else "<div style='font-size:11px;color:#666;margin-top:6px;'>No named big-dog X hits in the last scan.</div>"
-        )
-        st.markdown(
-            f"""
-            <div style="background:#0A0A0A;padding:10px 12px;border-radius:6px;border:1px solid #1A1A1A;margin-bottom:15px;">
-                <div class="metric-label" style="font-size:9px;color:#555;font-weight:700;margin-bottom:6px;">
-                    BIG DOG SOCIAL WIRE — {tk}
-                </div>
-                <div style="font-size:12px;font-weight:700;letter-spacing:0.05em;color:{swarm_color};">{swarm_label}</div>
-                <div style="font-size:10px;color:#666;margin-top:8px;font-weight:700;letter-spacing:0.05em;">REDDIT SWARM</div>
-                {reddit_block}
-                <div style="font-size:10px;color:#666;margin-top:10px;font-weight:700;letter-spacing:0.05em;">X — INDIVIDUAL TRADERS</div>
-                {x_block}
-                <div style="font-size:10px;color:#555;margin-top:8px;">{note} Telegram channels need a manual watchlist — not auto-scanned yet.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    _render_room1_big_dog_social_wire_panel(tk)
 
 
 def _fetch_sector_rotation() -> str:
