@@ -1124,7 +1124,7 @@ def is_room1_fresh_ticker_setup(text: str, ticker: str | None) -> bool:
     if not ticker or is_room1_casual_intent(text):
         return False
     bare = ticker.upper()
-    words = [w.upper() for w in re.findall(r"\b[A-Za-z]{2,5}\b", text)]
+    words = re.findall(r"\b[A-Z]{2,5}\b", text)
     extra = [w for w in words if w not in ROOM1_TICKER_IGNORE and w != bare]
     if not extra:
         return True
@@ -1142,19 +1142,18 @@ def extract_ticker(text):
     if is_room1_casual_intent(text):
         return None
     ignore = ROOM1_TICKER_IGNORE
-    cash = re.search(r"\$([A-Za-z]{1,5})\b", text)
-    if cash and cash.group(1).upper() not in ignore:
-        return cash.group(1).upper()
-    parens = re.search(r"\(([A-Za-z]{1,5})\)", text)
-    if parens and parens.group(1).upper() not in ignore:
-        return parens.group(1).upper()
-    tagged = re.search(r"\b(?:NASDAQ|NYSE|AMEX):([A-Za-z]{1,5})\b", text, re.I)
-    if tagged and tagged.group(1).upper() not in ignore:
-        return tagged.group(1).upper()
-    for word in re.findall(r"\b[A-Za-z]{3,5}\b", text):
-        key = word.upper()
-        if key not in ignore:
-            return key
+    cash = re.search(r"\$([A-Z]{1,5})\b", text)
+    if cash and cash.group(1) not in ignore:
+        return cash.group(1)
+    parens = re.search(r"\(([A-Z]{1,5})\)", text)
+    if parens and parens.group(1) not in ignore:
+        return parens.group(1)
+    tagged = re.search(r"\b(?:NASDAQ|NYSE|AMEX):([A-Z]{1,5})\b", text)
+    if tagged and tagged.group(1) not in ignore:
+        return tagged.group(1)
+    for word in re.findall(r"\b[A-Z]{3,5}\b", text):
+        if word not in ignore:
+            return word
     return None
 
 
