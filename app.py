@@ -777,6 +777,8 @@ if "sector_rotation_context" not in st.session_state: st.session_state.sector_ro
 if "data_payload_string" not in st.session_state: st.session_state.data_payload_string = ""
 if "cross_asset_correlation_context" not in st.session_state: st.session_state.cross_asset_correlation_context = ""
 if "institutional_accumulation_detected" not in st.session_state: st.session_state.institutional_accumulation_detected = False
+if "room1_sec_filing_cards" not in st.session_state: st.session_state.room1_sec_filing_cards = []
+if "room1_big_dog_wire" not in st.session_state: st.session_state.room1_big_dog_wire = {}
 if "polygon_lockout" not in st.session_state: st.session_state.polygon_lockout = False
 if "room2_commit_timestamps" not in st.session_state: st.session_state.room2_commit_timestamps = []
 if "room2_commit_throttle_until" not in st.session_state: st.session_state.room2_commit_throttle_until = 0.0
@@ -1086,6 +1088,8 @@ def _room1_reset_volatile_memory() -> None:
     st.session_state.cross_asset_correlation_context = ""
     st.session_state.institutional_accumulation_detected = False
     st.session_state.data_payload_string = ""
+    st.session_state.room1_sec_filing_cards = []
+    st.session_state.room1_big_dog_wire = {}
 
 
 ROOM1_CASUAL_PHRASES = (
@@ -1236,6 +1240,306 @@ def _fetch_news_wire(ticker: str) -> list[str]:
     return _dedupe_headlines(headlines, limit=6)
 
 
+SEC_CATALYST_FORM_BASES = frozenset({
+    "8-K", "4", "SC 13D", "SC 13G", "S-1", "S-3", "424B5", "DEF 14A", "10-Q", "10-K",
+})
+SEC_FORM_HINTS = {
+    "8-K": "Material event — same-session move risk",
+    "4": "Insider buy/sell — smart-money signal",
+    "10-Q": "Quarterly financials",
+    "10-K": "Annual report",
+    "S-1": "New offering / registration",
+    "SC 13D": "Activist stake 5%+",
+    "SC 13G": "Passive 5%+ stake",
+    "424B5": "Shelf offering tap",
+    "DEF 14A": "Proxy / shareholder vote",
+}
+ROOM1_BIG_DOG_HANDLES = (
+    ("PeterLBrandt", "Macro chart veteran"),
+    ("RevShark", "Active swing trader"),
+    ("Ripster47", "Momentum map trader"),
+    ("OptionsHawk", "Options flow spotter"),
+    ("TraderStewie", "Day-trade setups"),
+    ("JoshuaTenet", "Small-cap hunter"),
+    ("stocktalkweekly", "Retail newsletter"),
+    ("MikeDiaz", "Retail flow tracker"),
+)
+ROOM1_REDDIT_SWARM_SUBS = ("wallstreetbets", "stocks", "pennystocks", "smallstreetbets")
+ROOM1_MEDIA_HANDLE_BLOCK = frozenset({
+    "bloomberg", "reuters", "wsj", "cnbc", "financialtimes", "marketwatch",
+    "business", "yahoofinance", "forbes", "nytimes", "ap", "stocktwits",
+})
+
+
+def _days_since_iso(date_str: str) -> int | None:
+    try:
+        filed = datetime.strptime(str(date_str)[:10], "%Y-%m-%d").date()
+        return (date.today() - filed).days
+    except Exception:
+        return None
+
+
+def _pull_sec_filings(ticker: str, limit: int = 5) -> list[dict]:
+    cards: list[dict] = []
+    try:
+        idx = requests.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers=SEC_HEADERS,
+            timeout=10,
+        )
+        if not idx.ok:
+            return cards
+        cik = None
+        for entry in idx.json().values():
+            if str(entry.get("ticker", "")).upper() == ticker.upper():
+                cik = str(entry.get("cik_str", "")).zfill(10)
+                break
+        if not cik:
+            return cards
+        sub = requests.get(
+            f"https://data.sec.gov/submissions/CIK{cik}.json",
+            headers=SEC_HEADERS,
+            timeout=10,
+        )
+        if not sub.ok:
+            return cards
+        recent = sub.json().get("filings", {}).get("recent", {})
+        forms = recent.get("form", []) or []
+        dates = recent.get("filingDate", []) or []
+        for form, filed in zip(forms[:limit], dates[:limit]):
+            form_s = str(form or "").strip()
+            date_s = str(filed or "").strip()
+            if not form_s or not date_s:
+                continue
+            base = form_s.split("/")[0].upper()
+            days = _days_since_iso(date_s)
+            move_driver = base in SEC_CATALYST_FORM_BASES and days is not None and days <= 14
+            cards.append(
+                {
+                    "form": form_s,
+                    "date": date_s,
+                    "days_ago": days,
+                    "move_driver": move_driver,
+                }
+            )
+    except Exception:
+        pass
+    return cards
+
+
+def _fetch_sec_filings(ticker: str) -> str:
+    cards = _pull_sec_filings(ticker, limit=5)
+    st.session_state.room1_sec_filing_cards = cards
+    if not cards:
+        return "SEC:NONE"
+    return "SEC:" + "|".join(f"{c['form']}:{c['date']}" for c in cards[:3])
+
+
+def _sec_form_hint(form: str) -> str:
+    base = str(form or "").split("/")[0].upper()
+    return SEC_FORM_HINTS.get(base, "Recent regulatory filing")
+
+
+def _reddit_swarm_pulse(ticker: str) -> list[dict]:
+    rows: list[dict] = []
+    for sub in ROOM1_REDDIT_SWARM_SUBS:
+        try:
+            resp = requests.get(
+                f"https://www.reddit.com/r/{sub}/search.json",
+                params={"q": ticker, "restrict_sr": "1", "sort": "new", "limit": "8"},
+                headers={"User-Agent": SEC_HEADERS["User-Agent"]},
+                timeout=6,
+            )
+            if not resp.ok:
+                continue
+            posts = resp.json().get("data", {}).get("children", []) or []
+            count = len(posts)
+            sample = ""
+            if posts:
+                sample = str(posts[0].get("data", {}).get("title", "")).strip()[:120]
+            if count >= 5:
+                heat = "HOT"
+            elif count >= 2:
+                heat = "WARM"
+            else:
+                heat = "QUIET"
+            rows.append(
+                {
+                    "platform": "Reddit",
+                    "channel": f"r/{sub}",
+                    "count": count,
+                    "heat": heat,
+                    "sample": sample,
+                }
+            )
+        except Exception:
+            continue
+    return rows
+
+
+def _big_dog_x_pulse(ticker: str) -> list[dict]:
+    hits: list[dict] = []
+    for handle, role in ROOM1_BIG_DOG_HANDLES:
+        if handle.lower() in ROOM1_MEDIA_HANDLE_BLOCK:
+            continue
+        try:
+            q = urllib.parse.quote(f"{ticker} {handle}", safe="")
+            rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+            resp = requests.get(
+                rss_url, timeout=5, headers={"User-Agent": SEC_HEADERS["User-Agent"]},
+            )
+            if not resp.ok:
+                continue
+            root = ElementTree.fromstring(resp.content)
+            titles = [n.text.strip() for n in root.findall(".//item/title")[:2] if n.text]
+            if not titles:
+                continue
+            hits.append(
+                {
+                    "platform": "X",
+                    "handle": f"@{handle}",
+                    "role": role,
+                    "snippet": titles[0][:140],
+                }
+            )
+        except Exception:
+            continue
+    return hits
+
+
+def _fetch_big_dog_social_wire(ticker: str) -> dict:
+    clean = str(ticker or "").strip().upper()
+    if not clean:
+        st.session_state.room1_big_dog_wire = {}
+        return {}
+    reddit = _reddit_swarm_pulse(clean)
+    x_hits = _big_dog_x_pulse(clean)
+    total_reddit = sum(int(r.get("count", 0)) for r in reddit)
+    if total_reddit >= 8 or any(r.get("heat") == "HOT" for r in reddit):
+        swarm_label, swarm_color = "RETAIL SWARM HEATING UP", "#FF9F0A"
+    elif total_reddit >= 2:
+        swarm_label, swarm_color = "RETAIL CHATTER ACTIVE", "#FFCC00"
+    else:
+        swarm_label, swarm_color = "SOCIAL QUIET", "#8E8E93"
+    wire = {
+        "ok": True,
+        "swarm_label": swarm_label,
+        "swarm_color": swarm_color,
+        "reddit": reddit,
+        "x_hits": x_hits,
+        "x_count": len(x_hits),
+        "note": "Individual traders only — excludes Bloomberg/Reuters/CNBC wires.",
+    }
+    st.session_state.room1_big_dog_wire = wire
+    return wire
+
+
+def _render_room1_intel_addon_panels(ticker: str) -> None:
+    """SEC move catalyst + big-dog social wire above Room 1 chat."""
+    tk = str(ticker or "").strip().upper()
+    sec_cards = st.session_state.room1_sec_filing_cards or []
+    move_cards = [c for c in sec_cards if c.get("move_driver")]
+    if sec_cards:
+        sec_rows = []
+        for card in sec_cards[:4]:
+            form_raw = str(card.get("form", ""))
+            form = escape(form_raw)
+            date = escape(str(card.get("date", "")))
+            hint = escape(_sec_form_hint(form_raw))
+            days = card.get("days_ago")
+            age = f"{days}d ago" if isinstance(days, int) else "recent"
+            if card.get("move_driver"):
+                row_style = "color:#FFB347;font-weight:700;"
+                tag = "MOVE DRIVER"
+            else:
+                row_style = "color:#888;"
+                tag = "ON FILE"
+            sec_rows.append(
+                f'<li style="margin:5px 0;font-size:12px;line-height:1.4;{row_style}">'
+                f"<span style='letter-spacing:0.05em;'>{tag}</span> · {form} · {date} · {age}"
+                f"<div style='font-size:10px;color:#666;margin-top:2px;'>{hint}</div></li>"
+            )
+        st.markdown(
+            f"""
+            <div style="background:#0A0A0A;padding:10px 12px;border-radius:6px;border:1px solid #1A1A1A;margin-bottom:15px;">
+                <div class="metric-label" style="font-size:9px;color:#555;font-weight:700;margin-bottom:6px;">
+                    SEC MOVE CATALYST — {tk}
+                </div>
+                <ul style="margin:0;padding-left:16px;">{"".join(sec_rows)}</ul>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if move_cards:
+            top = move_cards[0]
+            hint = escape(_sec_form_hint(str(top.get("form", ""))))
+            st.markdown(
+                '<div style="background:#1A1208;border:1px solid #3D2B14;border-radius:6px;'
+                'padding:8px 12px;margin:-8px 0 15px 0;font-size:11px;font-weight:700;'
+                f'letter-spacing:0.05em;color:#FFB347;">SEC FILING PUSHING MOVE — '
+                f'{escape(str(top.get("form", "")))} · {escape(str(top.get("date", "")))}'
+                f'<div style="font-size:10px;font-weight:500;color:#C9A06A;margin-top:4px;">{hint}</div></div>',
+                unsafe_allow_html=True,
+            )
+
+    wire = st.session_state.room1_big_dog_wire or {}
+    if wire.get("ok"):
+        swarm_color = wire.get("swarm_color", "#8E8E93")
+        swarm_label = escape(str(wire.get("swarm_label", "SOCIAL QUIET")))
+        note = escape(str(wire.get("note", "")))
+        reddit_rows = []
+        for row in wire.get("reddit") or []:
+            heat = str(row.get("heat", "QUIET"))
+            heat_color = {"HOT": "#FF9F0A", "WARM": "#FFCC00", "QUIET": "#666"}.get(heat, "#666")
+            sample = escape(str(row.get("sample", "")))
+            sample_line = (
+                f"<div style='font-size:10px;color:#777;margin-top:2px;'>{sample}</div>"
+                if sample
+                else ""
+            )
+            reddit_rows.append(
+                f"<li style='margin:4px 0;font-size:12px;color:#AAA;'>"
+                f"<span style='color:{heat_color};font-weight:700;'>{heat}</span> · "
+                f"{escape(str(row.get('channel', '')))} · {int(row.get('count', 0))} recent posts"
+                f"{sample_line}</li>"
+            )
+        x_rows = []
+        for hit in (wire.get("x_hits") or [])[:4]:
+            x_rows.append(
+                f"<li style='margin:4px 0;font-size:12px;color:#CCC;'>"
+                f"<span style='color:#5AC8FA;font-weight:700;'>{escape(str(hit.get('handle', '')))}</span>"
+                f" · {escape(str(hit.get('role', '')))}"
+                f"<div style='font-size:10px;color:#888;margin-top:2px;'>"
+                f"{escape(str(hit.get('snippet', '')))}</div></li>"
+            )
+        reddit_block = (
+            f"<ul style='margin:6px 0 0 0;padding-left:16px;'>{''.join(reddit_rows)}</ul>"
+            if reddit_rows
+            else "<div style='font-size:11px;color:#666;margin-top:6px;'>No Reddit swarm detected.</div>"
+        )
+        x_block = (
+            f"<ul style='margin:6px 0 0 0;padding-left:16px;'>{''.join(x_rows)}</ul>"
+            if x_rows
+            else "<div style='font-size:11px;color:#666;margin-top:6px;'>No named big-dog X hits in the last scan.</div>"
+        )
+        st.markdown(
+            f"""
+            <div style="background:#0A0A0A;padding:10px 12px;border-radius:6px;border:1px solid #1A1A1A;margin-bottom:15px;">
+                <div class="metric-label" style="font-size:9px;color:#555;font-weight:700;margin-bottom:6px;">
+                    BIG DOG SOCIAL WIRE — {tk}
+                </div>
+                <div style="font-size:12px;font-weight:700;letter-spacing:0.05em;color:{swarm_color};">{swarm_label}</div>
+                <div style="font-size:10px;color:#666;margin-top:8px;font-weight:700;letter-spacing:0.05em;">REDDIT SWARM</div>
+                {reddit_block}
+                <div style="font-size:10px;color:#666;margin-top:10px;font-weight:700;letter-spacing:0.05em;">X — INDIVIDUAL TRADERS</div>
+                {x_block}
+                <div style="font-size:10px;color:#555;margin-top:8px;">{note} Telegram channels need a manual watchlist — not auto-scanned yet.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
 def _fetch_sector_rotation() -> str:
     flows: list[tuple[str, str, float]] = []
     for sym, label in SECTOR_ETFS:
@@ -1309,37 +1613,6 @@ def _compute_cross_asset_correlation(ticker: str) -> str:
     ctx = "XASSET_CORR|" + "|".join(pairs)
     st.session_state.cross_asset_correlation_context = ctx
     return ctx
-
-
-def _fetch_sec_filings(ticker: str) -> str:
-    try:
-        idx = requests.get(
-            "https://www.sec.gov/files/company_tickers.json",
-            headers=SEC_HEADERS,
-            timeout=10,
-        )
-        if not idx.ok:
-            return "SEC:IDX_FAIL"
-        cik = None
-        for entry in idx.json().values():
-            if str(entry.get("ticker", "")).upper() == ticker:
-                cik = str(entry.get("cik_str", "")).zfill(10)
-                break
-        if not cik:
-            return "SEC:NO_CIK"
-        sub = requests.get(
-            f"https://data.sec.gov/submissions/CIK{cik}.json",
-            headers=SEC_HEADERS,
-            timeout=10,
-        )
-        if not sub.ok:
-            return "SEC:SUB_FAIL"
-        recent = sub.json().get("filings", {}).get("recent", {})
-        forms, dates = recent.get("form", []), recent.get("filingDate", [])
-        tags = [f"{forms[i]}:{dates[i]}" for i in range(min(3, len(forms)))]
-        return "SEC:" + "|".join(tags) if tags else "SEC:NONE"
-    except Exception:
-        return "SEC:ERR"
 
 
 def _rsi_14(closes: list[float]) -> tuple[float | None, str]:
@@ -1492,6 +1765,8 @@ def get_live_tape_data(ticker):
         st.session_state.cross_asset_correlation_context = ""
         st.session_state.institutional_accumulation_detected = False
         st.session_state.data_payload_string = ""
+        st.session_state.room1_sec_filing_cards = []
+        st.session_state.room1_big_dog_wire = {}
         return 0.0, 0.0, "N/A", "N/A", "Unknown"
     try:
         ticker = ticker.upper()
@@ -1514,6 +1789,7 @@ def get_live_tape_data(ticker):
         vol_ctx, inst_flag = _compute_volatility_engine(ticker, price, raw_vol, vwap_val)
         st.session_state.institutional_accumulation_detected = inst_flag
         sec_ctx = _fetch_sec_filings(ticker)
+        _fetch_big_dog_social_wire(ticker)
         _build_data_payload_string(
             ticker, name, price, pct, vol, vw_str,
             st.session_state.active_news_wire, sector_ctx, vol_ctx, sec_ctx, corr_ctx,
@@ -4257,6 +4533,8 @@ def _render_room1_forensic_front_desk():
             if not st.session_state.active_news_wire and not st.session_state.data_payload_string:
                 get_live_tape_data(tk)
                 p, pct, v, vw, name = _fetch_tape_metrics(tk)
+            elif not st.session_state.room1_big_dog_wire:
+                _fetch_big_dog_social_wire(tk)
             color_choice = "#34C759" if pct >= 0 else "#FF3B30"
             st.markdown(
                 f"""
@@ -4302,6 +4580,7 @@ def _render_room1_forensic_front_desk():
                     """,
                     unsafe_allow_html=True,
                 )
+            _render_room1_intel_addon_panels(tk)
 
         if not st.session_state.chat_history:
             st.markdown("<div style='height: 18vh;'></div>", unsafe_allow_html=True)
