@@ -2383,47 +2383,6 @@ def _hydrate_matrix_memory_from_cloud() -> None:
     self_surgery.purge_expired_repair_bay_profiles()
     _load_matrix_chat_from_cloud(force=False)
 
-    latest = _window4_latest_saved_pattern_row()
-    if latest:
-        report = str(latest.get("quantum_report") or "").strip()
-        if report:
-            st.session_state.room2_quantum_report = report
-            _window4_restore_vault_flags_from_report(report)
-            if MATRIX_ENGINE_IDLE_MARKER in st.session_state.quantum_terminal_output:
-                st.session_state.quantum_terminal_output = report
-        st.session_state.room2_forensic_ticker = str(latest.get("ticker") or "")
-        st.session_state.room2_bar_count = int(latest.get("bar_count") or 0)
-        matrix_blob = str(latest.get("text_matrix_string") or "").strip()
-        if matrix_blob:
-            st.session_state.room2_text_matrix_string = matrix_blob
-        margin = latest.get("structural_move_pct") or latest.get("margin_pct")
-        match_pct = latest.get("layout_match_pct")
-        if margin is not None or match_pct is not None:
-            st.session_state.room2_last_math_block = {
-                **(st.session_state.get("room2_last_math_block") or {}),
-                **(
-                    {"structural_move_pct": margin}
-                    if margin is not None
-                    else {}
-                ),
-                **(
-                    {"match_probability": match_pct}
-                    if match_pct is not None
-                    else {}
-                ),
-            }
-        if match_pct is not None:
-            pct = int(match_pct)
-            core_quantum._sync_window4_regime_flags(
-                match_pct=pct,
-                valid=pct >= core_quantum.LAYOUT_SIGNATURE_MATCH_THRESHOLD,
-            )
-        _window4_record_deploy_snapshot_from_pattern_row(latest)
-
-    terminal = str(st.session_state.get("quantum_terminal_output") or "")
-    if terminal:
-        _window4_restore_vault_flags_from_report(terminal)
-
     st.session_state.matrix_active_pattern_count = _sync_matrix_active_pattern_count_from_cloud()
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
 
@@ -5328,12 +5287,34 @@ def _ensure_room2_widget_defaults() -> None:
             st.session_state[key] = value
 
 
+def _room2_terminal_idle_message() -> str:
+    return (
+        "📡 [DATALINK: ENGINE_IDLE] TERMINAL ENGINE ONLINE. WAITING FOR DEPLOY SIGNAL..."
+    )
+
+
+def _reset_room2_window1_to_idle() -> None:
+    """Window 1 starts blank on refresh — last deploy lives in Supabase, not the terminal."""
+    core_quantum.clear_window1_visual_state()
+    st.session_state.matrix_processing_active = False
+    st.session_state.matrix_processing_logs = []
+    st.session_state.quantum_terminal_output = _room2_terminal_idle_message()
+    st.session_state.room2_quantum_report = ""
+    st.session_state.room2_vault_confirmation = ""
+    st.session_state.room2_vault_flash = ""
+    st.session_state.room2_forensic_ticker = ""
+    st.session_state.room2_processor = {"active": False, "step": 0, "snapshot": {}}
+    st.session_state.window4_regime_valid = False
+    st.session_state.window4_spatial_match_pct = 0
+
+
 def _prepare_fresh_room2_deploy_form() -> None:
-    """Once per browser session — empty form even when Supabase has saved patterns."""
+    """Once per browser session — blank operator deck + idle Window 1."""
     if st.session_state.get("room2_form_session_ready"):
         return
     st.session_state.room2_form_session_ready = True
     _purge_room2_deck_inputs()
+    _reset_room2_window1_to_idle()
 
 
 def _prune_room2_commit_timestamps(now: float | None = None) -> list[float]:
