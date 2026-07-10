@@ -158,7 +158,15 @@ ROOM1_SYSTEM_PROMPT = (
     "• You MUST build every single-stock answer exclusively from injected live payloads: "
     "[ROOM1_LIVE_DRAGNET], [12L_DATA_PAYLOAD], [QUERY_INTENT], [TERMINOLOGY_MAP], [RESPONSE_DIRECTIVE].\n"
     "• Never cite training-data prices, dates, or filings. If a field is missing, state the exact missing lane — do not guess.\n"
-    "• Sources are Massive REST (3-hour 36-bar 5m lane + 12-hour 48-bar 15m lane) and SEC EDGAR only.\n\n"
+    "• Sources are Yahoo Finance live tape (Room 1 default) plus Massive REST "
+    "(5m/15m lanes when available) and SEC EDGAR.\n\n"
+    "DESK / NO-TICKER MODE:\n"
+    "• When [12L_DATA_PAYLOAD] contains MODE:desk_general, answer brief desk or status questions "
+    "directly — no ticker or live dragnet required.\n\n"
+    "THROTTLE / EMPTY DATA:\n"
+    "• When [ROOM1_LIVE_DRAGNET] reports FAULT:MASSIVE_THROTTLE or STATUS:MASSIVE_EMPTY, tell the "
+    "operator live bar data is temporarily unavailable and to retry in ~60 seconds — do not claim "
+    "injected lanes are missing.\n\n"
     "FLUID CONTEXTUAL FRAMEWORK — NO FIXED BULLET TEMPLATE:\n"
     "• Read [QUERY_INTENT] and [RESPONSE_DIRECTIVE] and shape the entire reply around the operator's actual question.\n"
     "• layer1_velocity → lead with price velocity, peak/mean bar velocity, acceleration; cite 5m lane stats only.\n"
@@ -962,8 +970,10 @@ def _room1_response_directive(intent: str) -> str:
             "thresholds, and hill-interceptor entry logic."
         ),
         "adaptive_general": (
-            "Adapt structure to the exact question. Use only the most relevant 1–2 layers from "
-            "the live dragnet payload — never a fixed bullet template."
+            "Answer in clear plain English. When Yahoo/Massive live data is injected, lead with "
+            "price, change %, volume, and VWAP — then address the operator's question directly. "
+            "When MODE:desk_general, give a brief natural desk reply. Never output raw lane tags "
+            "or gibberish protocol tokens."
         ),
     }
     return directives.get(intent, directives["adaptive_general"])
@@ -996,6 +1006,27 @@ def _is_room1_single_stock_inquiry(user_text: str, ticker: str | None) -> bool:
     return True
 
 
+def _build_room1_context_blocks(*, intent: str, terminology: list[dict]) -> str:
+    """Always inject the three required Room 1 routing blocks."""
+    return "\n".join(
+        [
+            f"[QUERY_INTENT]{intent}[/QUERY_INTENT]",
+            f"[TERMINOLOGY_MAP]{json.dumps(terminology, default=str)}[/TERMINOLOGY_MAP]",
+            f"[RESPONSE_DIRECTIVE]{_room1_response_directive(intent)}[/RESPONSE_DIRECTIVE]",
+        ]
+    )
+
+
+def _room1_throttle_reply(*, ticker: str = "") -> str:
+    wait_sec = core_quantum._polygon_throttle_seconds_remaining()
+    ticker_bit = f" for **{ticker}**" if ticker else ""
+    return (
+        f"⚠️ **Live data throttle active{ticker_bit}** — Polygon/Massive API is cooling down. "
+        f"No fresh bar data right now. Retry in ~{wait_sec}s. "
+        "Room 2 Supabase vault is unaffected."
+    )
+
+
 def _build_room1_live_payload(
     dragnet: dict,
     *,
@@ -1006,9 +1037,7 @@ def _build_room1_live_payload(
     """Assemble Groq context blocks from live Massive + SEC dragnet."""
     blocks = [
         str(dragnet.get("payload_string") or ""),
-        f"[QUERY_INTENT]{intent}[/QUERY_INTENT]",
-        f"[TERMINOLOGY_MAP]{json.dumps(terminology, default=str)}[/TERMINOLOGY_MAP]",
-        f"[RESPONSE_DIRECTIVE]{_room1_response_directive(intent)}[/RESPONSE_DIRECTIVE]",
+        _build_room1_context_blocks(intent=intent, terminology=terminology),
     ]
     report = str(dragnet.get("report_block") or "").strip()
     if report:
@@ -1017,6 +1046,26 @@ def _build_room1_live_payload(
     if vault_ctx:
         blocks.append(vault_ctx)
     return "\n".join(b for b in blocks if b)
+
+
+def _build_room1_desk_payload(
+    *,
+    user_text: str,
+    intent: str,
+    terminology: list[dict],
+    mode: str = "desk_general",
+    ticker: str = "",
+) -> str:
+    """Payload for conversational / macro desk queries without a live dragnet."""
+    ticker_bit = f"|TK:{ticker}" if ticker else ""
+    blocks = [
+        f"12L|MODE:{mode}{ticker_bit}|STATUS:desk_online|NOTE:no_live_dragnet_required",
+        _build_room1_context_blocks(intent=intent, terminology=terminology),
+    ]
+    vault_ctx = _room1_readonly_layout_context()
+    if vault_ctx:
+        blocks.append(vault_ctx)
+    return "\n".join(blocks)
 
 
 def _room1_reset_volatile_memory() -> None:
@@ -1257,11 +1306,49 @@ def _build_data_payload_string(
     return payload
 
 
+def _hydrate_room1_tape_snapshot(ticker: str) -> dict:
+    """Fetch Yahoo tape for the metric cards — does not consume Polygon budget."""
+    clean = str(ticker or "").strip().upper()
+    if not clean:
+        return {}
+    cached = st.session_state.get("room1_tape_snapshot") or {}
+    if (
+        cached.get("ok")
+        and str(cached.get("ticker") or "").upper() == clean
+        and cached.get("price")
+    ):
+        return cached
+    snap = core_quantum.fetch_room1_yahoo_tape_snapshot(clean)
+    if snap.get("ok"):
+        st.session_state.room1_tape_snapshot = snap
+    return snap
+
+
 def _fetch_tape_metrics(ticker):
-    """UI metric cards — Polygon-only pipeline defers live tape to session cache."""
+    """UI metric cards — Yahoo tape first; dragnet/Polygon cache as fallback."""
     if not ticker:
         return 0.0, 0.0, "N/A", "N/A", "Unknown"
     ticker = ticker.upper()
+    dragnet = st.session_state.get("room1_live_dragnet") or {}
+    if dragnet.get("ok") and str(dragnet.get("ticker") or "").upper() == ticker:
+        price = float(dragnet.get("price") or 0.0)
+        pct = float(dragnet.get("pct_change") or 0.0)
+        raw_vol = int(dragnet.get("volume") or 0)
+        vol = f"{raw_vol:,}" if raw_vol else "N/A"
+        vw_native = float(dragnet.get("vwap_native") or 0.0)
+        vw_str = f"${vw_native:,.2f}" if vw_native else "N/A"
+        name = str(dragnet.get("name") or ticker)
+        return price, pct, vol, vw_str, name
+    snap = _hydrate_room1_tape_snapshot(ticker)
+    if snap.get("ok"):
+        price = float(snap.get("price") or 0.0)
+        pct = float(snap.get("pct_change") or 0.0)
+        raw_vol = int(snap.get("volume") or 0)
+        vol = f"{raw_vol:,}" if raw_vol else "N/A"
+        vw_native = float(snap.get("vwap_native") or 0.0)
+        vw_str = f"${vw_native:,.2f}" if vw_native else "N/A"
+        name = str(snap.get("name") or ticker)
+        return price, pct, vol, vw_str, name
     frame = core_quantum._cached_polygon_1m_frame()
     if frame is not None and not frame.empty:
         try:
@@ -1290,6 +1377,7 @@ def get_live_tape_data(ticker):
         return 0.0, 0.0, "N/A", "N/A", "Unknown"
     try:
         ticker = ticker.upper()
+        _hydrate_room1_tape_snapshot(ticker)
         price, pct, vol, vw_str, name = _fetch_tape_metrics(ticker)
         raw_vol = 0
         try:
@@ -1417,9 +1505,24 @@ def process_chat_submission():
     audit_ticker = new_ticker or st.session_state.current_ticker
     intent = classify_room1_query_intent(user_text)
     terminology = map_room1_trading_terminology(user_text)
+    payload = _build_room1_desk_payload(
+        user_text=user_text,
+        intent=intent,
+        terminology=terminology,
+    )
+
+    if audit_ticker and st.session_state.get("polygon_lockout") and not _is_room1_single_stock_inquiry(
+        user_text, audit_ticker
+    ):
+        st.session_state.messages.append(
+            {"role": "assistant", "content": _room1_throttle_reply(ticker=audit_ticker)}
+        )
+        st.session_state.text_field_buffer = ""
+        return
 
     if audit_ticker and _is_room1_single_stock_inquiry(user_text, audit_ticker):
-        dragnet = core_quantum.run_room1_live_massive_dragnet(
+        _hydrate_room1_tape_snapshot(audit_ticker)
+        dragnet = core_quantum.run_room1_operator_dragnet(
             audit_ticker,
             user_query=user_text,
         )
@@ -1434,12 +1537,16 @@ def process_chat_submission():
             terminology=terminology,
         )
     elif audit_ticker:
+        _hydrate_room1_tape_snapshot(audit_ticker)
         get_live_tape_data(audit_ticker)
-        payload = st.session_state.data_payload_string
-        payload = (
-            f"{payload}\n[QUERY_INTENT]{intent}[/QUERY_INTENT]\n"
-            f"[TERMINOLOGY_MAP]{json.dumps(terminology, default=str)}[/TERMINOLOGY_MAP]\n"
-            f"[RESPONSE_DIRECTIVE]{_room1_response_directive(intent)}[/RESPONSE_DIRECTIVE]"
+        tape = str(st.session_state.data_payload_string or "").strip()
+        payload = "\n".join(
+            part
+            for part in (
+                tape or f"12L|TK:{audit_ticker}|MODE:tape_lane|STATUS:partial",
+                _build_room1_context_blocks(intent=intent, terminology=terminology),
+            )
+            if part
         )
 
     groq_msgs = _build_groq_message_stack(payload)
@@ -4047,6 +4154,7 @@ def _render_room1_forensic_front_desk():
 
         if st.session_state.current_ticker:
             tk = st.session_state.current_ticker
+            _hydrate_room1_tape_snapshot(tk)
             dragnet = st.session_state.get("room1_live_dragnet") or {}
             if dragnet.get("ok") and str(dragnet.get("ticker")) == tk:
                 p = float(dragnet.get("price") or 0.0)
@@ -4055,7 +4163,7 @@ def _render_room1_forensic_front_desk():
                 v = f"{raw_v:,}" if raw_v else "N/A"
                 vw_native = float(dragnet.get("vwap_native") or 0.0)
                 vw = f"${vw_native:,.2f}" if vw_native else "N/A"
-                name = tk
+                name = str(dragnet.get("name") or tk)
             else:
                 p, pct, v, vw, name = _fetch_tape_metrics(tk)
             color_choice = "#34C759" if pct >= 0 else "#FF3B30"

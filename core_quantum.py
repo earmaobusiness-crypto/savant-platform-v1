@@ -3829,7 +3829,144 @@ def _room1_lane_tail(frame, bar_count: int):
     return lane.tail(bar_count)
 
 
-def run_room1_live_massive_dragnet(ticker: str, user_query: str = "") -> dict:
+def fetch_room1_yahoo_tape_snapshot(ticker: str) -> dict:
+    """Room 1 live tape — Yahoo chart API (no Polygon budget)."""
+    ticker_clean = str(ticker or "").strip().upper()
+    empty = {
+        "ok": False,
+        "ticker": ticker_clean,
+        "price": 0.0,
+        "pct_change": 0.0,
+        "volume": 0,
+        "vwap_native": 0.0,
+        "name": ticker_clean or "Unknown",
+    }
+    if not ticker_clean:
+        return empty
+    sym = urllib.parse.quote(ticker_clean, safe="")
+    try:
+        resp = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+            params={"interval": "1m", "range": "1d"},
+            headers={"User-Agent": "SavantApprentice/1.0"},
+            timeout=10,
+        )
+        if not resp.ok:
+            return empty
+        result = (resp.json().get("chart") or {}).get("result") or []
+        if not result:
+            return empty
+        meta = result[0].get("meta") or {}
+        quote = (result[0].get("indicators") or {}).get("quote", [{}])[0]
+        closes = [float(c) for c in (quote.get("close") or []) if c is not None]
+        volumes = [int(float(v)) for v in (quote.get("volume") or []) if v is not None]
+        highs = [float(h) for h in (quote.get("high") or []) if h is not None]
+        lows = [float(lo) for lo in (quote.get("low") or []) if lo is not None]
+        price = float(
+            meta.get("regularMarketPrice")
+            or (closes[-1] if closes else 0.0)
+            or 0.0
+        )
+        prev = float(
+            meta.get("chartPreviousClose")
+            or meta.get("previousClose")
+            or (closes[-2] if len(closes) > 1 else price)
+            or price
+        )
+        pct = ((price - prev) / prev * 100.0) if prev else 0.0
+        raw_vol = int(
+            meta.get("regularMarketVolume")
+            or (volumes[-1] if volumes else 0)
+            or 0
+        )
+        if highs and lows:
+            vwap_native = (highs[-1] + lows[-1] + price) / 3.0
+        else:
+            vwap_native = price
+        name = str(
+            meta.get("longName") or meta.get("shortName") or meta.get("symbol") or ticker_clean
+        )
+        return {
+            "ok": True,
+            "ticker": ticker_clean,
+            "price": price,
+            "pct_change": round(pct, 4),
+            "volume": raw_vol,
+            "vwap_native": round(vwap_native, 4),
+            "name": name,
+        }
+    except Exception:
+        return empty
+
+
+def run_room1_yahoo_tape_dragnet(ticker: str, user_query: str = "") -> dict:
+    """Lightweight Room 1 dragnet — Yahoo tape + headlines (Polygon-free)."""
+    ticker_clean = str(ticker or "").strip().upper()
+    snap = fetch_room1_yahoo_tape_snapshot(ticker_clean)
+    if not snap.get("ok"):
+        return {
+            "ok": False,
+            "ticker": ticker_clean,
+            "payload_string": f"12L|TK:{ticker_clean}|YAHOO:EMPTY",
+            "report_block": f"ROOM1_LIVE_DRAGNET|TK:{ticker_clean}|STATUS:YAHOO_EMPTY",
+            "headlines": [],
+        }
+    price = float(snap.get("price") or 0.0)
+    pct = float(snap.get("pct_change") or 0.0)
+    raw_vol = int(snap.get("volume") or 0)
+    vwap_native = float(snap.get("vwap_native") or 0.0)
+    headlines = _fetch_research_news_headlines(ticker_clean, limit=6)
+    headline_preview = " | ".join(headlines[:4]) if headlines else "NONE"
+    payload_string = (
+        f"12L|TK:{ticker_clean}|SRC:YAHOO_FINANCE|CO:{snap.get('name', ticker_clean)}|"
+        f"P:{price:.2f}|CHG:{pct:+.2f}%|V:{raw_vol:,}|VW:{vwap_native:.2f}|"
+        f"WIRE:{headline_preview}"
+    )
+    report_lines = [
+        f"ROOM1_LIVE_DRAGNET|TK:{ticker_clean}|SRC:yahoo_finance",
+        f"LIVE_PRICE:{price:.4f}",
+        f"LIVE_CHG_PCT:{pct:+.4f}",
+        f"LIVE_VOL:{raw_vol}",
+        f"SESS_VWAP_PROXY:{vwap_native:.4f}",
+        f"LIVE_HEADLINES:{headline_preview}",
+    ]
+    if user_query.strip():
+        report_lines.append(f"OPERATOR_QUERY:{user_query.strip()[:240]}")
+    result = {
+        "ok": True,
+        "ticker": ticker_clean,
+        "payload_string": payload_string,
+        "report_block": " | ".join(report_lines),
+        "headlines": headlines,
+        "price": price,
+        "pct_change": pct,
+        "volume": raw_vol,
+        "vwap_native": vwap_native,
+        "name": snap.get("name", ticker_clean),
+        "data_source": "yahoo_finance",
+    }
+    st.session_state.room1_live_dragnet = result
+    return result
+
+
+def run_room1_operator_dragnet(ticker: str, user_query: str = "") -> dict:
+    """
+    Room 1 operator dragnet — Yahoo tape always available; Massive 5m/15m lanes when
+    Polygon budget allows (shared with Room 2).
+    """
+    yahoo = run_room1_yahoo_tape_dragnet(ticker, user_query=user_query)
+    if not _polygon_call_available():
+        return yahoo
+    massive = run_room1_live_massive_dragnet(ticker, user_query=user_query)
+    if massive.get("ok"):
+        return massive
+    if yahoo.get("ok"):
+        note = str(massive.get("report_block") or "MASSIVE:UNAVAILABLE")
+        yahoo["report_block"] = f"{yahoo.get('report_block', '')} | MASSIVE_NOTE:{note}"
+        return yahoo
+    return massive
+
+
     """
     Room 1 live backend — Massive REST 3-hour (36×5m) and 12-hour (48×15m) lanes + SEC EDGAR.
     Replaces static AI training-data reliance for single-stock inquiries.
