@@ -1,3 +1,4 @@
+import yfinance as yf
 import os
 import re
 import statistics
@@ -1308,64 +1309,56 @@ def _build_data_payload_string(
 
 
 def _hydrate_room1_tape_snapshot(ticker: str) -> dict:
-    """Fetch Yahoo tape for the metric cards — does not consume Polygon budget."""
+    """Room 1 live tape — yfinance (Polygon-free, same as original Room 1)."""
     clean = str(ticker or "").strip().upper()
     if not clean:
         return {}
-    cached = st.session_state.get("room1_tape_snapshot") or {}
-    if (
-        cached.get("ok")
-        and str(cached.get("ticker") or "").upper() == clean
-        and cached.get("price")
-    ):
-        return cached
-    snap = core_quantum.fetch_room1_yahoo_tape_snapshot(clean)
-    if snap.get("ok"):
+    try:
+        info = yf.Ticker(clean).info or {}
+        price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0.0)
+        if not price:
+            return {}
+        prev = float(info.get("regularMarketPreviousClose") or price or 1.0)
+        pct = ((price - prev) / prev) * 100.0 if prev else 0.0
+        raw_vol = int(info.get("volume") or info.get("regularMarketVolume") or 0)
+        high = float(info.get("dayHigh") or price)
+        low = float(info.get("dayLow") or price)
+        vwap_native = (high + low + price) / 3.0 if price else 0.0
+        name = str(info.get("longName") or info.get("shortName") or clean)
+        snap = {
+            "ok": True,
+            "ticker": clean,
+            "price": price,
+            "pct_change": round(pct, 4),
+            "volume": raw_vol,
+            "vwap_native": round(vwap_native, 4),
+            "name": name,
+        }
         st.session_state.room1_tape_snapshot = snap
-    return snap
+        return snap
+    except Exception:
+        return {}
 
 
 def _fetch_tape_metrics(ticker):
-    """UI metric cards — Yahoo tape first; dragnet/Polygon cache as fallback."""
+    """Fast yfinance read for Live Massive Tape cards — no Polygon."""
     if not ticker:
         return 0.0, 0.0, "N/A", "N/A", "Unknown"
-    ticker = ticker.upper()
-    dragnet = st.session_state.get("room1_live_dragnet") or {}
-    if dragnet.get("ok") and str(dragnet.get("ticker") or "").upper() == ticker:
-        price = float(dragnet.get("price") or 0.0)
-        pct = float(dragnet.get("pct_change") or 0.0)
-        raw_vol = int(dragnet.get("volume") or 0)
-        vol = f"{raw_vol:,}" if raw_vol else "N/A"
-        vw_native = float(dragnet.get("vwap_native") or 0.0)
-        vw_str = f"${vw_native:,.2f}" if vw_native else "N/A"
-        name = str(dragnet.get("name") or ticker)
-        return price, pct, vol, vw_str, name
-    snap = _hydrate_room1_tape_snapshot(ticker)
-    if snap.get("ok"):
-        price = float(snap.get("price") or 0.0)
-        pct = float(snap.get("pct_change") or 0.0)
-        raw_vol = int(snap.get("volume") or 0)
-        vol = f"{raw_vol:,}" if raw_vol else "N/A"
-        vw_native = float(snap.get("vwap_native") or 0.0)
-        vw_str = f"${vw_native:,.2f}" if vw_native else "N/A"
-        name = str(snap.get("name") or ticker)
-        return price, pct, vol, vw_str, name
-    frame = core_quantum._cached_polygon_1m_frame()
-    if frame is not None and not frame.empty:
-        try:
-            price = float(frame["Close"].iloc[-1])
-            prev = float(frame["Close"].iloc[-2]) if len(frame) > 1 else price
-            pct = ((price - prev) / prev) * 100 if prev else 0.0
-            raw_vol = int(frame["Volume"].iloc[-1])
+    try:
+        ticker = ticker.upper()
+        snap = _hydrate_room1_tape_snapshot(ticker)
+        if snap.get("ok"):
+            price = float(snap.get("price") or 0.0)
+            pct = float(snap.get("pct_change") or 0.0)
+            raw_vol = int(snap.get("volume") or 0)
             vol = f"{raw_vol:,}" if raw_vol else "N/A"
-            high = float(frame["High"].iloc[-1])
-            low = float(frame["Low"].iloc[-1])
-            vwap_val = (high + low + price) / 3 if price else 0.0
-            vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
-            return price, pct, vol, vw_str, ticker
-        except Exception:
-            pass
-    return 0.0, 0.0, "N/A", "N/A", ticker
+            vw_native = float(snap.get("vwap_native") or 0.0)
+            vw_str = f"${vw_native:,.2f}" if vw_native else "N/A"
+            name = str(snap.get("name") or ticker)
+            return price, pct, vol, vw_str, name
+    except Exception:
+        pass
+    return 0.0, 0.0, "N/A", "N/A", str(ticker or "").upper()
 
 
 def get_live_tape_data(ticker):
@@ -1378,28 +1371,82 @@ def get_live_tape_data(ticker):
         return 0.0, 0.0, "N/A", "N/A", "Unknown"
     try:
         ticker = ticker.upper()
-        _hydrate_room1_tape_snapshot(ticker)
-        price, pct, vol, vw_str, name = _fetch_tape_metrics(ticker)
-        raw_vol = 0
-        try:
-            raw_vol = int(str(vol).replace(",", "")) if vol not in ("N/A", "") else 0
-        except ValueError:
-            raw_vol = 0
-        vwap_val = float(str(vw_str).replace("$", "")) if vw_str not in ("N/A", "") else 0.0
+        ytk = yf.Ticker(ticker)
+        info = ytk.info or {}
+        name = info.get("longName", info.get("shortName", ticker))
+        price = float(info.get("currentPrice", info.get("regularMarketPrice", 0.0)) or 0.0)
+        prev = float(info.get("regularMarketPreviousClose", 1.0) or 1.0)
+        pct = ((price - prev) / prev) * 100 if price and prev else 0.0
+        raw_vol = int(info.get("volume", info.get("regularMarketVolume", 0)) or 0)
+        vol = f"{raw_vol:,}" if raw_vol else "N/A"
+        high = float(info.get("dayHigh", price) or price)
+        low = float(info.get("dayLow", price) or price)
+        vwap_val = (high + low + price) / 3 if price else 0.0
+        vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
+
+        snap = {
+            "ok": price > 0,
+            "ticker": ticker,
+            "price": price,
+            "pct_change": round(pct, 4),
+            "volume": raw_vol,
+            "vwap_native": round(vwap_val, 4),
+            "name": name,
+        }
+        st.session_state.room1_tape_snapshot = snap
 
         st.session_state.active_news_wire = _fetch_news_wire(ticker)
+        sector_ctx = _fetch_sector_rotation()
+        corr_ctx = _compute_cross_asset_correlation(ticker)
         vol_ctx, inst_flag = _compute_volatility_engine(ticker, price, raw_vol, vwap_val)
         st.session_state.institutional_accumulation_detected = inst_flag
-        st.session_state.sector_rotation_context = ""
-        st.session_state.cross_asset_correlation_context = ""
+        st.session_state.sector_rotation_context = sector_ctx
+        st.session_state.cross_asset_correlation_context = corr_ctx
         sec_ctx = _fetch_sec_filings(ticker)
         _build_data_payload_string(
             ticker, name, price, pct, vol, vw_str,
-            st.session_state.active_news_wire, "", vol_ctx, sec_ctx, "",
+            st.session_state.active_news_wire, sector_ctx, vol_ctx, sec_ctx, corr_ctx,
         )
+        st.session_state.room1_live_dragnet = {
+            **snap,
+            "ok": price > 0,
+            "payload_string": st.session_state.data_payload_string,
+            "headlines": list(st.session_state.active_news_wire or []),
+            "report_block": (
+                f"ROOM1_LIVE_DRAGNET|TK:{ticker}|SRC:yfinance|"
+                f"LIVE_PRICE:{price:.4f}|LIVE_CHG_PCT:{pct:+.4f}|LIVE_VOL:{raw_vol}|"
+                f"SESS_VWAP_PROXY:{vwap_val:.4f}"
+            ),
+        }
         return price, pct, vol, vw_str, name
     except Exception:
         return 0.0, 0.0, "N/A", "N/A", ticker
+
+
+def _build_room1_stock_chat_payload(
+    *,
+    ticker: str,
+    user_text: str,
+    intent: str,
+    terminology: list[dict],
+) -> str:
+    """Groq context for a single-stock Room 1 question — yfinance 12L payload."""
+    tape = str(st.session_state.data_payload_string or "").strip()
+    headlines = st.session_state.active_news_wire or []
+    wire = " | ".join(headlines[:4]) if headlines else "NONE"
+    report = (
+        f"ROOM1_LIVE_DRAGNET|TK:{ticker}|SRC:yfinance|"
+        f"LIVE_PRICE:{tape}|WIRE:{wire}|OPERATOR_QUERY:{user_text[:240]}"
+    )
+    blocks = [
+        tape or f"12L|TK:{ticker}|SRC:yfinance|STATUS:EMPTY",
+        _build_room1_context_blocks(intent=intent, terminology=terminology),
+        f"[ROOM1_LIVE_DRAGNET]{report}[/ROOM1_LIVE_DRAGNET]",
+    ]
+    vault_ctx = _room1_readonly_layout_context()
+    if vault_ctx:
+        blocks.append(vault_ctx)
+    return "\n".join(b for b in blocks if b)
 
 
 def _groq_should_fallback(err: str) -> bool:
@@ -1518,23 +1565,26 @@ def process_chat_submission():
         return
 
     if audit_ticker and _is_room1_single_stock_inquiry(user_text, audit_ticker):
-        _hydrate_room1_tape_snapshot(audit_ticker)
-        dragnet = core_quantum.run_room1_operator_dragnet(
-            audit_ticker,
-            user_query=user_text,
-        )
-        st.session_state.room1_live_dragnet = dragnet
-        if dragnet.get("ok"):
-            st.session_state.data_payload_string = str(dragnet.get("payload_string") or "")
-            st.session_state.active_news_wire = list(dragnet.get("headlines") or [])
-        payload = _build_room1_live_payload(
-            dragnet,
+        price, pct, vol, vw_str, name = get_live_tape_data(audit_ticker)
+        if not price or price <= 0:
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"Couldn't pull a live quote for **{audit_ticker}** right now. "
+                        "Check the ticker and try again in a few seconds."
+                    ),
+                }
+            )
+            st.session_state.text_field_buffer = ""
+            return
+        payload = _build_room1_stock_chat_payload(
+            ticker=audit_ticker.upper(),
             user_text=user_text,
             intent=intent,
             terminology=terminology,
         )
     elif audit_ticker:
-        _hydrate_room1_tape_snapshot(audit_ticker)
         get_live_tape_data(audit_ticker)
         tape = str(st.session_state.data_payload_string or "").strip()
         payload = "\n".join(
@@ -4158,17 +4208,7 @@ def _render_room1_forensic_front_desk():
         if st.session_state.current_ticker:
             tk = st.session_state.current_ticker
             _hydrate_room1_tape_snapshot(tk)
-            dragnet = st.session_state.get("room1_live_dragnet") or {}
-            if dragnet.get("ok") and str(dragnet.get("ticker")) == tk:
-                p = float(dragnet.get("price") or 0.0)
-                pct = float(dragnet.get("pct_change") or 0.0)
-                raw_v = int(dragnet.get("volume") or 0)
-                v = f"{raw_v:,}" if raw_v else "N/A"
-                vw_native = float(dragnet.get("vwap_native") or 0.0)
-                vw = f"${vw_native:,.2f}" if vw_native else "N/A"
-                name = str(dragnet.get("name") or tk)
-            else:
-                p, pct, v, vw, name = _fetch_tape_metrics(tk)
+            p, pct, v, vw, name = _fetch_tape_metrics(tk)
             color_choice = "#34C759" if pct >= 0 else "#FF3B30"
             st.markdown(
                 f"""

@@ -3955,27 +3955,11 @@ def run_room1_yahoo_tape_dragnet(ticker: str, user_query: str = "") -> dict:
 
 
 def run_room1_operator_dragnet(ticker: str, user_query: str = "") -> dict:
-    """
-    Room 1 operator dragnet — Yahoo tape always available; Massive 5m/15m lanes when
-    Polygon budget allows (shared with Room 2).
-    """
-    yahoo = run_room1_yahoo_tape_dragnet(ticker, user_query=user_query)
-    if not _polygon_call_available():
-        return yahoo
-    massive = run_room1_live_massive_dragnet(ticker, user_query=user_query)
-    if massive.get("ok"):
-        return massive
-    if yahoo.get("ok"):
-        note = str(massive.get("report_block") or "MASSIVE:UNAVAILABLE")
-        yahoo["report_block"] = f"{yahoo.get('report_block', '')} | MASSIVE_NOTE:{note}"
-        return yahoo
-    return massive
+    """Room 1 — yfinance only. Polygon/Massive is reserved for Room 2 deploys."""
+    return run_room1_yahoo_tape_dragnet(ticker, user_query=user_query)
 
 
-    """
-    Room 1 live backend — Massive REST 3-hour (36×5m) and 12-hour (48×15m) lanes + SEC EDGAR.
-    Replaces static AI training-data reliance for single-stock inquiries.
-    """
+def run_room1_live_massive_dragnet(ticker: str, user_query: str = "") -> dict:
     ticker_clean = str(ticker).strip().upper()
     today = datetime.date.today()
     empty = {
