@@ -153,25 +153,32 @@ R2_COMMIT_WINDOW_SEC = 60
 R2_COMMIT_MAX_PER_WINDOW = 3
 R2_COMMIT_THROTTLE_BANNER = "POLYGON API THROTTLE PROTECTION ACTIVE."
 ROOM1_SYSTEM_PROMPT = (
-    "You are Savant — Room 1 Global Research Desk. You sound like a professional stock "
-    "researcher, not a software bot.\n\n"
-    "WHEN LIVE STOCK DATA IS INJECTED (price, change %, volume, headlines, SEC):\n"
-    "• Answer the operator's question directly about that ticker.\n"
-    "• Typical asks: what's going on, why is it moving/up/down, volume, macro impact, news.\n"
-    "• Lead with price and change %, then explain using ONLY fields in the injected payload.\n"
-    "• Follow-up questions (no ticker repeated) still refer to the active session ticker.\n\n"
-    "WHEN NO TICKER DATA IS INJECTED:\n"
-    "• Answer brief desk/status questions normally in plain English.\n\n"
-    "HARD RULES:\n"
-    "• NEVER mention desk_general, modes, lanes, payloads, QUERY_INTENT, or system architecture.\n"
-    "• NEVER say 'missing lane' when price/data fields are present in the message.\n"
-    "• No greetings, filler, or generic AI disclaimers.\n"
-    "• Never cite training-memory prices — use injected data only.\n\n"
-    "LAYER HINTS (use only when relevant to the question):\n"
-    "• Velocity/momentum questions → price velocity and session change.\n"
-    "• Volume/institutional → volume and headline/filing context.\n"
-    "• VWAP/macro → VWAP bias and broader tape context if present.\n"
-    "• Structure/support/breakout → structural levels when in payload.\n"
+    "You are Savant, an unrestricted elite real-time financial intelligence engine. Definitive authority only. "
+    "Zero corporate safe-talk, zero generic greetings, zero introductions, zero pre-formulated conclusions, zero filler.\n\n"
+    "SPLIT-INTELLIGENCE ROUTING — classify every user message before responding:\n\n"
+    "RULE A — THE CORE STOCK SETUP (single explicit ticker only):\n"
+    "Trigger ONLY when the user submits one clear equity ticker symbol for a single-name setup "
+    "(e.g., MLGO, AAPL, $TSLA) with intent to analyze that one stock — not indices, not multi-asset compares, not vague macro.\n"
+    "Enforce this exact un-sugarcoated 6-bullet quantitative deep-dive in order. FORMATTING IS MANDATORY:\n"
+    "• Insert a full blank line (double line break) between every bullet so each point starts on a fresh isolated line — never a dense wall of text.\n"
+    "• Under each bullet, write significantly shorter, sharper, punchier copy — crisp focused sentences with high-density signals only.\n"
+    "• SAVANT TREND DETERMINATION: State definitively ROCKETING UP, CRASHING DOWN, or SIDELINED IN CONSOLIDATION.\n\n"
+    "• THE MACRO STORIES & DRIVERS: Single catalyst driving the active directional trend.\n\n"
+    "• MAIN BUSINESS OF THE COMPANY: Tight snapshot of technology layers, software frameworks, or products.\n\n"
+    "• SOCIAL SENTIMENT MATRIX: Retail psychology, Stocktwits momentum, community volume velocity.\n\n"
+    "• TOMORROW'S SESSION EXPECTATION: Data-backed next-session projection.\n\n"
+    "• CRITICAL TRADER BULLET NOTES: Volume spikes, float traps, squeeze signals, anomalies.\n\n"
+    "After all six bullets, insert one full blank line, then ONE highly detailed comprehensive executive summary paragraph "
+    "at the absolute bottom. No bullets or headers after the six bullets except that final paragraph.\n\n"
+    "RULE B — THE BROAD CONTEXT SHIFT (everything else):\n"
+    "Instantly DROP the 6-bullet framework for: broad market questions, general updates, index or macro queries "
+    "(e.g., S&P 500, RSI, sector rotation), comparative analysis (two or more symbols), follow-up causality "
+    "(e.g., why did it move like that), technical deep-dives without a fresh single-ticker setup, jokes, or casual chat.\n"
+    "Respond with sophisticated multi-paragraph macro-quantitative prose. Never force general topics into the 6-bullet slots. "
+    "Address math, indicator trends, correlations, and cross-asset context naturally with institutional-grade complexity.\n\n"
+    "MULTI-ASSET SWITCHING: When the user pivots from Rule A to Rule B (or back) in the same thread, switch modes immediately — "
+    "do not carry the bullet template into Rule B and do not use Rule B prose when a new single-ticker setup is requested.\n"
+    "Use injected 12L payload data when present; never invent prices or filings."
 )
 
 st.set_page_config(
@@ -758,12 +765,10 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "system", "content": ROOM1_SYSTEM_PROMPT}]
-elif not isinstance(st.session_state.messages, list) or not st.session_state.messages:
-    st.session_state.messages = [{"role": "system", "content": ROOM1_SYSTEM_PROMPT}]
-elif st.session_state.messages[0].get("role") != "system":
-    st.session_state.messages.insert(0, {"role": "system", "content": ROOM1_SYSTEM_PROMPT})
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "llm_memory" not in st.session_state:
+    st.session_state.llm_memory = [{"role": "system", "content": ROOM1_SYSTEM_PROMPT}]
 if "current_ticker" not in st.session_state: st.session_state.current_ticker = None
 if "timeframe" not in st.session_state: st.session_state.timeframe = "D"
 if "text_field_buffer" not in st.session_state: st.session_state.text_field_buffer = ""
@@ -1072,17 +1077,15 @@ def _build_room1_desk_payload(
 
 def _room1_reset_volatile_memory() -> None:
     """Wipe Room 1 volatile RAM — no cloud persistence."""
-    st.session_state.messages = [{"role": "system", "content": ROOM1_SYSTEM_PROMPT}]
+    st.session_state.chat_history = []
     st.session_state.current_ticker = None
     st.session_state.text_field_buffer = ""
+    st.session_state.llm_memory = st.session_state.llm_memory[:1]
     st.session_state.active_news_wire = []
     st.session_state.sector_rotation_context = ""
     st.session_state.cross_asset_correlation_context = ""
     st.session_state.institutional_accumulation_detected = False
     st.session_state.data_payload_string = ""
-    st.session_state.pop("room1_last_strategic_audit", None)
-    st.session_state.pop("room1_live_dragnet", None)
-    st.session_state.pop("room1_memory_locked", None)
 
 
 def extract_ticker(text):
@@ -1137,8 +1140,17 @@ def _fetch_news_wire(ticker: str) -> list[str]:
 def _fetch_sector_rotation() -> str:
     flows: list[tuple[str, str, float]] = []
     for sym, label in SECTOR_ETFS:
-        _ = (sym, label)
-        continue
+        try:
+            info = yf.Ticker(sym).info or {}
+            chg = info.get("regularMarketChangePercent")
+            if chg is None and info.get("regularMarketPreviousClose"):
+                price = info.get("regularMarketPrice", info.get("currentPrice", 0.0)) or 0.0
+                prev = info.get("regularMarketPreviousClose") or 1.0
+                chg = ((price - prev) / prev) * 100
+            if chg is not None:
+                flows.append((sym, label, float(chg)))
+        except Exception:
+            continue
     if not flows:
         st.session_state.sector_rotation_context = "SECTOR_FLOW:UNAVAILABLE"
         return st.session_state.sector_rotation_context
@@ -1169,7 +1181,20 @@ def _pearson_correlation(series_a: list[float], series_b: list[float]) -> float:
 
 
 def _price_velocity_array(symbol: str, periods: int = 20) -> list[float]:
-    return core_quantum.fetch_symbol_velocity_series(symbol, periods=periods)
+    try:
+        hist = yf.Ticker(symbol).history(period="2mo", interval="1d")
+        if hist is None or len(hist) < periods + 1:
+            return []
+        closes = [float(x) for x in hist["Close"].dropna().tolist()]
+        if len(closes) < periods + 1:
+            return []
+        velocity: list[float] = []
+        for i in range(-periods, 0):
+            prev = closes[i - 1]
+            velocity.append(((closes[i] - prev) / prev) * 100 if prev else 0.0)
+        return velocity
+    except Exception:
+        return []
 
 
 def _compute_cross_asset_correlation(ticker: str) -> str:
@@ -1246,13 +1271,12 @@ def _compute_volatility_engine(
     ticker: str, price: float, session_vol: int, session_vwap: float,
 ) -> tuple[str, bool]:
     institutional_accumulation_detected = False
-    _ = ticker
     try:
-        frame = core_quantum._cached_polygon_1m_frame()
-        if frame is None or frame.empty or len(frame) < 10:
+        hist = yf.Ticker(ticker).history(period="1mo", interval="1d")
+        if hist is None or len(hist) < 10:
             return "VOL:INSUFFICIENT_HIST|VOLMOM:NORMAL|INST_ACCUM:FALSE", False
-        closes = [float(x) for x in frame["Close"].dropna().tolist()]
-        volumes = [float(x) for x in frame["Volume"].dropna().tolist()]
+        closes = [float(x) for x in hist["Close"].dropna().tolist()]
+        volumes = [float(x) for x in hist["Volume"].dropna().tolist()]
         if len(closes) < 10:
             return "VOL:INSUFFICIENT_HIST|VOLMOM:NORMAL|INST_ACCUM:FALSE", False
         _, rsi_ctx = _rsi_14(closes)
@@ -1341,24 +1365,25 @@ def _hydrate_room1_tape_snapshot(ticker: str) -> dict:
 
 
 def _fetch_tape_metrics(ticker):
-    """Fast yfinance read for Live Massive Tape cards — no Polygon."""
+    """Fast yfinance read for UI metric cards — skips 12L engine on every rerun."""
     if not ticker:
         return 0.0, 0.0, "N/A", "N/A", "Unknown"
     try:
         ticker = ticker.upper()
-        snap = _hydrate_room1_tape_snapshot(ticker)
-        if snap.get("ok"):
-            price = float(snap.get("price") or 0.0)
-            pct = float(snap.get("pct_change") or 0.0)
-            raw_vol = int(snap.get("volume") or 0)
-            vol = f"{raw_vol:,}" if raw_vol else "N/A"
-            vw_native = float(snap.get("vwap_native") or 0.0)
-            vw_str = f"${vw_native:,.2f}" if vw_native else "N/A"
-            name = str(snap.get("name") or ticker)
-            return price, pct, vol, vw_str, name
+        info = yf.Ticker(ticker).info or {}
+        name = info.get("longName", info.get("shortName", ticker))
+        price = float(info.get("currentPrice", info.get("regularMarketPrice", 0.0)) or 0.0)
+        prev = float(info.get("regularMarketPreviousClose", 1.0) or 1.0)
+        pct = ((price - prev) / prev) * 100 if price and prev else 0.0
+        raw_vol = int(info.get("volume", info.get("regularMarketVolume", 0)) or 0)
+        vol = f"{raw_vol:,}" if raw_vol else "N/A"
+        high = float(info.get("dayHigh", price) or price)
+        low = float(info.get("dayLow", price) or price)
+        vwap_val = (high + low + price) / 3 if price else 0.0
+        vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
+        return price, pct, vol, vw_str, name
     except Exception:
-        pass
-    return 0.0, 0.0, "N/A", "N/A", str(ticker or "").upper()
+        return 0.0, 0.0, "N/A", "N/A", ticker.upper()
 
 
 def get_live_tape_data(ticker):
@@ -1384,40 +1409,16 @@ def get_live_tape_data(ticker):
         vwap_val = (high + low + price) / 3 if price else 0.0
         vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
 
-        snap = {
-            "ok": price > 0,
-            "ticker": ticker,
-            "price": price,
-            "pct_change": round(pct, 4),
-            "volume": raw_vol,
-            "vwap_native": round(vwap_val, 4),
-            "name": name,
-        }
-        st.session_state.room1_tape_snapshot = snap
-
         st.session_state.active_news_wire = _fetch_news_wire(ticker)
         sector_ctx = _fetch_sector_rotation()
         corr_ctx = _compute_cross_asset_correlation(ticker)
         vol_ctx, inst_flag = _compute_volatility_engine(ticker, price, raw_vol, vwap_val)
         st.session_state.institutional_accumulation_detected = inst_flag
-        st.session_state.sector_rotation_context = sector_ctx
-        st.session_state.cross_asset_correlation_context = corr_ctx
         sec_ctx = _fetch_sec_filings(ticker)
         _build_data_payload_string(
             ticker, name, price, pct, vol, vw_str,
             st.session_state.active_news_wire, sector_ctx, vol_ctx, sec_ctx, corr_ctx,
         )
-        st.session_state.room1_live_dragnet = {
-            **snap,
-            "ok": price > 0,
-            "payload_string": st.session_state.data_payload_string,
-            "headlines": list(st.session_state.active_news_wire or []),
-            "report_block": (
-                f"ROOM1_LIVE_DRAGNET|TK:{ticker}|SRC:yfinance|"
-                f"LIVE_PRICE:{price:.4f}|LIVE_CHG_PCT:{pct:+.4f}|LIVE_VOL:{raw_vol}|"
-                f"SESS_VWAP_PROXY:{vwap_val:.4f}"
-            ),
-        }
         return price, pct, vol, vw_str, name
     except Exception:
         return 0.0, 0.0, "N/A", "N/A", ticker
@@ -1502,114 +1503,44 @@ def run_groq(messages):
         return f"Core System Interruption: {exc}"
 
 
-def _build_groq_message_stack(live_payload: str = "") -> list[dict]:
-    """Full volatile thread context — entire Room 1 messages array, read-only layout lens."""
-    msgs = list(st.session_state.get("messages") or [])
-    system_msg = msgs[0] if msgs and msgs[0].get("role") == "system" else {
-        "role": "system",
-        "content": ROOM1_SYSTEM_PROMPT,
-    }
-    dialog = [m for m in msgs[1:] if m.get("role") in ("user", "assistant")]
-    layout_ctx = _room1_readonly_layout_context()
+def _build_groq_message_stack(user_text: str, payload: str) -> list[dict]:
+    system_msg = st.session_state.llm_memory[0]
+    dialog = [m for m in st.session_state.llm_memory[1:] if m["role"] in ("user", "assistant")]
+    recent = dialog[-3:] if len(dialog) > 3 else dialog
     groq_msgs = [
-        {
-            "role": "system",
-            "content": f"{system_msg['content']}\n{TOKEN_GUARD}\n{layout_ctx}",
-        }
+        {"role": "system", "content": f"{system_msg['content']}\n{TOKEN_GUARD}"},
+        *[{"role": m["role"], "content": m["content"]} for m in recent[:-1]],
     ]
-    for i, turn in enumerate(dialog):
-        content = str(turn.get("content") or "")
-        if (
-            i == len(dialog) - 1
-            and turn.get("role") == "user"
-            and live_payload
-        ):
-            content = f"{content}\n[12L_DATA_PAYLOAD]{live_payload}[/12L_DATA_PAYLOAD]"
-        groq_msgs.append({"role": turn["role"], "content": content})
+    latest = user_text
+    if payload:
+        latest = f"{user_text}\n[12L_DATA_PAYLOAD]{payload}[/12L_DATA_PAYLOAD]"
+    groq_msgs.append({"role": "user", "content": latest})
     return groq_msgs
 
 
 def process_chat_submission():
-    """Room 1 chat — live Massive/SEC dragnet for single-stock; volatile RAM only."""
     user_text = st.session_state.text_field_buffer.strip()
     if not user_text:
-        return
-
-    cap = core_quantum.room1_memory_capacity_status(
-        st.session_state.get("messages") or [],
-        pending_user_text=user_text,
-    )
-    if cap.get("locked"):
-        st.session_state.room1_memory_locked = True
         return
 
     new_ticker = extract_ticker(user_text)
     if new_ticker and new_ticker != st.session_state.current_ticker:
         st.session_state.current_ticker = new_ticker
+        st.session_state.llm_memory = st.session_state.llm_memory[:1]
 
-    st.session_state.messages.append({"role": "user", "content": user_text})
+    st.session_state.chat_history.append({"speaker": "You", "text": user_text})
+    st.session_state.llm_memory.append({"role": "user", "content": user_text})
 
     payload = ""
-    audit_ticker = new_ticker or st.session_state.current_ticker
-    intent = classify_room1_query_intent(user_text)
-    terminology = map_room1_trading_terminology(user_text)
-    payload = ""
+    if st.session_state.current_ticker:
+        get_live_tape_data(st.session_state.current_ticker)
+        payload = st.session_state.data_payload_string
 
-    if audit_ticker and st.session_state.get("polygon_lockout") and _is_room1_macro_only_query(
-        user_text
-    ):
-        st.session_state.messages.append(
-            {"role": "assistant", "content": _room1_throttle_reply(ticker=audit_ticker)}
-        )
-        st.session_state.text_field_buffer = ""
-        return
-
-    if audit_ticker and _is_room1_single_stock_inquiry(user_text, audit_ticker):
-        price, pct, vol, vw_str, name = get_live_tape_data(audit_ticker)
-        if not price or price <= 0:
-            st.session_state.messages.append(
-                {
-                    "role": "assistant",
-                    "content": (
-                        f"Couldn't pull a live quote for **{audit_ticker}** right now. "
-                        "Check the ticker and try again in a few seconds."
-                    ),
-                }
-            )
-            st.session_state.text_field_buffer = ""
-            return
-        payload = _build_room1_stock_chat_payload(
-            ticker=audit_ticker.upper(),
-            user_text=user_text,
-            intent=intent,
-            terminology=terminology,
-        )
-    elif audit_ticker:
-        get_live_tape_data(audit_ticker)
-        tape = str(st.session_state.data_payload_string or "").strip()
-        payload = "\n".join(
-            part
-            for part in (
-                tape or f"12L|TK:{audit_ticker}|MODE:tape_lane|STATUS:partial",
-                _build_room1_context_blocks(intent=intent, terminology=terminology),
-            )
-            if part
-        )
-    else:
-        payload = _build_room1_desk_payload(
-            user_text=user_text,
-            intent=intent,
-            terminology=terminology,
-        )
-
-    groq_msgs = _build_groq_message_stack(payload)
+    groq_msgs = _build_groq_message_stack(user_text, payload)
     ai_text = run_groq(groq_msgs)
-    st.session_state.messages.append({"role": "assistant", "content": ai_text})
+    st.session_state.llm_memory.append({"role": "assistant", "content": ai_text})
+    st.session_state.chat_history.append({"speaker": "Savant", "text": ai_text})
     st.session_state.text_field_buffer = ""
-
-    post_cap = core_quantum.room1_memory_capacity_status(st.session_state.get("messages") or [])
-    if post_cap.get("locked"):
-        st.session_state.room1_memory_locked = True
 
 
 SAVANT_COGNITIVE_INJECTION = """
@@ -4138,8 +4069,6 @@ def purge_room2_conversation_and_cloud() -> None:
 
 
 def _render_room1_forensic_front_desk():
-    """Room 1 — zero-waste read-only lens; volatile local messages RAM only."""
-    core_quantum.hydrate_layout_library_from_vault()
     col_chart_side, col_chat_side = st.columns([1.1, 0.9])
 
     with col_chart_side:
@@ -4185,20 +4114,6 @@ def _render_room1_forensic_front_desk():
 
     with col_chat_side:
         st.markdown("<div style='height: 1vh;'></div>", unsafe_allow_html=True)
-        memory_cap = _room1_memory_capacity()
-        memory_locked = bool(memory_cap.get("locked") or st.session_state.get("room1_memory_locked"))
-        if memory_locked:
-            st.markdown(
-                '<div class="room1-memory-lock">Peak memory threshold reached. '
-                "Refresh the page to preserve maximum up-to-date search speeds.</div>",
-                unsafe_allow_html=True,
-            )
-        elif memory_cap.get("warn_active"):
-            st.markdown(
-                '<div class="room1-memory-warn">WARNING: Approaching memory limit. '
-                "5 messages remaining before a refresh is recommended.</div>",
-                unsafe_allow_html=True,
-            )
         col_empty, col_btn_anchor = st.columns([0.7, 0.3])
         with col_btn_anchor:
             if st.button("RESET MEMORY", key="clean_memory_cta", use_container_width=True):
@@ -4206,15 +4121,13 @@ def _render_room1_forensic_front_desk():
                 st.rerun()
 
         if st.session_state.current_ticker:
-            tk = st.session_state.current_ticker
-            _hydrate_room1_tape_snapshot(tk)
-            p, pct, v, vw, name = _fetch_tape_metrics(tk)
+            p, pct, v, vw, name = _fetch_tape_metrics(st.session_state.current_ticker)
             color_choice = "#34C759" if pct >= 0 else "#FF3B30"
             st.markdown(
                 f"""
                 <div style="background:#111;padding:12px;border-radius:6px;border:1px solid #1F1F1F;margin-bottom:15px;">
                     <div class="metric-label" style="font-size:10px;color:#555;font-weight:700;">
-                        Live Massive Tape — {name} ({tk})
+                        Exchange Tape Metrics — {name} ({st.session_state.current_ticker})
                     </div>
                     <div class="metric-grid">
                         <div class="metric-card"><div class="metric-label">Price</div>
@@ -4231,11 +4144,7 @@ def _render_room1_forensic_front_desk():
                 unsafe_allow_html=True,
             )
 
-        dialog = [
-            m for m in st.session_state.get("messages", [])[1:]
-            if m.get("role") in ("user", "assistant")
-        ]
-        if not dialog:
+        if not st.session_state.chat_history:
             st.markdown("<div style='height: 18vh;'></div>", unsafe_allow_html=True)
             st.markdown(
                 "<div style='text-align:center;color:#222;font-size:24px;font-weight:300;"
@@ -4243,12 +4152,11 @@ def _render_room1_forensic_front_desk():
                 unsafe_allow_html=True,
             )
         else:
-            for msg in dialog:
-                speaker = "You" if msg.get("role") == "user" else "Savant"
-                label_class = "speaker-you" if speaker == "You" else "speaker-savant"
+            for msg in st.session_state.chat_history:
+                label_class = "speaker-you" if msg["speaker"] == "You" else "speaker-savant"
                 st.markdown(
-                    f'<div class="chat-row"><div class="speaker-label {label_class}">{speaker}</div>'
-                    f'<div class="data-content">{escape(str(msg.get("content", "")))}</div></div>',
+                    f'<div class="chat-row"><div class="speaker-label {label_class}">{msg["speaker"]}</div>'
+                    f'<div class="data-content">{msg.get("text", "")}</div></div>',
                     unsafe_allow_html=True,
                 )
 
@@ -4258,13 +4166,8 @@ def _render_room1_forensic_front_desk():
                 key="text_field_buffer",
                 placeholder="Ask Savant anything... No filters active.",
                 label_visibility="collapsed",
-                disabled=memory_locked,
             )
-            if (
-                st.form_submit_button("Send", disabled=memory_locked)
-                and st.session_state.text_field_buffer.strip()
-                and not memory_locked
-            ):
+            if st.form_submit_button("Send") and st.session_state.text_field_buffer.strip():
                 st.session_state._pending_chat_submit = True
                 st.rerun()
 
@@ -5974,15 +5877,8 @@ def render_terminal_nav() -> str:
 
 
 if st.session_state.pop("_pending_chat_submit", False):
-    cap = core_quantum.room1_memory_capacity_status(
-        st.session_state.get("messages") or [],
-        pending_user_text=st.session_state.get("text_field_buffer", ""),
-    )
-    if not cap.get("locked"):
-        with st.spinner("Savant processing live data layers..."):
-            process_chat_submission()
-    else:
-        st.session_state.room1_memory_locked = True
+    with st.spinner("Savant processing live data layers..."):
+        process_chat_submission()
 
 terminal_hub = render_terminal_nav()
 
