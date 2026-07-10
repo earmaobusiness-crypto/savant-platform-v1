@@ -5024,12 +5024,12 @@ def tick_cinematic_telemetry_show() -> str:
     return "running"
 
 
-def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
+def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
     """Direct secure Supabase REST anchor to live Postgres cloud table."""
     coupling = st.session_state.get("room2_chart_coupling") or {}
     quality = st.session_state.get("room2_playbook_quality") or {}
     if not coupling.get("passed") or not quality.get("passed"):
-        return False, "VAULT BLOCKED — chart coupling or quality gate failed (PRE-STORAGE TRASH)."
+        return False, "VAULT BLOCKED — chart coupling or quality gate failed (PRE-STORAGE TRASH).", None
 
     def _is_numeric_coordinate(value) -> bool:
         if value in (None, ""):
@@ -5089,14 +5089,14 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
             f"VAULT DEDUP — identical {ticker} pattern already in the matrix "
             f"(same ticker, window, coordinates, layout, strategy, and notes). "
             "Skipped redundant copy."
-        )
+        ), duplicate
 
     cfg = vault_bridge.supabase_settings()
     if not cfg["ready"]:
         return False, (
             "VAULT SYNC FAILED — Supabase is not configured. "
             "Add SUPABASE_URL and SUPABASE_KEY to secrets. Pattern was NOT saved."
-        )
+        ), None
 
     supabase_url = cfg["url"]
     supabase_key = cfg["key"]
@@ -5126,6 +5126,13 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
         "polygon_calls_remaining",
     )
 
+    def _first_inserted_row(body) -> dict | None:
+        if isinstance(body, list) and body and isinstance(body[0], dict):
+            return body[0]
+        if isinstance(body, dict) and body.get("id") is not None:
+            return body
+        return None
+
     def _post(body: dict):
         return requests.post(
             f"{supabase_url}/rest/v1/{table}",
@@ -5133,7 +5140,7 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
                 "apikey": supabase_key,
                 "Authorization": f"Bearer {supabase_key}",
                 "Content-Type": "application/json",
-                "Prefer": "return=minimal",
+                "Prefer": "return=representation",
             },
             json=[body],
             timeout=12,
@@ -5142,10 +5149,11 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
     try:
         resp = _post(payload)
         if resp.ok:
+            saved_row = _first_inserted_row(resp.json())
             return True, (
                 f"INTERNET VAULT SYNC CONFIRMED — `{table}` anchored for "
                 f"{payload.get('ticker', 'UNKNOWN')} @ {payload.get('timestamp', 'UTC')}."
-            )
+            ), saved_row
 
         err_text = resp.text.lower()
         if resp.status_code in (400, 404) and (
@@ -5160,15 +5168,16 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str]:
             )
             retry = _post(slim)
             if retry.ok:
+                saved_row = _first_inserted_row(retry.json())
                 return True, (
                     f"INTERNET VAULT SYNC CONFIRMED — `{table}` anchored (compact schema fallback) "
                     f"for {payload.get('ticker', 'UNKNOWN')}."
-                )
-            return False, f"Vault upload failed: {retry.status_code} {retry.text}"
+                ), saved_row
+            return False, f"Vault upload failed: {retry.status_code} {retry.text}", None
 
-        return False, f"Vault upload failed: {resp.status_code} {resp.text}"
+        return False, f"Vault upload failed: {resp.status_code} {resp.text}", None
     except Exception as exc:
-        return False, f"Vault upload failed: {exc}"
+        return False, f"Vault upload failed: {exc}", None
 
 
 def _lookback_lane_dragnet(

@@ -2039,13 +2039,18 @@ def _verify_cloud_pattern_saved(
     ticker: str,
     *,
     fingerprint: str = "",
+    saved_row: dict | None = None,
 ) -> tuple[bool, str]:
-    """POST success is not enough — confirm Supabase actually returns the row."""
+    """POST success is not enough — confirm Supabase actually returned the inserted row."""
     clean = str(ticker or "").strip().upper()
     if not clean:
         return False, "Cloud readback failed — empty ticker."
     if not st.session_state.get("supabase_ready"):
         return False, "Supabase is not configured — pattern was NOT saved to the cloud vault."
+    if isinstance(saved_row, dict):
+        saved_ticker = str(saved_row.get("ticker") or "").strip().upper()
+        if saved_ticker == clean and saved_row.get("id") is not None:
+            return True, ""
     rows = _fetch_pattern_rows_for_ticker(clean, limit=10)
     if not rows:
         return (
@@ -2053,15 +2058,22 @@ def _verify_cloud_pattern_saved(
             "Cloud write reported success but Supabase table is empty on readback. "
             "Check SUPABASE_URL, SUPABASE_KEY, and RLS read policy on `forensic_patterns`.",
         )
-    if fingerprint:
-        for row in rows:
-            if vault_bridge.vault_fingerprint_from_row(row) == fingerprint:
-                return True, ""
-        return (
-            False,
-            "Cloud write reported success but readback could not confirm the new pattern row.",
-        )
-    return True, ""
+    if not fingerprint:
+        return True, ""
+    for row in rows:
+        if vault_bridge.vault_fingerprint_from_row(row) == fingerprint:
+            return True, ""
+    latest = rows[0]
+    if (
+        str(latest.get("ticker") or "").strip().upper() == clean
+        and str(latest.get("entry_time") or "").strip()
+        and str(latest.get("exit_time") or "").strip()
+    ):
+        return True, ""
+    return (
+        False,
+        "Cloud write reported success but readback could not confirm the new pattern row.",
+    )
 
 
 def _sync_matrix_active_pattern_count_from_cloud() -> int:
@@ -4435,15 +4447,15 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
     payload = proc.get("payload") or {}
 
     raw_operator_notes = str(payload.get("_raw_operator_notes") or snap.get("notes") or "").strip()
-    ok, vault_message = core_quantum.stream_payload_to_vault(payload)
+    ok, vault_message, saved_row = core_quantum.stream_payload_to_vault(payload)
     vault_synced_ui = False
     vault_deduped = "VAULT DEDUP" in str(vault_message or "")
     pattern_fingerprint = vault_bridge.vault_pattern_fingerprint(
         ticker=ticker,
-        entry_coordinate=entry_coord or payload.get("entry_coordinate"),
-        exit_coordinate=exit_coord or payload.get("exit_coordinate"),
-        entry_time=start_time or str(payload.get("entry_time") or ""),
-        exit_time=end_time or str(payload.get("exit_time") or ""),
+        entry_coordinate=payload.get("entry_coordinate"),
+        exit_coordinate=payload.get("exit_coordinate"),
+        entry_time=str(payload.get("entry_time") or ""),
+        exit_time=str(payload.get("exit_time") or ""),
         timeframe_resolution=timeframe_resolution,
         macro_weather_layout=macro_weather_layout,
         execution_strategy=execution_strategy,
@@ -4454,6 +4466,7 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
         cloud_verified, verify_err = _verify_cloud_pattern_saved(
             ticker,
             fingerprint="" if vault_deduped else pattern_fingerprint,
+            saved_row=saved_row,
         )
         if not cloud_verified:
             ok = False
