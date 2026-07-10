@@ -794,6 +794,8 @@ if "room2_vault_flash" not in st.session_state: st.session_state.room2_vault_fla
 if "room2_last_rescue_vault_id" not in st.session_state: st.session_state.room2_last_rescue_vault_id = None
 if "matrix_cloud_hydrated" not in st.session_state: st.session_state.matrix_cloud_hydrated = False
 if "matrix_active_pattern_count" not in st.session_state: st.session_state.matrix_active_pattern_count = 0
+if "matrix_active_save_count" not in st.session_state: st.session_state.matrix_active_save_count = 0
+if "matrix_incubation_count" not in st.session_state: st.session_state.matrix_incubation_count = 0
 if "matrix_trash_vault_count" not in st.session_state: st.session_state.matrix_trash_vault_count = 0
 if "matrix_cascade_active" not in st.session_state: st.session_state.matrix_cascade_active = False
 if "matrix_cascade_started_at" not in st.session_state: st.session_state.matrix_cascade_started_at = 0.0
@@ -2075,18 +2077,29 @@ def _verify_cloud_pattern_saved(
     )
 
 
+def _inventory_summary_counts(rows: list[dict]) -> tuple[int, int, int]:
+    """Unique stocks, active saves, incubation saves (deduped roster view)."""
+    deduped = _dedupe_inventory_rows(rows)
+    active_rows, incubation_rows = _inventory_rows_by_state(deduped)
+    stocks = len(_inventory_unique_tickers(deduped))
+    return stocks, len(active_rows), len(incubation_rows)
+
+
 def _sync_matrix_active_pattern_count_from_cloud() -> int:
-    """Session count = unique stocks in Supabase only."""
+    """Refresh vault inventory counters from Supabase."""
     if not st.session_state.get("supabase_ready"):
         st.session_state.matrix_active_pattern_count = 0
+        st.session_state.matrix_active_save_count = 0
+        st.session_state.matrix_incubation_count = 0
         st.session_state.matrix_trash_vault_count = 0
         return 0
     rows = _fetch_all_active_pattern_rows(limit=100)
-    deduped = _dedupe_inventory_rows(rows)
-    active = len(_inventory_unique_tickers(deduped))
-    st.session_state.matrix_active_pattern_count = active
+    stocks, active_saves, incubation_saves = _inventory_summary_counts(rows)
+    st.session_state.matrix_active_pattern_count = stocks
+    st.session_state.matrix_active_save_count = active_saves
+    st.session_state.matrix_incubation_count = incubation_saves
     st.session_state.matrix_trash_vault_count = _count_cloud_pattern_rows(trash_only=True)
-    return active
+    return stocks
 
 
 def _dedupe_inventory_rows(rows: list[dict]) -> list[dict]:
@@ -2136,12 +2149,9 @@ def _inventory_rows_by_state(rows: list[dict]) -> tuple[list[dict], list[dict]]:
 
 
 def _format_vault_pattern_roster(rows: list[dict], *, trash: int) -> str:
-    rows = _dedupe_inventory_rows(rows)
-    active_rows, incubation_rows = _inventory_rows_by_state(rows)
-    tickers = _inventory_unique_tickers(rows)
-    stock_n = len(tickers)
-    deploy_n = len(active_rows) if active_rows else len(rows)
-    incubation_n = len(incubation_rows)
+    stock_n, deploy_n, incubation_n = _inventory_summary_counts(rows)
+    active_rows, incubation_rows = _inventory_rows_by_state(_dedupe_inventory_rows(rows))
+    tickers = _inventory_unique_tickers(_dedupe_inventory_rows(rows))
     headline = f"**{stock_n} stock(s)** in Supabase"
     parts = [f"**{deploy_n} active save(s)**"]
     if incubation_n:
@@ -2306,6 +2316,8 @@ def _clear_matrix_session_inventory() -> None:
     st.session_state.room2_deploy_registry = []
     st.session_state.room2_last_successful_deploy = {}
     st.session_state.matrix_active_pattern_count = 0
+    st.session_state.matrix_active_save_count = 0
+    st.session_state.matrix_incubation_count = 0
     vault_bridge.clear_local_vault_cache()
     vault_bridge.sync_local_lab_state(
         deploy_snapshot={},
@@ -2599,7 +2611,6 @@ def _soft_delete_all_patterns_to_vault() -> str:
         deleted_n = len(deleted_body) if isinstance(deleted_body, list) else before_n
         after_n = _count_supabase_vault_pattern_rows()
         _clear_matrix_session_inventory()
-        st.session_state.matrix_active_pattern_count = 0
         st.session_state.matrix_trash_vault_count = 0
         st.session_state.quantum_terminal_output = (
             f"📡 [DATALINK: TRASH_VAULT] {TRASH_VAULT_BULK_NOTICE}"
@@ -3431,7 +3442,11 @@ def _window4_conversational_context_tags() -> str:
         )
         if tickers:
             bits.append(f"[VAULT_TICKERS {', '.join(tickers)}]")
-        bits.append(f"[VAULT_INVENTORY active_patterns={len(rows)}]")
+        stocks, active_saves, incubation_saves = _inventory_summary_counts(rows)
+        bits.append(
+            f"[VAULT_INVENTORY stocks={stocks} active_saves={active_saves} "
+            f"incubation_saves={incubation_saves}]"
+        )
     if not st.session_state.get("supabase_ready"):
         bits.append("[SUPABASE offline — inventory from local disk cache]")
     if _window4_last_deploy_verified():
@@ -4560,7 +4575,10 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
         elif retro.get("halt_live_execution") and retro.get("diagnosis"):
             vault_line = f"{vault_message} · {retro['diagnosis']}"
         elif vault_state == VAULT_STATE_INCUBATION and incubation_msg:
-            vault_line = f"{vault_message} · {incubation_msg}"
+            vault_line = (
+                f"🧪 INCUBATION SAVE — {vault_message} "
+                f"(state=incubation in Supabase · not active vault yet). {incubation_msg}"
+            )
         elif (retro.get("degraded") or retro.get("evolving")) and retro.get("diagnosis"):
             vault_line = f"{vault_message} · {retro['diagnosis']}"
         else:
@@ -5562,7 +5580,9 @@ def render_room2_forensic_lab():
     _apply_pending_room2_form_patches()
     _ensure_room2_widget_defaults()
 
-    active_count = st.session_state.get("matrix_active_pattern_count", 0)
+    stock_count = int(st.session_state.get("matrix_active_pattern_count") or 0)
+    active_saves = int(st.session_state.get("matrix_active_save_count") or 0)
+    incubation_saves = int(st.session_state.get("matrix_incubation_count") or 0)
     trash_count = st.session_state.get("matrix_trash_vault_count", 0)
     st.markdown(
         """
@@ -5573,8 +5593,10 @@ def render_room2_forensic_lab():
         """,
         unsafe_allow_html=True,
     )
+    incubation_bit = f" · {incubation_saves} incubation" if incubation_saves else ""
     st.caption(
-        f"☁️ **Winning-DNA Memory (Supabase):** {active_count} stock(s) in cloud vault · "
+        f"☁️ **Winning-DNA Memory (Supabase):** {stock_count} stock(s) · "
+        f"{active_saves} active save(s){incubation_bit} · "
         f"{trash_count} in {RESCUE_VAULT_RETENTION_DAYS}-day Trash Vault."
     )
     _ensure_supabase_session()

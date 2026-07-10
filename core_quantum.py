@@ -5136,7 +5136,6 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
         "buffer_context_window",
         "vault_track",
         "data_feed_mode",
-        "state",
         "deleted_at",
         "layout_match_pct",
         "anomaly_repeat_count",
