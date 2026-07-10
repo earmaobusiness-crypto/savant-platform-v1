@@ -1224,20 +1224,161 @@ def _dedupe_headlines(headlines: list[str], limit: int = 6) -> list[str]:
     return unique
 
 
-def _fetch_news_wire(ticker: str) -> list[str]:
-    headlines: list[str] = []
+def _parse_google_news_title(raw: str) -> tuple[str, str]:
+    clean = re.sub(r"\s+", " ", str(raw or "").strip())
+    if " - " in clean:
+        title, source = clean.rsplit(" - ", 1)
+        return title.strip(), source.strip()
+    return clean, ""
+
+
+def _news_wire_plain_lines(news: list) -> list[str]:
+    lines: list[str] = []
+    for item in news or []:
+        if isinstance(item, dict):
+            title = str(item.get("title") or "").strip()
+            source = str(item.get("source") or "").strip()
+            if title and source:
+                lines.append(f"{title} ({source})")
+            elif title:
+                lines.append(title)
+        elif item:
+            lines.append(str(item).strip())
+    return lines
+
+
+_ROOM1_NEWS_SOURCE_BOOST = (
+    "reuters", "bloomberg", "cnbc", "wall street journal", "financial times",
+    "marketwatch", "yahoo finance", "benzinga", "seeking alpha", "barron",
+)
+
+
+def _rank_news_by_eyeballs(items: list[dict]) -> list[dict]:
+    def score(idx: int, item: dict) -> int:
+        rank = int(item.get("rank", idx))
+        pts = max(0, 20 - rank)
+        src = str(item.get("source") or "").lower()
+        if any(tag in src for tag in _ROOM1_NEWS_SOURCE_BOOST):
+            pts += 3
+        return pts
+
+    ranked = sorted(enumerate(items), key=lambda pair: score(pair[0], pair[1]), reverse=True)
+    return [item for _, item in ranked]
+
+
+def _dedupe_news_items(items: list[dict], limit: int = 2) -> list[dict]:
+    unique: list[dict] = []
+    for item in items:
+        title = str(item.get("title") or "").strip()
+        if not title or len(title) < 12:
+            continue
+        if any(_headline_similar(title, kept.get("title", "")) >= 0.82 for kept in unique):
+            continue
+        unique.append(item)
+        if len(unique) >= limit:
+            break
+    return unique
+
+
+def _fetch_news_wire(ticker: str) -> list[dict]:
+    items: list[dict] = []
+    clean = str(ticker or "").strip().upper()
     try:
-        q = urllib.parse.quote(f"{ticker} stock", safe="")
-        rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
-        resp = requests.get(rss_url, timeout=8, headers={"User-Agent": SEC_HEADERS["User-Agent"]})
-        if resp.ok:
-            root = ElementTree.fromstring(resp.content)
-            for node in root.findall(".//item/title")[:12]:
-                if node.text:
-                    headlines.append(node.text.strip())
+        for idx, row in enumerate((yf.Ticker(clean).news or [])[:15]):
+            title = str(row.get("title") or "").strip()
+            url = str(row.get("link") or "").strip()
+            source = str(row.get("publisher") or row.get("publisherName") or "").strip()
+            if title and url:
+                items.append(
+                    {"title": title, "source": source or "News", "url": url, "rank": idx}
+                )
     except Exception:
         pass
-    return _dedupe_headlines(headlines, limit=6)
+    if len(items) < 2:
+        try:
+            q = urllib.parse.quote(f"{clean} stock", safe="")
+            rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+            resp = requests.get(
+                rss_url, timeout=8, headers={"User-Agent": SEC_HEADERS["User-Agent"]},
+            )
+            if resp.ok:
+                root = ElementTree.fromstring(resp.content)
+                for idx, node in enumerate(root.findall(".//item")[:12]):
+                    title_el = node.find("title")
+                    if title_el is None or not title_el.text:
+                        continue
+                    title, source = _parse_google_news_title(title_el.text.strip())
+                    link_el = node.find("link")
+                    url = (link_el.text or "").strip() if link_el is not None else ""
+                    if not title or not url:
+                        continue
+                    items.append(
+                        {
+                            "title": title,
+                            "source": source or "News",
+                            "url": url,
+                            "rank": idx + len(items),
+                        }
+                    )
+        except Exception:
+            pass
+    ranked = _rank_news_by_eyeballs(items)
+    return _dedupe_news_items(ranked, limit=2)
+
+
+def _short_news_source_label(source: str) -> str:
+    label = re.sub(r"\s+", " ", str(source or "").strip())
+    for suffix in (".com", ".net", ".org"):
+        if label.lower().endswith(suffix):
+            label = label[: -len(suffix)]
+    return label or "News"
+
+
+def _render_room1_news_wire_panel(ticker: str) -> None:
+    tk = str(ticker or "").strip().upper()
+    news_items = st.session_state.active_news_wire or []
+    if not news_items:
+        return
+    wire_items: list[str] = []
+    for item in news_items[:2]:
+        if isinstance(item, dict):
+            title = escape(str(item.get("title") or ""))
+            source = escape(_short_news_source_label(str(item.get("source") or "News")))
+            url = str(item.get("url") or "").strip()
+            if url:
+                safe_url = escape(url, quote=True)
+                wire_items.append(
+                    f'<li style="margin:8px 0;font-size:12px;line-height:1.5;color:#D6D6D6;">'
+                    f'<span style="font-weight:600;">{title}</span>'
+                    f'<span style="color:#666;"> — </span>'
+                    f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer" '
+                    f'style="color:#5AC8FA;text-decoration:none;font-weight:600;">{source}</a>'
+                    f"</li>"
+                )
+            else:
+                wire_items.append(
+                    f'<li style="margin:8px 0;font-size:12px;line-height:1.5;color:#D6D6D6;">'
+                    f'<span style="font-weight:600;">{title}</span>'
+                    f'<span style="color:#666;"> — {source}</span></li>'
+                )
+        else:
+            wire_items.append(
+                f'<li style="margin:6px 0;color:#AAA;font-size:12px;line-height:1.4;">'
+                f"{escape(str(item))}</li>"
+            )
+    if not wire_items:
+        return
+    st.markdown(
+        f"""
+        <div style="background:#0A0A0A;padding:10px 12px;border-radius:6px;border:1px solid #1A1A1A;margin-bottom:15px;">
+            <div class="metric-label" style="font-size:9px;color:#555;font-weight:700;margin-bottom:6px;">
+                LIVE NEWS WIRE — {tk}
+            </div>
+            <ul style="margin:0;padding-left:16px;">{"".join(wire_items)}</ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 SEC_CATALYST_FORM_BASES = frozenset({
@@ -1328,11 +1469,11 @@ def _pull_sec_filings(ticker: str, limit: int = 5) -> list[dict]:
 
 
 def _fetch_sec_filings(ticker: str) -> str:
-    cards = _pull_sec_filings(ticker, limit=5)
+    cards = _pull_sec_filings(ticker, limit=2)
     st.session_state.room1_sec_filing_cards = cards
     if not cards:
         return "SEC:NONE"
-    return "SEC:" + "|".join(f"{c['form']}:{c['date']}" for c in cards[:3])
+    return "SEC:" + "|".join(f"{c['form']}:{c['date']}" for c in cards[:2])
 
 
 def _sec_form_hint(form: str) -> str:
@@ -1441,7 +1582,7 @@ def _render_room1_intel_addon_panels(ticker: str) -> None:
     move_cards = [c for c in sec_cards if c.get("move_driver")]
     if sec_cards:
         sec_rows = []
-        for card in sec_cards[:4]:
+        for card in sec_cards[:2]:
             form_raw = str(card.get("form", ""))
             form = escape(form_raw)
             date = escape(str(card.get("date", "")))
@@ -1694,7 +1835,7 @@ def _build_data_payload_string(
     ticker: str, name: str, price: float, pct: float, vol: str, vw: str,
     news: list[str], sector_ctx: str, vol_ctx: str, sec_ctx: str, corr_ctx: str,
 ) -> str:
-    wire = "||".join(news[:6]) if news else "NONE"
+    wire = "||".join(_news_wire_plain_lines(news)[:2]) if news else "NONE"
     inst = "TRUE" if st.session_state.institutional_accumulation_detected else "FALSE"
     payload = (
         f"12L|TK:{ticker}|CO:{name}|P:{price:.2f}|CHG:{pct:+.2f}%|V:{vol}|VW:{vw}|"
@@ -1809,7 +1950,7 @@ def _build_room1_stock_chat_payload(
     """Groq context for a single-stock Room 1 question — yfinance 12L payload."""
     tape = str(st.session_state.data_payload_string or "").strip()
     headlines = st.session_state.active_news_wire or []
-    wire = " | ".join(headlines[:4]) if headlines else "NONE"
+    wire = " | ".join(_news_wire_plain_lines(headlines)[:2]) if headlines else "NONE"
     report = (
         f"ROOM1_LIVE_DRAGNET|TK:{ticker}|SRC:yfinance|"
         f"LIVE_PRICE:{tape}|WIRE:{wire}|OPERATOR_QUERY:{user_text[:240]}"
@@ -4563,23 +4704,7 @@ def _render_room1_forensic_front_desk():
                     'letter-spacing:0.06em;color:#34C759;">INSTITUTIONAL ACCUMULATION SIGNAL DETECTED</div>',
                     unsafe_allow_html=True,
                 )
-            headlines = st.session_state.active_news_wire or []
-            if headlines:
-                wire_items = "".join(
-                    f'<li style="margin:4px 0;color:#AAA;font-size:12px;line-height:1.4;">{escape(h)}</li>'
-                    for h in headlines[:4]
-                )
-                st.markdown(
-                    f"""
-                    <div style="background:#0A0A0A;padding:10px 12px;border-radius:6px;border:1px solid #1A1A1A;margin-bottom:15px;">
-                        <div class="metric-label" style="font-size:9px;color:#555;font-weight:700;margin-bottom:6px;">
-                            LIVE NEWS WIRE — {tk}
-                        </div>
-                        <ul style="margin:0;padding-left:16px;">{wire_items}</ul>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+            _render_room1_news_wire_panel(tk)
             _render_room1_intel_addon_panels(tk)
 
         if not st.session_state.chat_history:
