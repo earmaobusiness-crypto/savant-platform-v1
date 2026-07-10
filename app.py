@@ -1187,6 +1187,30 @@ def is_room1_fresh_ticker_setup(text: str, ticker: str | None) -> bool:
     )
 
 
+def _extract_spaced_ticker(text: str) -> str | None:
+    """Collapse spaced caps like J H L H → JHLH before validation."""
+    match = re.search(r"(?<![A-Z])(?:[A-Z]\s+){2,4}[A-Z](?![A-Z])", str(text or "").upper())
+    if not match:
+        return None
+    sym = re.sub(r"\s+", "", match.group(0))
+    if 3 <= len(sym) <= 5 and sym not in ROOM1_TICKER_IGNORE:
+        return sym
+    return None
+
+
+def _room1_resolve_ticker_quote(symbol: str) -> tuple[bool, float, str]:
+    clean = str(symbol or "").strip().upper()
+    if not clean:
+        return False, 0.0, ""
+    try:
+        info = yf.Ticker(clean).info or {}
+        price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0.0)
+        name = str(info.get("shortName") or info.get("longName") or clean)
+        return price > 0, price, name
+    except Exception:
+        return False, 0.0, clean
+
+
 def extract_ticker(text):
     if is_room1_casual_intent(text):
         return None
@@ -1200,6 +1224,9 @@ def extract_ticker(text):
     tagged = re.search(r"\b(?:NASDAQ|NYSE|AMEX):([A-Z]{1,5})\b", text)
     if tagged and tagged.group(1) not in ignore:
         return tagged.group(1)
+    spaced = _extract_spaced_ticker(text)
+    if spaced:
+        return spaced
     for word in re.findall(r"\b[A-Z]{3,5}\b", text):
         if word not in ignore:
             return word
@@ -2064,12 +2091,38 @@ def process_chat_submission():
     plain = is_room1_plain_conversation(user_text)
     casual = is_room1_casual_intent(user_text) or plain
     new_ticker = None if casual else extract_ticker(user_text)
-    if new_ticker and new_ticker != st.session_state.current_ticker:
-        st.session_state.current_ticker = new_ticker
-        st.session_state.llm_memory = st.session_state.llm_memory[:1]
 
     st.session_state.chat_history.append({"speaker": "You", "text": user_text})
     st.session_state.llm_memory.append({"role": "user", "content": user_text})
+
+    if new_ticker:
+        tradable, _, _ = _room1_resolve_ticker_quote(new_ticker)
+        if not tradable:
+            st.session_state.chat_history.append(
+                {
+                    "speaker": "Savant",
+                    "text": (
+                        f"**{new_ticker.upper()}** isn't pulling a live market quote — "
+                        "that symbol doesn't look valid. Double-check the letters "
+                        "(e.g. **JLHL**, not JHLH). I won't guess without real tape data."
+                    ),
+                }
+            )
+            st.session_state.llm_memory.append(
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"{new_ticker.upper()} invalid — no live quote. "
+                        "Operator should resubmit the correct uppercase ticker."
+                    ),
+                }
+            )
+            st.session_state.text_field_buffer = ""
+            return
+        if new_ticker != st.session_state.current_ticker:
+            st.session_state.current_ticker = new_ticker
+            st.session_state.llm_memory = st.session_state.llm_memory[:1]
+            st.session_state.llm_memory.append({"role": "user", "content": user_text})
 
     payload = ""
     response_mode = "chitchat" if casual else "rule_b"
@@ -2078,6 +2131,21 @@ def process_chat_submission():
     if not casual and new_ticker and is_room1_fresh_ticker_setup(user_text, new_ticker):
         get_live_tape_data(new_ticker)
         payload = st.session_state.data_payload_string
+        if not payload or "P:0.00" in payload:
+            st.session_state.chat_history.append(
+                {
+                    "speaker": "Savant",
+                    "text": (
+                        f"Couldn't lock live tape for **{new_ticker.upper()}** right now. "
+                        "Try again in a few seconds."
+                    ),
+                }
+            )
+            st.session_state.llm_memory.append(
+                {"role": "assistant", "content": f"{new_ticker.upper()} tape unavailable."}
+            )
+            st.session_state.text_field_buffer = ""
+            return
         response_mode = "rule_a"
     elif not casual and active_ticker and is_room1_stock_follow_up(user_text, active_ticker):
         get_live_tape_data(active_ticker)
