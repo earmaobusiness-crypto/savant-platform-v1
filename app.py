@@ -7,7 +7,6 @@ import urllib.parse
 import json
 from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
-from email.utils import parsedate_to_datetime
 from html import escape
 from xml.etree import ElementTree
 
@@ -1424,30 +1423,23 @@ SEC_FORM_HINTS = {
     "424B5": "Shelf offering tap",
     "DEF 14A": "Proxy / shareholder vote",
 }
-ROOM1_MICRO_INFLUENCER_WHITELIST = (
-    ("JoshuaTenet", "Small-cap momentum caller"),
-    ("stocktalkweekly", "Retail penny newsletter"),
-    ("MrZackMorris", "Low-float momentum caller"),
-    ("smallaxequity", "Micro-cap setup hunter"),
-    ("PennystockGuru", "Penny stock alert account"),
-    ("TradeWithAlerts", "Retail entry callouts"),
-    ("Equity4K", "Sub-30k follower alpha"),
-    ("OTCWatchList", "OTC / penny watchlist"),
-)
 ROOM1_REDDIT_SWARM_SUBS = ("wallstreetbets", "stocks", "pennystocks", "smallstreetbets")
-ROOM1_MEDIA_HANDLE_BLOCK = frozenset({
-    "bloomberg", "reuters", "wsj", "cnbc", "financialtimes", "marketwatch",
-    "business", "yahoofinance", "forbes", "nytimes", "ap", "stocktwits",
-    "peterlbrandt", "unusual_whales",
-})
 ROOM1_REDDIT_BOT_AUTHORS = frozenset({
     "automoderator", "[deleted]", "deleted", "bot", "moderator", "news-bot",
 })
 ROOM1_VELOCITY_WINDOW_SEC = 15 * 60
 ROOM1_SOCIAL_SPIKE_LOOKBACK_SEC = 6 * 3600
 ROOM1_SOCIAL_SPIKE_RECENT_SEC = 3 * 3600
-ROOM1_X_ALPHA_MAX_AGE_SEC = 48 * 3600
 ROOM1_REDDIT_SEARCH_LIMIT = 50
+ROOM1_SOCIAL_CATALYST_WORDS = (
+    "float", "catalyst", "offering", "dilution", "halt", "resume", "contract",
+    "fda", "earnings", "short", "squeeze", "volume", "gap", "premarket",
+    "resistance", "support", "entry", "risk", "news", "filing", "8-k", "13d",
+)
+ROOM1_SOCIAL_HYPE_WORDS = (
+    "moon", "mooning", "rocket", "lambo", "guaranteed", "easy money",
+    "to the moon", "lets go", "let's go", "yolo", "tendies",
+)
 
 
 def _format_time_ago(seconds: float) -> str:
@@ -1460,17 +1452,46 @@ def _format_time_ago(seconds: float) -> str:
     return f"{hours}h {mins}m ago" if mins else f"{hours}h ago"
 
 
+def _social_post_quality(text: str) -> str:
+    low = str(text or "").lower()
+    catalyst = sum(1 for w in ROOM1_SOCIAL_CATALYST_WORDS if w in low)
+    hype = sum(1 for w in ROOM1_SOCIAL_HYPE_WORDS if w in low)
+    if catalyst >= 2 and hype <= 1:
+        return "explained"
+    if hype >= 2 and catalyst == 0:
+        return "hype"
+    if catalyst >= 1:
+        return "mixed"
+    return "thin"
+
+
 def _reddit_window_unique(
-    events: list[tuple[float, str]], window_end: float, window_sec: float,
+    events: list[tuple[float, str, str]], window_end: float, window_sec: float,
 ) -> int:
     window_start = window_end - window_sec
-    return len({author for ts, author in events if window_start <= ts <= window_end})
+    return len({author for ts, author, _q in events if window_start <= ts <= window_end})
 
 
-def _collect_reddit_mention_events(ticker: str) -> list[tuple[float, str]]:
+def _reddit_window_quality(
+    events: list[tuple[float, str, str]], window_end: float, window_sec: float,
+) -> str:
+    window_start = window_end - window_sec
+    qualities = [q for ts, _a, q in events if window_start <= ts <= window_end]
+    if not qualities:
+        return "none"
+    explained = qualities.count("explained")
+    hype = qualities.count("hype")
+    if explained >= max(1, hype):
+        return "mostly explained setups"
+    if hype > explained:
+        return "mostly hype / moon spam"
+    return "mixed quality"
+
+
+def _collect_reddit_mention_events(ticker: str) -> list[tuple[float, str, str]]:
     clean = ticker.upper()
     now = time.time()
-    events: list[tuple[float, str]] = []
+    events: list[tuple[float, str, str]] = []
     for sub in ROOM1_REDDIT_SWARM_SUBS:
         try:
             resp = requests.get(
@@ -1499,14 +1520,14 @@ def _collect_reddit_mention_events(ticker: str) -> list[tuple[float, str]]:
                 created = float(data.get("created_utc") or 0.0)
                 if not created or (now - created) > 86400:
                     continue
-                events.append((created, author))
+                events.append((created, author, _social_post_quality(f"{title} {body}")))
         except Exception:
             continue
     return events
 
 
 def _find_peak_spike_window(
-    events: list[tuple[float, str]],
+    events: list[tuple[float, str, str]],
     now: float,
     lookback_sec: float,
     window_sec: float,
@@ -1602,12 +1623,13 @@ def _sec_form_hint(form: str) -> str:
 
 
 def _reddit_velocity_scan(ticker: str) -> dict:
-    """Live + lookback Reddit velocity — documents active, recent, and building phases."""
+    """Public Reddit velocity + quality — active / recent / building / quiet."""
     clean = ticker.upper()
     now = time.time()
     events = _collect_reddit_mention_events(clean)
     unique_15m = _reddit_window_unique(events, now, ROOM1_VELOCITY_WINDOW_SEC)
     daily_mentions = len(events)
+    quality_live = _reddit_window_quality(events, now, ROOM1_VELOCITY_WINDOW_SEC)
 
     hist_map = st.session_state.setdefault("room1_reddit_velocity_hist", {})
     prior = list(hist_map.get(clean, []))
@@ -1668,21 +1690,14 @@ def _reddit_velocity_scan(ticker: str) -> dict:
             and peak_age_sec <= ROOM1_SOCIAL_SPIKE_RECENT_SEC
         )
 
-    if active_spike and spike_pct > 0:
-        reddit_metric = f"{int(max(spike_pct, 1))}% Spike over 15-Mins (live)"
-    elif active_spike:
-        reddit_metric = f"{unique_15m} unique / 15m (live)"
-    elif documented_peak and int(documented_peak["unique"]) >= 5:
-        age_label = _format_time_ago(peak_age_sec or 0.0)
-        reddit_metric = (
-            f"{documented_peak['unique']} unique / 15m peak — {age_label}"
+    if documented_peak:
+        quality_peak = _reddit_window_quality(
+            events,
+            float(documented_peak["window_end"]),
+            ROOM1_VELOCITY_WINDOW_SEC,
         )
-    elif building:
-        reddit_metric = f"Baseline — {last30} unique last 60m, rising"
-    elif unique_15m > 0 or daily_mentions > 0:
-        reddit_metric = "Baseline"
     else:
-        reddit_metric = "Null"
+        quality_peak = quality_live
 
     if active_spike:
         phase = "active"
@@ -1699,103 +1714,14 @@ def _reddit_velocity_scan(ticker: str) -> dict:
         "recent_spike": recent_spike,
         "building": building,
         "phase": phase,
-        "reddit_metric": reddit_metric,
         "spike_pct": round(spike_pct, 1),
         "peak_unique": int(documented_peak["unique"]) if documented_peak else 0,
         "peak_age_sec": peak_age_sec,
         "last30": last30,
         "prior30": prior30,
+        "quality": quality_peak if phase in ("active", "recent") else quality_live,
+        "daily_mentions": daily_mentions,
     }
-
-
-def _micro_influencer_x_alpha_hit(ticker: str) -> dict:
-    """Whitelist micro-influencer hit — recent posts only, no mainstream wires."""
-    clean = ticker.upper()
-    now = time.time()
-    for handle, _role in ROOM1_MICRO_INFLUENCER_WHITELIST:
-        if handle.lower() in ROOM1_MEDIA_HANDLE_BLOCK:
-            continue
-        try:
-            q = urllib.parse.quote(f"${clean} {handle}", safe="")
-            rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
-            resp = requests.get(
-                rss_url, timeout=5, headers={"User-Agent": SEC_HEADERS["User-Agent"]},
-            )
-            if not resp.ok:
-                continue
-            root = ElementTree.fromstring(resp.content)
-            for item in root.findall(".//item")[:4]:
-                title_node = item.find("title")
-                pub_node = item.find("pubDate")
-                title = (title_node.text or "").strip() if title_node is not None else ""
-                if not title:
-                    continue
-                title_upper = title.upper()
-                if clean not in title_upper and f"${clean}" not in title_upper:
-                    continue
-                age_sec = None
-                if pub_node is not None and pub_node.text:
-                    try:
-                        pub_dt = parsedate_to_datetime(pub_node.text.strip())
-                        if pub_dt.tzinfo is None:
-                            pub_dt = pub_dt.replace(tzinfo=timezone.utc)
-                        age_sec = now - pub_dt.timestamp()
-                    except Exception:
-                        age_sec = None
-                if age_sec is not None and age_sec > ROOM1_X_ALPHA_MAX_AGE_SEC:
-                    continue
-                age_label = _format_time_ago(age_sec) if age_sec is not None else "time unverified"
-                return {
-                    "text": f"@{handle} — {title[:140]} ({age_label})",
-                    "fresh": age_sec is not None and age_sec <= 7200,
-                    "age_sec": age_sec,
-                }
-        except Exception:
-            continue
-    return {"text": "None", "fresh": False, "age_sec": None}
-
-
-def _configured_private_feeds() -> list[tuple[str, str]]:
-    feeds: list[tuple[str, str]] = []
-    try:
-        for key, label in (
-            ("room1_telegram_feed_urls", "Telegram Link"),
-            ("room1_discord_feed_urls", "Discord Link"),
-        ):
-            if key not in st.secrets:
-                continue
-            raw = st.secrets[key]
-            urls = [raw] if isinstance(raw, str) else list(raw or [])
-            for idx, url in enumerate(urls, 1):
-                clean_url = str(url or "").strip()
-                if clean_url:
-                    feeds.append((f"{label} #{idx}", clean_url))
-    except Exception:
-        pass
-    return feeds
-
-
-def _scan_private_chat_feeds(ticker: str) -> str:
-    clean = ticker.upper()
-    feeds = _configured_private_feeds()
-    if not feeds:
-        return "None"
-    buy_markers = ("buy", "entry", "callout", "alert", "load", "starter", "breaking")
-    for label, url in feeds:
-        try:
-            resp = requests.get(
-                url, timeout=6, headers={"User-Agent": SEC_HEADERS["User-Agent"]},
-            )
-            if not resp.ok:
-                continue
-            text = resp.text.lower()
-            if clean.lower() not in text and f"${clean.lower()}" not in text:
-                continue
-            if any(marker in text for marker in buy_markers):
-                return f"Active Chat Match Found in {label}"
-        except Exception:
-            continue
-    return "None"
 
 
 def _fetch_big_dog_social_wire(ticker: str) -> dict:
@@ -1805,83 +1731,60 @@ def _fetch_big_dog_social_wire(ticker: str) -> dict:
         return {}
 
     reddit = _reddit_velocity_scan(clean)
-    x_hit = _micro_influencer_x_alpha_hit(clean)
-    private_match = _scan_private_chat_feeds(clean)
+    phase = str(reddit.get("phase") or "quiet")
+    unique_15m = int(reddit.get("unique_15m") or 0)
+    peak_n = int(reddit.get("peak_unique") or 0)
+    peak_age = float(reddit.get("peak_age_sec") or 0.0)
+    last30 = int(reddit.get("last30") or 0)
+    prior30 = int(reddit.get("prior30") or 0)
+    quality = str(reddit.get("quality") or "none")
 
-    active_spike = bool(reddit.get("velocity_spike"))
-    recent_spike = bool(reddit.get("recent_spike"))
-    building = bool(reddit.get("building"))
-    alpha_text = str(x_hit.get("text", "None"))
-    alpha_hit = alpha_text != "None"
-    alpha_fresh = bool(x_hit.get("fresh"))
-    private_hit = private_match != "None"
-
-    if active_spike:
-        status = f"Velocity Spike Active · {int(reddit.get('unique_15m') or 0)} authors now"
+    if phase == "active":
+        status = "Happening now"
         status_color = "#FF3B30"
-    elif recent_spike:
-        age = _format_time_ago(float(reddit.get("peak_age_sec") or 0.0))
-        peak_n = int(reddit.get("peak_unique") or 0)
-        status = f"Velocity Spike Recent · peak {age} · {peak_n} authors"
+        timing = f"Live burst · {unique_15m} people talking in last 15m"
+        meaning = "Retail chatter just spiked. Social heat is on right now."
+        signal = f"{unique_15m} unique / 15m · {quality}"
+        read = "HOT — social move is in progress"
+        read_color = "#FF3B30"
+    elif phase == "recent":
+        age = _format_time_ago(peak_age)
+        status = "Already started"
         status_color = "#FF9500"
-    elif building:
-        status = "Early Build · mentions rising, below spike threshold"
+        timing = f"Peak was {age} · {peak_n} people in that 15m window"
+        meaning = "The social burst already fired. You may be late to the first wave."
+        signal = f"{peak_n} unique at peak · {quality}"
+        read = f"WATCH — spike started {age}"
+        read_color = "#FF9500"
+    elif phase == "building":
+        status = "Looks like it's coming"
         status_color = "#FFD60A"
+        timing = f"Rising · {last30} people last hour (was {prior30}) · need 5+ to call a spike"
+        meaning = "Mentions are climbing but not a full spike yet. Early warning only."
+        signal = f"{unique_15m} unique / 15m · {last30} / 60m · {quality}"
+        read = "WATCH — early build, not confirmed"
+        read_color = "#FF9500"
     else:
-        status = "Social Quiet · no burst in 6h lookback"
+        status = "Quiet"
         status_color = "#8E8E93"
-
-    if active_spike:
-        pct = int(max(float(reddit.get("spike_pct") or 0.0), 1))
-        reddit_line = (
-            f"{pct}% live spike · {int(reddit.get('unique_15m') or 0)} unique / 15m"
-        )
-    elif recent_spike:
-        age = _format_time_ago(float(reddit.get("peak_age_sec") or 0.0))
-        peak_n = int(reddit.get("peak_unique") or 0)
-        reddit_line = f"{peak_n} unique / 15m peak · fired {age} · 6h memory"
-    elif building:
-        last30 = int(reddit.get("last30") or 0)
-        prior30 = int(reddit.get("prior30") or 0)
-        reddit_line = (
-            f"Baseline rising · {last30} unique last 60m (was {prior30}) · need 5+ to spike"
-        )
-    elif str(reddit.get("reddit_metric", "Null")) != "Null":
-        reddit_line = f"{reddit.get('reddit_metric')} · 6h lookback clear"
-    else:
-        reddit_line = "Null · 6h lookback, no coordinated Reddit burst"
-
-    feeds = _configured_private_feeds()
-    if not feeds:
-        private_display = "None — Telegram/Discord feeds not connected"
-    else:
-        private_display = private_match
-
-    if active_spike or private_hit or (alpha_hit and alpha_fresh):
-        verdict = "CRITICAL: Coordinated pump active — immediate entry window"
-        verdict_color = "#FF3B30"
-    elif recent_spike or building or alpha_hit:
-        if recent_spike:
-            age = _format_time_ago(float(reddit.get("peak_age_sec") or 0.0))
-            verdict = f"WATCH: Spike documented {age} — momentum may have started earlier"
-        elif building:
-            verdict = "WATCH: Early build detected — not yet at spike threshold"
+        timing = "No social burst in the last 6 hours"
+        meaning = "No coordinated retail chatter found for this ticker right now."
+        if int(reddit.get("daily_mentions") or 0) > 0:
+            signal = f"Light chatter only · {quality if quality != 'none' else 'thin'}"
         else:
-            verdict = "WATCH: Micro-influencer mention on file — verify timing"
-        verdict_color = "#FF9500"
-    else:
-        verdict = "STABLE: No front-running detected"
-        verdict_color = "#8E8E93"
+            signal = "No Reddit burst found"
+        read = "STABLE — nothing social firing"
+        read_color = "#8E8E93"
 
     wire = {
         "ok": True,
         "status": status,
         "status_color": status_color,
-        "reddit_metric": reddit_line,
-        "micro_x": alpha_text,
-        "private_chat": private_display,
-        "verdict": verdict,
-        "verdict_color": verdict_color,
+        "timing": timing,
+        "meaning": meaning,
+        "signal": signal,
+        "read": read,
+        "read_color": read_color,
     }
     st.session_state.room1_big_dog_wire = wire
     return wire
@@ -1893,13 +1796,13 @@ def _render_room1_big_dog_social_wire_panel(ticker: str) -> None:
     if not wire.get("ok"):
         return
     status_color = wire.get("status_color", "#8E8E93")
-    verdict_color = wire.get("verdict_color", status_color)
+    read_color = wire.get("read_color", status_color)
     lines = [
-        ("STATUS", str(wire.get("status", "Social Quiet")), status_color),
-        ("REDDIT SWARM METRIC", str(wire.get("reddit_metric", "Null")), "#CCC"),
-        ("MICRO-INFLUENCER (X)", str(wire.get("micro_x", "None")), "#5AC8FA"),
-        ("PRIVATE CHAT MATCH (TELEGRAM/DISCORD)", str(wire.get("private_chat", "None")), "#CCC"),
-        ("ACTIONABLE VERDICT", str(wire.get("verdict", "STABLE: No front-running detected")), verdict_color),
+        ("STATUS", str(wire.get("status", "Quiet")), status_color),
+        ("TIMING", str(wire.get("timing", "No social burst in the last 6 hours")), "#CCC"),
+        ("WHAT THIS MEANS", str(wire.get("meaning", "")), "#AAA"),
+        ("SIGNAL", str(wire.get("signal", "No Reddit burst found")), "#5AC8FA"),
+        ("READ", str(wire.get("read", "STABLE — nothing social firing")), read_color),
     ]
     body = "".join(
         f'<div style="margin:6px 0;font-size:11px;line-height:1.5;">'
@@ -1911,7 +1814,7 @@ def _render_room1_big_dog_social_wire_panel(ticker: str) -> None:
         f"""
         <div style="background:#0A0A0A;padding:10px 12px;border-radius:6px;border:1px solid #1A1A1A;margin-bottom:15px;">
             <div class="metric-label" style="font-size:9px;color:#555;font-weight:700;margin-bottom:6px;">
-                BIG DOG SOCIAL WIRE — {tk}
+                SOCIAL WIRE — {tk}
             </div>
             {body}
         </div>
