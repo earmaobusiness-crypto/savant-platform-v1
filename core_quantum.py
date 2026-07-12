@@ -154,7 +154,7 @@ LOOKBACK_DELTAS = {
 }
 # Extra session days pulled before operator start_date so dragnet lanes have enough bars.
 LOOKBACK_FETCH_PADDING_DAYS = {
-    "1-Minute": 0,
+    "1-Minute": 1,
     "5-Minute": 1,
     "15-Minute": 2,
 }
@@ -647,8 +647,12 @@ def get_room2_polygon_pipeline(
     if not is_usable_data_stream(track):
         return POLYGON_REST_DATA_EMPTY
 
-    if timeframe_resolution == "1-Minute":
-        track = apply_local_strike_ram_cap(track)
+    # Do not RAM-cap the 1m track here. Trimming to the last N minutes of the
+    # session drops every bar before operator Start Time and trips
+    # PRE-STORAGE TRASH (got 0 on 1-Minute). Temporal fence + dragnet already
+    # keep only lookback-through-exit bars after ingest.
+    if timeframe_resolution == "1-Minute" and is_usable_data_stream(track):
+        st.session_state.r2_local_ram_bar_count = len(track)
     st.session_state.r2_processor_lane = (
         PROCESSOR_LANE_LOCAL_STRIKE
         if timeframe_resolution == "1-Minute"
@@ -2879,15 +2883,36 @@ def resolve_processor_lane(timeframe_resolution: str) -> str:
     return PROCESSOR_LANE_CLOUD
 
 
-def apply_local_strike_ram_cap(data_stream, cap_minutes: int = LOCAL_1M_RAM_CAP_MINUTES):
-    """Keep 1m lookback capped in local RAM for low-power IB strike lane."""
+def apply_local_strike_ram_cap(
+    data_stream,
+    cap_minutes: int = LOCAL_1M_RAM_CAP_MINUTES,
+    *,
+    start_dt: datetime.datetime | None = None,
+    end_dt: datetime.datetime | None = None,
+):
+    """
+    Optional 1m RAM trim around the operator window.
+    Must keep bars before Start Time (dragnet lookback). Never trim to
+    "last N minutes of the whole session" — that wipes pre-start context.
+    """
     frame = _ensure_dataframe(data_stream)
     if frame is None:
         return data_stream
     try:
-        latest = frame.index.max()
-        cutoff = latest - datetime.timedelta(minutes=cap_minutes)
-        trimmed = frame[frame.index >= cutoff]
+        lookback_pad = datetime.timedelta(
+            minutes=max(int(cap_minutes), ONE_MINUTE_DRAGNET_BARS)
+        )
+        if start_dt is not None and end_dt is not None and end_dt >= start_dt:
+            left = start_dt - lookback_pad
+            right = end_dt
+            trimmed = frame[(frame.index >= left) & (frame.index <= right)]
+        elif start_dt is not None:
+            left = start_dt - lookback_pad
+            trimmed = frame[frame.index >= left]
+        else:
+            # No operator anchor — keep full frame (safe default for forensic deploy).
+            st.session_state.r2_local_ram_bar_count = len(frame)
+            return frame
         if isinstance(trimmed, pd.DataFrame) and not trimmed.empty:
             st.session_state.r2_local_ram_bar_count = len(trimmed)
             return trimmed

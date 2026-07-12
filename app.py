@@ -2604,7 +2604,7 @@ def _processor_lane_readout(timeframe_resolution: str) -> str:
     if lane == core_quantum.PROCESSOR_LANE_LOCAL_STRIKE:
         ram_bars = st.session_state.get("r2_local_ram_bar_count", "—")
         return (
-            f"Local 1m strike lane · ~{core_quantum.LOCAL_1M_RAM_CAP_MINUTES}m RAM cap "
+            f"Local 1m strike lane · full session + lookback "
             f"({ram_bars} bars) · IB target <{core_quantum.IB_STRIKE_TARGET_MS}ms"
         )
     return "Cloud dual-stream · 5m/15m bars + SEC Form 4 + institutional volume"
