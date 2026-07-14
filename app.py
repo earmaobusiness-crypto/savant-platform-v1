@@ -7,6 +7,7 @@ import urllib.parse
 import json
 from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
+from email.utils import parsedate_to_datetime
 from html import escape
 from xml.etree import ElementTree
 
@@ -1423,13 +1424,18 @@ SEC_FORM_HINTS = {
     "424B5": "Shelf offering tap",
     "DEF 14A": "Proxy / shareholder vote",
 }
-ROOM1_REDDIT_SWARM_SUBS = ("wallstreetbets", "stocks", "pennystocks", "smallstreetbets")
+ROOM1_REDDIT_SWARM_SUBS = (
+    "wallstreetbets", "stocks", "pennystocks", "smallstreetbets",
+    "Daytrading", "Shortsqueeze", "SqueezePlays",
+)
 ROOM1_REDDIT_BOT_AUTHORS = frozenset({
     "automoderator", "[deleted]", "deleted", "bot", "moderator", "news-bot",
 })
 ROOM1_VELOCITY_WINDOW_SEC = 15 * 60
 ROOM1_SOCIAL_SPIKE_LOOKBACK_SEC = 6 * 3600
 ROOM1_SOCIAL_SPIKE_RECENT_SEC = 3 * 3600
+ROOM1_RETAIL_WEB_LOOKBACK_SEC = 24 * 3600
+ROOM1_RETAIL_WEB_HOT_SEC = 6 * 3600
 ROOM1_REDDIT_SEARCH_LIMIT = 50
 ROOM1_SOCIAL_CATALYST_WORDS = (
     "float", "catalyst", "offering", "dilution", "halt", "resume", "contract",
@@ -1439,6 +1445,11 @@ ROOM1_SOCIAL_CATALYST_WORDS = (
 ROOM1_SOCIAL_HYPE_WORDS = (
     "moon", "mooning", "rocket", "lambo", "guaranteed", "easy money",
     "to the moon", "lets go", "let's go", "yolo", "tendies",
+)
+ROOM1_RETAIL_HEAT_WORDS = (
+    "surge", "surges", "soars", "soar", "skyrocketing", "explodes", "exploding",
+    "pile in", "retail", "penny", "volatile", "volatility", "halts", "halted",
+    "runner", "parabolic", "squeeze", "trending", "stocktwits", "why is",
 )
 
 
@@ -1551,6 +1562,203 @@ def _find_peak_spike_window(
             }
         window_end -= step
     return best
+
+
+def _scan_stocktwits_stream(ticker: str) -> dict:
+    """
+    Stocktwits symbol stream — used when reachable.
+    Cloudflare often blocks unauthenticated pulls; then status=unavailable (not Quiet).
+    """
+    clean = str(ticker or "").strip().upper()
+    empty = {
+        "ok": False,
+        "available": False,
+        "phase": "unavailable",
+        "count_15m": 0,
+        "count_60m": 0,
+        "count_6h": 0,
+        "bullish": 0,
+        "bearish": 0,
+        "watchlist": 0,
+        "newest_age_sec": None,
+        "snippet": "",
+    }
+    if not clean:
+        return empty
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Referer": f"https://stocktwits.com/symbol/{clean}",
+    }
+    try:
+        token = ""
+        try:
+            token = str(st.secrets.get("stocktwits_access_token", "") or "").strip()
+        except Exception:
+            token = ""
+        params = {"access_token": token} if token else None
+        resp = requests.get(
+            f"https://api.stocktwits.com/api/2/streams/symbol/{clean}.json",
+            headers=headers,
+            params=params,
+            timeout=6,
+        )
+        if resp.status_code != 200:
+            return empty
+        payload = resp.json() if resp.content else {}
+        messages = payload.get("messages") or []
+        if not isinstance(messages, list):
+            return empty
+        now = time.time()
+        ages: list[float] = []
+        bullish = bearish = 0
+        snippet = ""
+        for msg in messages[:40]:
+            if not isinstance(msg, dict):
+                continue
+            created_raw = str(msg.get("created_at") or "")
+            age = None
+            try:
+                # 2026-07-13T14:22:01Z
+                created = datetime.strptime(
+                    created_raw.replace("Z", ""), "%Y-%m-%dT%H:%M:%S"
+                ).replace(tzinfo=timezone.utc)
+                age = now - created.timestamp()
+            except Exception:
+                age = None
+            if age is None or age > ROOM1_RETAIL_WEB_LOOKBACK_SEC:
+                continue
+            ages.append(age)
+            body = str(msg.get("body") or "").strip()
+            if body and not snippet:
+                snippet = body[:120]
+            sens = ((msg.get("entities") or {}).get("sentiment") or {}).get("basic")
+            if str(sens).lower() == "bullish":
+                bullish += 1
+            elif str(sens).lower() == "bearish":
+                bearish += 1
+        count_15m = sum(1 for a in ages if a <= ROOM1_VELOCITY_WINDOW_SEC)
+        count_60m = sum(1 for a in ages if a <= 3600)
+        count_6h = sum(1 for a in ages if a <= ROOM1_SOCIAL_SPIKE_LOOKBACK_SEC)
+        newest = min(ages) if ages else None
+        watchlist = int((payload.get("symbol") or {}).get("watchlist_count") or 0)
+        if count_15m >= 8 or count_60m >= 15:
+            phase = "active"
+        elif count_6h >= 10 or (count_60m >= 6 and newest is not None and newest <= 7200):
+            phase = "recent"
+        elif count_60m >= 3 or count_6h >= 5:
+            phase = "building"
+        else:
+            phase = "quiet"
+        return {
+            "ok": True,
+            "available": True,
+            "phase": phase,
+            "count_15m": count_15m,
+            "count_60m": count_60m,
+            "count_6h": count_6h,
+            "bullish": bullish,
+            "bearish": bearish,
+            "watchlist": watchlist,
+            "newest_age_sec": newest,
+            "snippet": snippet,
+        }
+    except Exception:
+        return empty
+
+
+def _scan_retail_web_buzz(ticker: str) -> dict:
+    """
+    Retail heat via Google News RSS — catches VEEE-style runner coverage
+    (surge / Stocktwits / why-is-up stories) even when Reddit is quiet.
+    """
+    clean = str(ticker or "").strip().upper()
+    now = time.time()
+    seen: set[str] = set()
+    hits: list[tuple[float, str]] = []  # age_sec, title
+
+    queries = (f"${clean}", f"{clean} stock", f"{clean} penny stock")
+    for q in queries:
+        try:
+            rss_url = (
+                "https://news.google.com/rss/search?"
+                f"q={urllib.parse.quote(q, safe='')}&hl=en-US&gl=US&ceid=US:en"
+            )
+            resp = requests.get(
+                rss_url, timeout=6, headers={"User-Agent": SEC_HEADERS["User-Agent"]},
+            )
+            if not resp.ok:
+                continue
+            root = ElementTree.fromstring(resp.content)
+            for item in root.findall(".//item")[:12]:
+                title = (item.findtext("title") or "").strip()
+                if not title:
+                    continue
+                title_u = title.upper()
+                if clean not in title_u and f"${clean}" not in title_u:
+                    continue
+                key = title_u[:120]
+                if key in seen:
+                    continue
+                seen.add(key)
+                pub = (item.findtext("pubDate") or "").strip()
+                age = None
+                if pub:
+                    try:
+                        pub_dt = parsedate_to_datetime(pub)
+                        if pub_dt.tzinfo is None:
+                            pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+                        age = now - pub_dt.timestamp()
+                    except Exception:
+                        age = None
+                if age is None or age > ROOM1_RETAIL_WEB_LOOKBACK_SEC:
+                    continue
+                hits.append((age, title))
+        except Exception:
+            continue
+
+    heat = [
+        (age, title) for age, title in hits
+        if any(w in title.lower() for w in ROOM1_RETAIL_HEAT_WORDS)
+    ]
+    # Prefer heat-tagged stories; fall back to any ticker-matched coverage.
+    pool = heat if heat else hits
+    count_2h = sum(1 for age, _ in pool if age <= 7200)
+    count_6h = sum(1 for age, _ in pool if age <= ROOM1_RETAIL_WEB_HOT_SEC)
+    count_24h = len(pool)
+    newest = min((age for age, _ in pool), default=None)
+    top_title = ""
+    if pool:
+        top_title = sorted(pool, key=lambda x: x[0])[0][1][:110]
+
+    if count_2h >= 3 or (count_6h >= 4 and newest is not None and newest <= 3600):
+        phase = "active"
+    elif count_6h >= 2 or (count_24h >= 3 and bool(heat)):
+        # VEEE-style: day-session surge coverage often lands in the 6–24h window.
+        phase = "recent"
+    elif count_24h >= 2 or count_6h >= 1:
+        phase = "building"
+    else:
+        phase = "quiet"
+
+    return {
+        "ok": True,
+        "phase": phase,
+        "count_2h": count_2h,
+        "count_6h": count_6h,
+        "count_24h": count_24h,
+        "heat_count": len(heat),
+        "newest_age_sec": newest,
+        "snippet": top_title,
+        "heat_bias": bool(heat),
+    }
+
+
+def _social_phase_rank(phase: str) -> int:
+    return {"active": 3, "recent": 2, "building": 1, "quiet": 0, "unavailable": -1}.get(phase, 0)
 
 
 def _days_since_iso(date_str: str) -> int | None:
@@ -1731,48 +1939,130 @@ def _fetch_big_dog_social_wire(ticker: str) -> dict:
         return {}
 
     reddit = _reddit_velocity_scan(clean)
-    phase = str(reddit.get("phase") or "quiet")
+    web = _scan_retail_web_buzz(clean)
+    st_scan = _scan_stocktwits_stream(clean)
+
+    reddit_phase = str(reddit.get("phase") or "quiet")
+    web_phase = str(web.get("phase") or "quiet")
+    st_phase = str(st_scan.get("phase") or "unavailable")
+    st_available = bool(st_scan.get("available"))
+
+    # Loudest real lane wins (Stocktwits only if API is reachable).
+    candidates = [
+        ("Reddit", reddit_phase, _social_phase_rank(reddit_phase)),
+        ("Web retail", web_phase, _social_phase_rank(web_phase)),
+    ]
+    if st_available:
+        candidates.append(("Stocktwits", st_phase, _social_phase_rank(st_phase)))
+    source, phase, _rank = max(candidates, key=lambda row: row[2])
+
     unique_15m = int(reddit.get("unique_15m") or 0)
     peak_n = int(reddit.get("peak_unique") or 0)
     peak_age = float(reddit.get("peak_age_sec") or 0.0)
     last30 = int(reddit.get("last30") or 0)
     prior30 = int(reddit.get("prior30") or 0)
     quality = str(reddit.get("quality") or "none")
+    web_newest = web.get("newest_age_sec")
+    web_snip = str(web.get("snippet") or "")
+    st_newest = st_scan.get("newest_age_sec")
 
     if phase == "active":
         status = "Happening now"
         status_color = "#FF3B30"
-        timing = f"Live burst · {unique_15m} people talking in last 15m"
-        meaning = "Retail chatter just spiked. Social heat is on right now."
-        signal = f"{unique_15m} unique / 15m · {quality}"
+        if source == "Web retail":
+            timing = (
+                f"Retail coverage hot · {int(web.get('count_2h') or 0)} stories / 2h · "
+                f"{int(web.get('count_6h') or 0)} / 6h"
+            )
+            meaning = "Runner-style web/retail heat is live — VEEE-type buzz pattern."
+            signal = f"WEB · {web_snip or 'heat stories live'}"
+        elif source == "Stocktwits":
+            timing = (
+                f"Stocktwits live · {int(st_scan.get('count_15m') or 0)} msgs / 15m · "
+                f"{int(st_scan.get('count_60m') or 0)} / 60m"
+            )
+            meaning = "Stocktwits stream is lighting up right now."
+            signal = (
+                f"ST · bull {int(st_scan.get('bullish') or 0)} / bear "
+                f"{int(st_scan.get('bearish') or 0)} · {str(st_scan.get('snippet') or '')[:90]}"
+            )
+        else:
+            timing = f"Live Reddit burst · {unique_15m} people talking in last 15m"
+            meaning = "Retail chatter just spiked. Social heat is on right now."
+            signal = f"REDDIT · {unique_15m} unique / 15m · {quality}"
         read = "HOT — social move is in progress"
         read_color = "#FF3B30"
     elif phase == "recent":
-        age = _format_time_ago(peak_age)
         status = "Already started"
         status_color = "#FF9500"
-        timing = f"Peak was {age} · {peak_n} people in that 15m window"
-        meaning = "The social burst already fired. You may be late to the first wave."
-        signal = f"{peak_n} unique at peak · {quality}"
-        read = f"WATCH — spike started {age}"
+        if source == "Web retail":
+            age = _format_time_ago(float(web_newest or 0.0))
+            timing = (
+                f"Web heat peaked {age} · {int(web.get('count_24h') or 0)} stories / 24h · "
+                f"{int(web.get('count_6h') or 0)} / 6h"
+            )
+            meaning = "Retail coverage already fired. You may be late to the first wave."
+            signal = f"WEB · {web_snip or 'surge coverage on file'}"
+            read = f"WATCH — web heat started {age}"
+        elif source == "Stocktwits":
+            age = _format_time_ago(float(st_newest or 0.0))
+            timing = (
+                f"Stocktwits active recently · {int(st_scan.get('count_6h') or 0)} msgs / 6h · "
+                f"newest {age}"
+            )
+            meaning = "Stocktwits burst already ran. Momentum may have started earlier."
+            signal = f"ST · {int(st_scan.get('count_60m') or 0)} / 60m · newest {age}"
+            read = f"WATCH — Stocktwits started {age}"
+        else:
+            age = _format_time_ago(peak_age)
+            timing = f"Reddit peak was {age} · {peak_n} people in that 15m window"
+            meaning = "The social burst already fired. You may be late to the first wave."
+            signal = f"REDDIT · {peak_n} unique at peak · {quality}"
+            read = f"WATCH — spike started {age}"
         read_color = "#FF9500"
     elif phase == "building":
         status = "Looks like it's coming"
         status_color = "#FFD60A"
-        timing = f"Rising · {last30} people last hour (was {prior30}) · need 5+ to call a spike"
-        meaning = "Mentions are climbing but not a full spike yet. Early warning only."
-        signal = f"{unique_15m} unique / 15m · {last30} / 60m · {quality}"
+        if source == "Web retail":
+            timing = (
+                f"Early web heat · {int(web.get('count_24h') or 0)} stories / 24h · "
+                f"{int(web.get('count_6h') or 0)} / 6h"
+            )
+            meaning = "Coverage is building — not a full retail swarm yet."
+            signal = f"WEB · {web_snip or 'early coverage'}"
+        elif source == "Stocktwits":
+            timing = (
+                f"Stocktwits climbing · {int(st_scan.get('count_60m') or 0)} / 60m · "
+                f"{int(st_scan.get('count_6h') or 0)} / 6h"
+            )
+            meaning = "Stocktwits chatter rising but not full heat yet."
+            signal = f"ST · building · {str(st_scan.get('snippet') or '')[:90]}"
+        else:
+            timing = f"Rising · {last30} people last hour (was {prior30}) · need 5+ to call a spike"
+            meaning = "Mentions are climbing but not a full spike yet. Early warning only."
+            signal = f"REDDIT · {unique_15m} unique / 15m · {last30} / 60m · {quality}"
         read = "WATCH — early build, not confirmed"
         read_color = "#FF9500"
     else:
         status = "Quiet"
         status_color = "#8E8E93"
-        timing = "No social burst in the last 6 hours"
+        timing = "No Reddit / web retail burst in lookback"
         meaning = "No coordinated retail chatter found for this ticker right now."
+        bits = []
         if int(reddit.get("daily_mentions") or 0) > 0:
-            signal = f"Light chatter only · {quality if quality != 'none' else 'thin'}"
+            bits.append(f"Reddit light · {quality if quality != 'none' else 'thin'}")
         else:
-            signal = "No Reddit burst found"
+            bits.append("Reddit quiet")
+        bits.append(
+            f"Web {int(web.get('count_24h') or 0)}/24h"
+            if int(web.get("count_24h") or 0) > 0
+            else "Web quiet"
+        )
+        if st_available:
+            bits.append(f"ST {int(st_scan.get('count_6h') or 0)}/6h")
+        else:
+            bits.append("ST blocked")
+        signal = " · ".join(bits)
         read = "STABLE — nothing social firing"
         read_color = "#8E8E93"
 
@@ -1785,6 +2075,7 @@ def _fetch_big_dog_social_wire(ticker: str) -> dict:
         "signal": signal,
         "read": read,
         "read_color": read_color,
+        "source": source if phase != "quiet" else "none",
     }
     st.session_state.room1_big_dog_wire = wire
     return wire
