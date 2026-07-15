@@ -136,7 +136,7 @@ ANOMALY_SHELF_DAYS = 30
 ANOMALY_PERMANENT_MINT_COUNT = 5
 TIMEFRAME_MARGIN_FLOORS = {
     "1-Minute": 1.0,
-    "5-Minute": 6.0,
+    "5-Minute": 3.0,
     "15-Minute": 5.0,
 }
 TIMEFRAME_BAR_MINUTES = {
@@ -1164,7 +1164,7 @@ def run_full_day_forensic_dragnet(
 def enforce_permanent_library_profit_floor(quality: dict) -> dict:
     """
     Non-negotiable tiered quality gate before permanent library save.
-    1m >= 1.0%, 5m >= 6.0% (strict alpha), 15m >= 5.0%.
+    1m >= 1.0%, 5m >= 3.0%, 15m >= 5.0%.
     When net_margin_pct is present, friction-adjusted margin must clear the floor.
     """
     out = dict(quality or {})
