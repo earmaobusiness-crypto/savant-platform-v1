@@ -163,20 +163,11 @@ ROOM1_SYSTEM_PROMPT = (
     "Enforce this exact un-sugarcoated 6-bullet quantitative deep-dive in order. FORMATTING IS MANDATORY:\n"
     "• Insert a full blank line (double line break) between every bullet so each point starts on a fresh isolated line — never a dense wall of text.\n"
     "• Under each bullet, write significantly shorter, sharper, punchier copy — crisp focused sentences with high-density signals only.\n"
-    "• SAVANT TREND DETERMINATION: State definitively ROCKETING UP, CRASHING DOWN, or a consolidation label. "
-    "If the session had a large morning impulse then went flat later, do NOT use bare SIDELINED IN CONSOLIDATION — "
-    "prefer LATE-SESSION CONSOLIDATION (or equivalent) and briefly note the morning move size so the pause is not read as a dead day.\n\n"
+    "• SAVANT TREND DETERMINATION: State definitively ROCKETING UP, CRASHING DOWN, or SIDELINED IN CONSOLIDATION.\n\n"
     "• THE MACRO STORIES & DRIVERS: Single catalyst driving the active directional trend.\n\n"
-    "• MAIN BUSINESS OF THE COMPANY: Tight snapshot of real products/services only. "
-    "Use the company's actual sector from filings/press releases when known. "
-    "Never invent or guess a wrong industry (e.g. calling an oilfield/AI-infrastructure name 'freight logistics software'). "
-    "If sector is unknown from payload/context, say UNKNOWN — do not fabricate.\n\n"
-    "• SOCIAL SENTIMENT MATRIX: Retail psychology, Stocktwits momentum, community volume velocity. "
-    "Ban vague 'Mixed' with no edge. Name the tape behavior (e.g. HIGH-VELOCITY ACCUMULATION when a big morning surge "
-    "sidelines flat instead of dumping — absorption/hold is a continuation clue). Tie the label to price/volume action.\n\n"
-    "• TOMORROW'S SESSION EXPECTATION: Data-backed next-session projection with exact levels — "
-    "cite a support floor and resistance ceiling in dollars (e.g. $3.30 / $3.60). "
-    "No vague 'range-bound' language without those boundaries.\n\n"
+    "• MAIN BUSINESS OF THE COMPANY: Tight snapshot of technology layers, software frameworks, or products.\n\n"
+    "• SOCIAL SENTIMENT MATRIX: Retail psychology, Stocktwits momentum, community volume velocity.\n\n"
+    "• TOMORROW'S SESSION EXPECTATION: Data-backed next-session projection.\n\n"
     "• CRITICAL TRADER BULLET NOTES: Volume spikes, float traps, squeeze signals, anomalies.\n\n"
     "After all six bullets, insert one full blank line, then ONE highly detailed comprehensive executive summary paragraph "
     "at the absolute bottom. No bullets or headers after the six bullets except that final paragraph.\n\n"
@@ -780,9 +771,6 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "llm_memory" not in st.session_state:
     st.session_state.llm_memory = [{"role": "system", "content": ROOM1_SYSTEM_PROMPT}]
-else:
-    # Keep Rule A instructions current after prompt edits (do not wipe chat history).
-    st.session_state.llm_memory[0] = {"role": "system", "content": ROOM1_SYSTEM_PROMPT}
 if "current_ticker" not in st.session_state: st.session_state.current_ticker = None
 if "timeframe" not in st.session_state: st.session_state.timeframe = "D"
 if "text_field_buffer" not in st.session_state: st.session_state.text_field_buffer = ""
