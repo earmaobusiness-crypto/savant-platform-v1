@@ -172,6 +172,30 @@ DRAGNET_TIMEFRAMES = frozenset({"5-Minute", "15-Minute"})
 ROOT_CAUSE_FRICTION = "execution_friction_slippage"
 ROOT_CAUSE_STRUCTURAL_DECAY = "structural_alpha_decay"
 EXECUTION_HALTED_STATE = "execution_halted"
+VAULT_MATRIX_BLOB_FIELDS = frozenset({
+    "text_matrix_string",
+    "forensic_dragnet_blob",
+    "master_signature_json",
+    "metric_envelopes_json",
+    "semantic_catalyst_json",
+    "day_context_json",
+})
+VAULT_EXTENDED_FIELDS = VAULT_MATRIX_BLOB_FIELDS | frozenset({
+    "timeframe_resolution",
+    "macro_weather_layout",
+    "execution_strategy",
+    "buffer_context_window",
+    "vault_track",
+    "data_feed_mode",
+    "deleted_at",
+    "layout_match_pct",
+    "anomaly_repeat_count",
+    "structural_move_pct",
+    "strategy_trust_tier",
+    "form4_insider_summary",
+    "institutional_block_accumulation",
+    "polygon_calls_remaining",
+})
 VAULT_STATE_INCUBATION = "incubation"
 VAULT_STATE_PURGATORY = "purgatory"
 FINBERT_MODEL_ID = "ProsusAI/finbert"
@@ -2370,19 +2394,25 @@ def log_strategy_execution_with_fallback(**kwargs) -> dict:
         if key in kwargs
     }
     ok, _detail = record_strategy_execution(**ledger_kwargs)
-    if not ok:
-        _append_local_alpha_decay_sample(
-            timeline_key,
-            margin_pct,
-            layout_match_pct=layout_match_pct,
-            structural_move_pct=structural_move_pct,
-        )
+    _append_local_alpha_decay_sample(
+        timeline_key,
+        margin_pct,
+        layout_match_pct=layout_match_pct,
+        structural_move_pct=structural_move_pct,
+    )
     retro = diagnose_post_mortem_retro_analysis(
         macro_weather_layout=kwargs.get("macro_weather_layout", ""),
         execution_strategy=kwargs.get("execution_strategy", ""),
         timeframe_resolution=kwargs.get("timeframe_resolution", ""),
     )
     retro["logged_to_cloud"] = ok
+    retro["last_deploy"] = {
+        "ticker": str(kwargs.get("ticker") or "").strip().upper(),
+        "entry_time": str(kwargs.get("entry_time") or kwargs.get("entry_coordinate") or ""),
+        "exit_time": str(kwargs.get("exit_time") or kwargs.get("exit_coordinate") or ""),
+        "net_margin_pct": round(float(margin_pct), 4),
+        "gross_move_pct": round(float(structural_move_pct), 4),
+    }
     st.session_state.room2_live_execution_halted = retro.get("halt_live_execution", False)
     if retro.get("halt_live_execution"):
         try:
@@ -5280,28 +5310,6 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
     supabase_url = cfg["url"]
     supabase_key = cfg["key"]
     table = cfg["table"]
-    extended_fields = (
-        "timeframe_resolution",
-        "macro_weather_layout",
-        "execution_strategy",
-        "buffer_context_window",
-        "vault_track",
-        "data_feed_mode",
-        "deleted_at",
-        "layout_match_pct",
-        "anomaly_repeat_count",
-        "structural_move_pct",
-        "text_matrix_string",
-        "forensic_dragnet_blob",
-        "master_signature_json",
-        "metric_envelopes_json",
-        "semantic_catalyst_json",
-        "day_context_json",
-        "strategy_trust_tier",
-        "form4_insider_summary",
-        "institutional_block_accumulation",
-        "polygon_calls_remaining",
-    )
 
     def _first_inserted_row(body) -> dict | None:
         if isinstance(body, list) and body and isinstance(body[0], dict):
@@ -5351,8 +5359,42 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
         if resp.status_code in (400, 404) and (
             "column" in err_text or "schema" in err_text or "could not" in err_text
         ):
-            meta = {field: payload.get(field) for field in extended_fields if field in payload}
-            slim = {key: value for key, value in payload.items() if key not in extended_fields}
+            meta = {
+                field: payload.get(field)
+                for field in VAULT_MATRIX_BLOB_FIELDS
+                if field in payload
+            }
+            slim = {
+                key: value
+                for key, value in payload.items()
+                if key not in VAULT_MATRIX_BLOB_FIELDS
+            }
+            ctx = str(slim.get("operator_context", "")).strip()
+            meta_blob = json.dumps(meta, default=str)
+            slim["operator_context"] = (
+                f"{ctx} | MATRIX_META:{meta_blob}".strip(" |") if ctx else f"MATRIX_META:{meta_blob}"
+            )
+            retry = _post(slim)
+            if retry.ok:
+                saved_row = _first_inserted_row(retry.json())
+                return _finalize_save(
+                    saved_row,
+                    (
+                        f"INTERNET VAULT SYNC CONFIRMED — `{table}` anchored (compact schema fallback) "
+                        f"for {payload.get('ticker', 'UNKNOWN')}."
+                    ),
+                )
+            # Last resort — strip all extended telemetry if scalar columns are also missing.
+            meta = {
+                field: payload.get(field)
+                for field in VAULT_EXTENDED_FIELDS
+                if field in payload
+            }
+            slim = {
+                key: value
+                for key, value in payload.items()
+                if key not in VAULT_EXTENDED_FIELDS
+            }
             ctx = str(slim.get("operator_context", "")).strip()
             meta_blob = json.dumps(meta, default=str)
             slim["operator_context"] = (

@@ -5754,24 +5754,25 @@ def _finalize_room2_processor_vault(proc: dict) -> None:
     else:
         st.session_state.matrix_last_vault_write_ok = False
     if ok and pattern_category == "VALIDATED":
-        margin_pct = structural_move or abs(
-            float(
-                (st.session_state.get("room2_last_velocity") or {}).get(
-                    "session_velocity_pct", 0.0
-                )
-            )
+        net_margin = float(
+            quality.get("net_margin_pct")
+            or quality.get("structural_move_pct")
+            or structural_move
+            or 0.0
         )
         retro = core_quantum.log_strategy_execution_with_fallback(
             ticker=ticker,
             macro_weather_layout=macro_weather_layout,
             execution_strategy=execution_strategy,
             timeframe_resolution=timeframe_resolution,
-            margin_pct=margin_pct,
+            margin_pct=net_margin,
             pattern_category=pattern_category,
             layout_match_pct=match_score,
             structural_move_pct=structural_move,
             entry_coordinate=entry_coord or "",
             exit_coordinate=exit_coord or "",
+            entry_time=start_time,
+            exit_time=end_time,
         )
         st.session_state.room2_alpha_decay_status = retro
         if retro.get("repair_bay_demoted"):
@@ -6920,8 +6921,16 @@ def render_room2_forensic_lab():
                 f"{decay_status.get('floor_pct', 0):.2f}%)."
             )
         else:
+            last = decay_status.get("last_deploy") or {}
+            last_bit = ""
+            if last.get("ticker"):
+                last_bit = (
+                    f"Last deploy **{last.get('ticker')}** "
+                    f"{last.get('entry_time', '')} → {last.get('exit_time', '')} · "
+                    f"net **{float(last.get('net_margin_pct') or 0):.2f}%** · "
+                )
             st.caption(
-                f"📉 Post-mortem monitor: **{decay_status.get('status', 'STABLE')}** · "
+                f"📉 {last_bit}Post-mortem bucket: **{decay_status.get('status', 'STABLE')}** · "
                 f"{decay_status.get('sample_count', 0)}/{decay_status.get('window', 15)} "
                 f"rolling samples · avg margin {decay_status.get('avg_margin_pct', 0):.2f}%."
             )
