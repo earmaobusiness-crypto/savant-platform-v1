@@ -180,14 +180,13 @@ VAULT_MATRIX_BLOB_FIELDS = frozenset({
     "semantic_catalyst_json",
     "day_context_json",
 })
-VAULT_EXTENDED_FIELDS = VAULT_MATRIX_BLOB_FIELDS | frozenset({
+VAULT_SCALAR_PATCH_FIELDS = frozenset({
     "timeframe_resolution",
     "macro_weather_layout",
     "execution_strategy",
     "buffer_context_window",
     "vault_track",
     "data_feed_mode",
-    "deleted_at",
     "layout_match_pct",
     "anomaly_repeat_count",
     "structural_move_pct",
@@ -195,6 +194,9 @@ VAULT_EXTENDED_FIELDS = VAULT_MATRIX_BLOB_FIELDS | frozenset({
     "form4_insider_summary",
     "institutional_block_accumulation",
     "polygon_calls_remaining",
+    "state",
+    "deleted_at",
+    "shelf_expires_at",
 })
 VAULT_STATE_INCUBATION = "incubation"
 VAULT_STATE_PURGATORY = "purgatory"
@@ -5219,6 +5221,40 @@ def tick_cinematic_telemetry_show() -> str:
     return "running"
 
 
+def _patch_vault_scalar_telemetry(
+    *,
+    supabase_url: str,
+    supabase_key: str,
+    table: str,
+    row_id,
+    payload: dict,
+) -> None:
+    """Backfill scalar columns after compact-schema inserts that only wrote MATRIX_META."""
+    if row_id in (None, ""):
+        return
+    patch_body = {
+        key: payload[key]
+        for key in VAULT_SCALAR_PATCH_FIELDS
+        if key in payload and payload[key] is not None
+    }
+    if not patch_body:
+        return
+    try:
+        requests.patch(
+            f"{supabase_url.rstrip('/')}/rest/v1/{table}?id=eq.{row_id}",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            json=patch_body,
+            timeout=12,
+        )
+    except Exception:
+        pass
+
+
 def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
     """Direct secure Supabase REST anchor to live Postgres cloud table."""
     coupling = st.session_state.get("room2_chart_coupling") or {}
@@ -5337,6 +5373,14 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
             route = dict(st.session_state.get("room2_phase2_collective_route") or {})
         except Exception:
             route = {}
+        if saved_row:
+            _patch_vault_scalar_telemetry(
+                supabase_url=supabase_url,
+                supabase_key=supabase_key,
+                table=table,
+                row_id=saved_row.get("id"),
+                payload=payload,
+            )
         if saved_row and route:
             _, post_note = vault_bridge.apply_phase2_post_save(payload, route)
             if post_note:
@@ -5368,32 +5412,6 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
                 key: value
                 for key, value in payload.items()
                 if key not in VAULT_MATRIX_BLOB_FIELDS
-            }
-            ctx = str(slim.get("operator_context", "")).strip()
-            meta_blob = json.dumps(meta, default=str)
-            slim["operator_context"] = (
-                f"{ctx} | MATRIX_META:{meta_blob}".strip(" |") if ctx else f"MATRIX_META:{meta_blob}"
-            )
-            retry = _post(slim)
-            if retry.ok:
-                saved_row = _first_inserted_row(retry.json())
-                return _finalize_save(
-                    saved_row,
-                    (
-                        f"INTERNET VAULT SYNC CONFIRMED — `{table}` anchored (compact schema fallback) "
-                        f"for {payload.get('ticker', 'UNKNOWN')}."
-                    ),
-                )
-            # Last resort — strip all extended telemetry if scalar columns are also missing.
-            meta = {
-                field: payload.get(field)
-                for field in VAULT_EXTENDED_FIELDS
-                if field in payload
-            }
-            slim = {
-                key: value
-                for key, value in payload.items()
-                if key not in VAULT_EXTENDED_FIELDS
             }
             ctx = str(slim.get("operator_context", "")).strip()
             meta_blob = json.dumps(meta, default=str)
