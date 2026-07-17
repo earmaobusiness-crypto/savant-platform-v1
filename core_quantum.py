@@ -139,6 +139,17 @@ TIMEFRAME_MARGIN_FLOORS = {
     "5-Minute": 3.0,
     "15-Minute": 5.0,
 }
+# Versioned labeling rubric — stamp on every mint/skip so month-1 "good" stays comparable.
+ROOM2_LABEL_RUBRIC_VERSION = "v1"
+ROOM2_LABEL_RUBRIC_BULLETS = (
+    "Win = clear directional impulse inside operator Start→End with fillable tape.",
+    "Skip = looked similar but not archived (late, thin, fake spike, wrong TF, or no edge).",
+    "Net margin after friction must clear the timeframe floor (1m 1% / 5m 3% / 15m 5%).",
+    "No lookahead past Exit; timeframe bin stays isolated (1m≠5m≠15m).",
+    "Corrections append only — never overwrite a prior vault judgment.",
+)
+PATTERN_CATEGORY_SKIP_SIGHTING = "SKIP_SIGHTING"
+NASDAQ_TRADE_HALTS_RSS = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"
 TIMEFRAME_BAR_MINUTES = {
     "1-Minute": 1,
     "5-Minute": 5,
@@ -197,6 +208,12 @@ VAULT_SCALAR_PATCH_FIELDS = frozenset({
     "state",
     "deleted_at",
     "shelf_expires_at",
+    "rubric_version",
+    "regime_tag",
+    "avg_dollar_volume_per_bar",
+    "min_dollar_volume_per_bar",
+    "halt_check_status",
+    "halt_detected",
 })
 VAULT_STATE_INCUBATION = "incubation"
 VAULT_STATE_PURGATORY = "purgatory"
@@ -6023,6 +6040,275 @@ def evaluate_session_data_quality(
     }
 
 
+def _operator_window_dollar_volume_stats(
+    data_stream,
+    start_dt: datetime.datetime | None,
+    end_dt: datetime.datetime | None,
+) -> dict:
+    """Dollar volume (price × volume) inside the operator window — fillability proxy."""
+    empty = {
+        "avg_dollar_volume_per_bar": 0.0,
+        "min_dollar_volume_per_bar": 0.0,
+        "total_dollar_volume": 0.0,
+        "bars_used": 0,
+    }
+    frame = _ensure_dataframe(data_stream)
+    if frame is None or start_dt is None or end_dt is None or end_dt <= start_dt:
+        return empty
+    try:
+        window = frame[(frame.index >= start_dt) & (frame.index <= end_dt)]
+        if not isinstance(window, pd.DataFrame) or window.empty:
+            return empty
+        if "Close" not in window.columns or "Volume" not in window.columns:
+            return empty
+        closes = window["Close"].astype(float).fillna(0.0)
+        vols = window["Volume"].astype(float).fillna(0.0)
+        dollar = closes * vols
+        if dollar.empty:
+            return empty
+        return {
+            "avg_dollar_volume_per_bar": round(float(dollar.mean()), 2),
+            "min_dollar_volume_per_bar": round(float(dollar.min()), 2),
+            "total_dollar_volume": round(float(dollar.sum()), 2),
+            "bars_used": int(len(dollar)),
+        }
+    except Exception:
+        return empty
+
+
+def check_trading_halt_overlap(
+    ticker: str,
+    *,
+    start_date,
+    start_time: str = "",
+    end_date=None,
+    end_time: str = "",
+) -> dict:
+    """
+    Best-effort Nasdaq Trade Halts RSS cross-check for the operator session date.
+    If feed is down, do not block mint — stamp unavailable and continue.
+    """
+    ticker_clean = str(ticker or "").strip().upper()
+    session_day = _session_date_value(start_date) or _session_date_value(end_date) or ""
+    result = {
+        "halt_check_status": "unavailable",
+        "halt_detected": False,
+        "halt_events": [],
+        "session_date": session_day,
+        "ticker": ticker_clean,
+    }
+    if not ticker_clean:
+        return result
+    try:
+        resp = requests.get(
+            NASDAQ_TRADE_HALTS_RSS,
+            timeout=10,
+            headers={**SEC_HEADERS, "Accept": "application/rss+xml, application/xml, text/xml, */*"},
+        )
+        if not resp.ok:
+            result["halt_check_status"] = f"http_{resp.status_code}"
+            return result
+        root = ElementTree.fromstring(resp.content)
+        hits: list[dict] = []
+        for item in root.findall(".//item"):
+            title = (item.findtext("title") or "").strip()
+            desc = (item.findtext("description") or "").strip()
+            pub = (item.findtext("pubDate") or "").strip()
+            blob = f"{title} {desc}".upper()
+            if ticker_clean not in blob.split() and f"({ticker_clean})" not in blob and f" {ticker_clean} " not in f" {blob} ":
+                # loose token match — require ticker as standalone-ish token
+                if not re.search(rf"(?:^|[^A-Z]){re.escape(ticker_clean)}(?:[^A-Z]|$)", blob):
+                    continue
+            if session_day:
+                # Keep events that mention the session day or have no clear date conflict.
+                day_token = session_day.replace("-", "")
+                compact = re.sub(r"[^0-9]", "", pub + " " + desc + " " + title)
+                if day_token and day_token[4:] and day_token[4:] not in compact and session_day not in (pub + desc + title):
+                    # still keep if pubDate parses to same calendar day
+                    keep = False
+                    try:
+                        # RFC-ish pubDate
+                        from email.utils import parsedate_to_datetime
+
+                        pdt = parsedate_to_datetime(pub)
+                        if pdt is not None and pdt.date().isoformat() == session_day:
+                            keep = True
+                    except Exception:
+                        keep = True  # if ambiguous, include for operator safety
+                    if not keep:
+                        continue
+            hits.append({"title": title[:180], "pubDate": pub[:80]})
+            if len(hits) >= 5:
+                break
+        result["halt_check_status"] = "ok"
+        result["halt_detected"] = bool(hits)
+        result["halt_events"] = hits
+        return result
+    except Exception as exc:
+        result["halt_check_status"] = f"error:{str(exc)[:80]}"
+        return result
+
+
+def append_vault_correction_event(
+    *,
+    ticker: str,
+    correction_text: str,
+) -> tuple[bool, str]:
+    """
+    Append-only judgment correction on the latest vault row for ticker.
+    Never overwrites structural fields — only extends operator_context.
+    """
+    ticker_clean = str(ticker or "").strip().upper()
+    note = re.sub(r"\s+", " ", str(correction_text or "").strip())
+    if not ticker_clean or not note:
+        return False, "Need ticker + correction text."
+    cfg = vault_bridge.supabase_settings()
+    if not cfg.get("ready"):
+        return False, "Supabase not configured."
+    try:
+        resp = requests.get(
+            f"{cfg['url'].rstrip('/')}/rest/v1/{cfg['table']}"
+            f"?ticker=eq.{urllib.parse.quote(ticker_clean)}"
+            f"&select=id,operator_context,timestamp"
+            f"&order=timestamp.desc&limit=1",
+            headers={
+                "apikey": cfg["key"],
+                "Authorization": f"Bearer {cfg['key']}",
+            },
+            timeout=12,
+        )
+        if not resp.ok or not resp.json():
+            return False, f"No vault row found for {ticker_clean}."
+        row = resp.json()[0]
+        row_id = row.get("id")
+        if row_id in (None, ""):
+            return False, "Latest row missing id — cannot append."
+        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        event = f"CORRECTION|{stamp}|RUBRIC:{ROOM2_LABEL_RUBRIC_VERSION}|{note}"
+        prior = str(row.get("operator_context") or "").strip()
+        updated = f"{prior} | {event}".strip(" |") if prior else event
+        patch = requests.patch(
+            f"{cfg['url'].rstrip('/')}/rest/v1/{cfg['table']}?id=eq.{row_id}",
+            headers={
+                "apikey": cfg["key"],
+                "Authorization": f"Bearer {cfg['key']}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            json={"operator_context": updated},
+            timeout=12,
+        )
+        if not patch.ok:
+            return False, f"Append failed: {patch.status_code}"
+        return True, f"Appended correction to {ticker_clean} row id={row_id}."
+    except Exception as exc:
+        return False, f"Append failed: {exc}"
+
+
+def log_room2_skip_sighting(
+    *,
+    ticker: str,
+    reason: str,
+    session_date=None,
+    start_time: str = "",
+    end_time: str = "",
+    timeframe_resolution: str = "1-Minute",
+) -> tuple[bool, str]:
+    """
+    Lightweight skip denominator row — not a full forensic mint.
+    Stores ticker + reason + rubric version so future match rates have a real skip set.
+    """
+    ticker_clean = str(ticker or "").strip().upper()
+    reason_clean = re.sub(r"\s+", " ", str(reason or "").strip())
+    if not ticker_clean or not reason_clean:
+        return False, "Need ticker + one-line skip reason."
+    day = _session_date_value(session_date) or datetime.date.today().isoformat()
+    start_label = str(start_time or "").strip() or "N/A"
+    end_label = str(end_time or "").strip() or "N/A"
+    notes = (
+        f"SKIP_SIGHTING | RUBRIC_VERSION:{ROOM2_LABEL_RUBRIC_VERSION} | "
+        f"REASON:{reason_clean} | DAY:{day} | WINDOW:{start_label}->{end_label} | "
+        f"TF:{timeframe_resolution}"
+    )
+    body = {
+        "ticker": ticker_clean,
+        "pattern_category": PATTERN_CATEGORY_SKIP_SIGHTING,
+        "pattern_type": PATTERN_CATEGORY_SKIP_SIGHTING,
+        "entry_time": f"{day} {start_label}".strip(),
+        "exit_time": f"{day} {end_label}".strip(),
+        "operator_context": notes,
+        "quantum_report": f"SKIP_SIGHTING|{ticker_clean}|{reason_clean[:120]}",
+        "bar_count": 0,
+        "source_room": "forensic_pattern_lab",
+        "state": "skip_sighting",
+        "vault_track": "track_skip_sighting",
+        "timeframe_resolution": timeframe_resolution,
+        "structural_move_pct": 0.0,
+        "layout_match_pct": 0,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    # Local durable mirror even if cloud write fails.
+    local_key = "room2_skip_sightings"
+    local = list(st.session_state.get(local_key) or [])
+    local.insert(0, body)
+    st.session_state[local_key] = local[:200]
+
+    cfg = vault_bridge.supabase_settings()
+    if not cfg.get("ready"):
+        return True, f"Skip logged locally for {ticker_clean} (Supabase offline)."
+    try:
+        resp = requests.post(
+            f"{cfg['url'].rstrip('/')}/rest/v1/{cfg['table']}",
+            headers={
+                "apikey": cfg["key"],
+                "Authorization": f"Bearer {cfg['key']}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            json=[body],
+            timeout=12,
+        )
+        if resp.ok:
+            return True, f"Skip sighting saved for {ticker_clean}."
+        # Compact fallback — strip extended fields
+        slim = {
+            k: body[k]
+            for k in (
+                "ticker",
+                "pattern_category",
+                "pattern_type",
+                "entry_time",
+                "exit_time",
+                "operator_context",
+                "quantum_report",
+                "bar_count",
+                "source_room",
+                "state",
+                "timestamp",
+            )
+            if k in body
+        }
+        retry = requests.post(
+            f"{cfg['url'].rstrip('/')}/rest/v1/{cfg['table']}",
+            headers={
+                "apikey": cfg["key"],
+                "Authorization": f"Bearer {cfg['key']}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            json=[slim],
+            timeout=12,
+        )
+        if retry.ok:
+            return True, f"Skip sighting saved for {ticker_clean} (compact)."
+        return True, (
+            f"Skip logged locally for {ticker_clean} "
+            f"(cloud write {resp.status_code})."
+        )
+    except Exception as exc:
+        return True, f"Skip logged locally for {ticker_clean} ({exc})."
+
+
 def build_day_context_envelope(
     *,
     ticker: str,
@@ -6059,24 +6345,49 @@ def build_day_context_envelope(
 
     vix_vel = fetch_symbol_velocity_series("^VIX")
     vix_session = round(sum(vix_vel[-12:]), 4) if vix_vel else 0.0
+    iwm_vel = fetch_symbol_velocity_series("IWM")
+    iwm_session = round(sum(iwm_vel[-12:]), 4) if iwm_vel else 0.0
+
+    start_dt = _parse_session_datetime(start_date, start_time)
+    end_dt = _parse_session_datetime(end_date, end_time)
+    dollar_stats = _operator_window_dollar_volume_stats(data_stream, start_dt, end_dt)
+    halt_info = check_trading_halt_overlap(
+        ticker_clean,
+        start_date=start_date,
+        start_time=start_time,
+        end_date=end_date,
+        end_time=end_time,
+    )
 
     envelope = {
         "ticker": ticker_clean,
         "session_date": _session_date_value(start_date),
         "timeframe_resolution": timeframe_resolution,
+        "rubric_version": ROOM2_LABEL_RUBRIC_VERSION,
         "weather_mood": weather.get("weather_mood"),
         "vibe_profile": weather.get("vibe_profile"),
         "spy_session_velocity_pct": weather.get("spy_session_velocity_pct"),
+        "iwm_session_velocity_pct": iwm_session,
         "vix_session_velocity_pct": vix_session,
+        "regime_tag": (
+            f"IWM:{iwm_session:+.2f}%|SPY:{float(weather.get('spy_session_velocity_pct') or 0):+.2f}%|"
+            f"VIX:{vix_session:+.2f}%|{weather.get('weather_mood') or 'NA'}"
+        ),
         "macro_correlations": weather.get("macro_correlations") or {},
         "sector_rhymes": sector_rhymes,
         "session_gap_pct": session_quality.get("session_gap_pct", 0.0),
         "bar_density": session_quality.get("bar_density", 0.0),
         "avg_volume_per_bar": session_quality.get("avg_volume_per_bar", 0.0),
+        "avg_dollar_volume_per_bar": dollar_stats.get("avg_dollar_volume_per_bar", 0.0),
+        "min_dollar_volume_per_bar": dollar_stats.get("min_dollar_volume_per_bar", 0.0),
+        "total_dollar_volume": dollar_stats.get("total_dollar_volume", 0.0),
+        "halt_check_status": halt_info.get("halt_check_status"),
+        "halt_detected": bool(halt_info.get("halt_detected")),
         "session_quality_passed": bool(session_quality.get("passed")),
         "captured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     st.session_state.room2_day_context = envelope
+    st.session_state.room2_halt_check = halt_info
     return envelope
 
 
@@ -6993,6 +7304,12 @@ def build_vault_payload(
 ) -> dict:
     """Package Room 2 deck parameters for Internet Vault streaming."""
     notes = operator_notes.strip()
+    if f"RUBRIC_VERSION:{ROOM2_LABEL_RUBRIC_VERSION}" not in notes:
+        notes = (
+            f"{notes} | RUBRIC_VERSION:{ROOM2_LABEL_RUBRIC_VERSION}".strip(" |")
+            if notes
+            else f"RUBRIC_VERSION:{ROOM2_LABEL_RUBRIC_VERSION}"
+        )
     matrix_blob = str(text_matrix_string or st.session_state.get("room2_text_matrix_string", "")).strip()
     if matrix_blob and "TEXT_MATRIX|" not in notes:
         notes = f"{notes} | {matrix_blob}".strip(" |") if notes else matrix_blob
@@ -7004,6 +7321,13 @@ def build_vault_payload(
         notes = f"{notes} | DAY_CONTEXT:{day_blob}".strip(" |") if notes else f"DAY_CONTEXT:{day_blob}"
     if strategy_trust_tier and "TRUST_TIER:" not in notes:
         notes = f"{notes} | TRUST_TIER:{strategy_trust_tier}".strip(" |")
+    halt_info = st.session_state.get("room2_halt_check") or {}
+    if halt_info and "HALT_CHECK:" not in notes:
+        halt_stamp = (
+            f"HALT_CHECK:{halt_info.get('halt_check_status')}"
+            f"|DETECTED:{str(bool(halt_info.get('halt_detected'))).upper()}"
+        )
+        notes = f"{notes} | {halt_stamp}".strip(" |")
 
     audit = st.session_state.get("room2_deep_research_audit") or {}
     dragnet_blob = forensic_dragnet_blob or audit.get("forensic_dragnet_blob", "")
@@ -7014,6 +7338,12 @@ def build_vault_payload(
     sem_json = semantic_catalyst_json or json.dumps(
         audit.get("semantic_catalyst", {}), default=str
     )
+    day_ctx = st.session_state.get("room2_day_context") or {}
+    try:
+        if day_blob and day_blob != "{}":
+            day_ctx = {**day_ctx, **(json.loads(day_blob) if isinstance(day_blob, str) else {})}
+    except Exception:
+        pass
     body = {
         "ticker": ticker.upper(),
         "pattern_category": (pattern_category or "UNCLASSIFIED").strip().upper(),
@@ -7038,6 +7368,12 @@ def build_vault_payload(
             st.session_state.get("forensic_form4_tracker", {}).get("form4_summary", "")
         ),
         "source_room": "forensic_pattern_lab",
+        "rubric_version": str(day_ctx.get("rubric_version") or ROOM2_LABEL_RUBRIC_VERSION),
+        "regime_tag": str(day_ctx.get("regime_tag") or ""),
+        "avg_dollar_volume_per_bar": float(day_ctx.get("avg_dollar_volume_per_bar") or 0.0),
+        "min_dollar_volume_per_bar": float(day_ctx.get("min_dollar_volume_per_bar") or 0.0),
+        "halt_check_status": str(day_ctx.get("halt_check_status") or "unavailable"),
+        "halt_detected": bool(day_ctx.get("halt_detected")),
         "state": vault_state,
         "deleted_at": None,
         "layout_match_pct": layout_match_pct,
