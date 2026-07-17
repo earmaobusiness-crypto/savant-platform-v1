@@ -203,8 +203,6 @@ st.markdown("""
         [data-testid="stSidebar"] {
             background-color: #0B0B0B !important;
             border-right: 1px solid #2A2A2A !important;
-            visibility: visible !important;
-            display: block !important;
         }
         [data-testid="stSidebarNav"] { display: none !important; }
         [data-testid="stSidebarCollapseButton"] {
@@ -216,15 +214,6 @@ st.markdown("""
         [data-testid="stSidebarResizer"] {
             display: none !important;
             pointer-events: none !important;
-        }
-        section[data-testid="stSidebar"],
-        section[data-testid="stSidebar"][aria-expanded="false"],
-        section[data-testid="stSidebar"][aria-expanded="true"] {
-            transform: translateX(0) !important;
-            margin-left: 0 !important;
-            opacity: 1 !important;
-            visibility: visible !important;
-            display: block !important;
         }
         [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
             color: #AAAAAA !important;
@@ -7002,49 +6991,69 @@ def render_room2_forensic_lab():
 
 def render_terminal_nav() -> str:
     collapsed = bool(st.session_state.sidebar_collapsed)
-    sidebar_width = "148px" if collapsed else "300px"
-    st.markdown(
-        f"""
-        <style>
-            section[data-testid="stSidebar"] > div {{
-                width: {sidebar_width} !important;
-                min-width: {sidebar_width} !important;
-                max-width: {sidebar_width} !important;
-            }}
+    if collapsed:
+        st.markdown(
+            """
+            <style>
             section[data-testid="stSidebar"],
             section[data-testid="stSidebar"][aria-expanded="false"],
-            section[data-testid="stSidebar"][aria-expanded="true"] {{
-                min-width: {sidebar_width} !important;
-                max-width: {sidebar_width} !important;
-                width: {sidebar_width} !important;
+            section[data-testid="stSidebar"][aria-expanded="true"] {
+                width: 0 !important;
+                min-width: 0 !important;
+                max-width: 0 !important;
+                transform: translateX(-100%) !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
+                overflow: hidden !important;
+                border: none !important;
+            }
+            section[data-testid="stSidebar"] > div,
+            [data-testid="stSidebarUserContent"] {
+                width: 0 !important;
+                min-width: 0 !important;
+                max-width: 0 !important;
+                overflow: hidden !important;
+            }
+            section[data-testid="stMain"] > div {
+                max-width: 100% !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <style>
+            section[data-testid="stSidebar"],
+            section[data-testid="stSidebar"][aria-expanded="false"],
+            section[data-testid="stSidebar"][aria-expanded="true"] {
+                width: 300px !important;
+                min-width: 300px !important;
+                max-width: 300px !important;
                 transform: translateX(0) !important;
                 margin-left: 0 !important;
+                opacity: 1 !important;
                 visibility: visible !important;
                 display: block !important;
-            }}
-            [data-testid="stSidebarUserContent"] {{
-                min-width: {sidebar_width} !important;
-            }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+                pointer-events: auto !important;
+            }
+            section[data-testid="stSidebar"] > div {
+                width: 300px !important;
+                min-width: 300px !important;
+                max-width: 300px !important;
+            }
+            [data-testid="stSidebarUserContent"] {
+                min-width: 280px !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
     with st.sidebar:
-        if collapsed:
-            if st.button("▶ Expand", key="sidebar_expand_toggle", use_container_width=True):
-                st.session_state.sidebar_collapsed = False
-                st.rerun()
-            short_pick = st.radio(
-                "HUB:",
-                [ROOM1_SHORT, ROOM2_SHORT],
-                index=0 if st.session_state.terminal_hub == ROOM1_LABEL else 1,
-                label_visibility="collapsed",
-                key="terminal_hub_collapsed",
-            )
-            st.session_state.terminal_hub = ROOM_SHORT_MAP[short_pick]
-        else:
-            if st.button("◀ Compact", key="sidebar_collapse_toggle", use_container_width=True):
+        if not collapsed:
+            if st.button("◀ Hide menu", key="sidebar_collapse_toggle", use_container_width=True):
                 st.session_state.sidebar_collapsed = True
                 st.rerun()
             st.markdown(
@@ -7064,28 +7073,30 @@ def render_terminal_nav() -> str:
 
 
 def _render_hub_recovery_strip() -> None:
-    """Always-reachable Room 1/2 switch — safety net if sidebar state gets stuck."""
-    c1, c2, _ = st.columns([1, 1, 8])
+    """Slim top bar only while menu is hidden — switch rooms without blocking inputs."""
+    if not st.session_state.sidebar_collapsed:
+        return
+    c1, c2, c3, _ = st.columns([1, 1, 1, 7])
     with c1:
-        active = st.session_state.terminal_hub == ROOM1_LABEL
         if st.button(
             "Room 1",
             key="hub_recovery_room1",
             use_container_width=True,
-            type="primary" if active else "secondary",
+            type="primary" if st.session_state.terminal_hub == ROOM1_LABEL else "secondary",
         ):
             st.session_state.terminal_hub = ROOM1_LABEL
-            st.session_state.sidebar_collapsed = False
             st.rerun()
     with c2:
-        active = st.session_state.terminal_hub == ROOM2_LABEL
         if st.button(
             "Room 2",
             key="hub_recovery_room2",
             use_container_width=True,
-            type="primary" if active else "secondary",
+            type="primary" if st.session_state.terminal_hub == ROOM2_LABEL else "secondary",
         ):
             st.session_state.terminal_hub = ROOM2_LABEL
+            st.rerun()
+    with c3:
+        if st.button("▶ Menu", key="hub_recovery_expand", use_container_width=True):
             st.session_state.sidebar_collapsed = False
             st.rerun()
 
