@@ -207,11 +207,24 @@ st.markdown("""
             display: block !important;
         }
         [data-testid="stSidebarNav"] { display: none !important; }
-        [data-testid="stSidebarCollapseButton"],
-        [data-testid="collapsedControl"] {
+        [data-testid="stSidebarCollapseButton"] {
             display: none !important;
             visibility: hidden !important;
             pointer-events: none !important;
+        }
+        [data-testid="stSidebarResizeHandle"],
+        [data-testid="stSidebarResizer"] {
+            display: none !important;
+            pointer-events: none !important;
+        }
+        section[data-testid="stSidebar"],
+        section[data-testid="stSidebar"][aria-expanded="false"],
+        section[data-testid="stSidebar"][aria-expanded="true"] {
+            transform: translateX(0) !important;
+            margin-left: 0 !important;
+            opacity: 1 !important;
+            visibility: visible !important;
+            display: block !important;
         }
         [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
             color: #AAAAAA !important;
@@ -6988,16 +7001,29 @@ def render_room2_forensic_lab():
 
 
 def render_terminal_nav() -> str:
-    sidebar_width = "108px" if st.session_state.sidebar_collapsed else "340px"
+    collapsed = bool(st.session_state.sidebar_collapsed)
+    sidebar_width = "148px" if collapsed else "300px"
     st.markdown(
         f"""
         <style>
             section[data-testid="stSidebar"] > div {{
                 width: {sidebar_width} !important;
-            }}
-            [data-testid="stSidebar"] {{
                 min-width: {sidebar_width} !important;
                 max-width: {sidebar_width} !important;
+            }}
+            section[data-testid="stSidebar"],
+            section[data-testid="stSidebar"][aria-expanded="false"],
+            section[data-testid="stSidebar"][aria-expanded="true"] {{
+                min-width: {sidebar_width} !important;
+                max-width: {sidebar_width} !important;
+                width: {sidebar_width} !important;
+                transform: translateX(0) !important;
+                margin-left: 0 !important;
+                visibility: visible !important;
+                display: block !important;
+            }}
+            [data-testid="stSidebarUserContent"] {{
+                min-width: {sidebar_width} !important;
             }}
         </style>
         """,
@@ -7005,8 +7031,8 @@ def render_terminal_nav() -> str:
     )
 
     with st.sidebar:
-        if st.session_state.sidebar_collapsed:
-            if st.button("▶ Expand", key="sidebar_collapse_toggle", use_container_width=True):
+        if collapsed:
+            if st.button("▶ Expand", key="sidebar_expand_toggle", use_container_width=True):
                 st.session_state.sidebar_collapsed = False
                 st.rerun()
             short_pick = st.radio(
@@ -7018,7 +7044,7 @@ def render_terminal_nav() -> str:
             )
             st.session_state.terminal_hub = ROOM_SHORT_MAP[short_pick]
         else:
-            if st.button("◀ Collapse", key="sidebar_collapse_toggle", use_container_width=True):
+            if st.button("◀ Compact", key="sidebar_collapse_toggle", use_container_width=True):
                 st.session_state.sidebar_collapsed = True
                 st.rerun()
             st.markdown(
@@ -7037,11 +7063,39 @@ def render_terminal_nav() -> str:
     return st.session_state.terminal_hub
 
 
+def _render_hub_recovery_strip() -> None:
+    """Always-reachable Room 1/2 switch — safety net if sidebar state gets stuck."""
+    c1, c2, _ = st.columns([1, 1, 8])
+    with c1:
+        active = st.session_state.terminal_hub == ROOM1_LABEL
+        if st.button(
+            "Room 1",
+            key="hub_recovery_room1",
+            use_container_width=True,
+            type="primary" if active else "secondary",
+        ):
+            st.session_state.terminal_hub = ROOM1_LABEL
+            st.session_state.sidebar_collapsed = False
+            st.rerun()
+    with c2:
+        active = st.session_state.terminal_hub == ROOM2_LABEL
+        if st.button(
+            "Room 2",
+            key="hub_recovery_room2",
+            use_container_width=True,
+            type="primary" if active else "secondary",
+        ):
+            st.session_state.terminal_hub = ROOM2_LABEL
+            st.session_state.sidebar_collapsed = False
+            st.rerun()
+
+
 if st.session_state.pop("_pending_chat_submit", False):
     with st.spinner("Savant processing live data layers..."):
         process_chat_submission()
 
 terminal_hub = render_terminal_nav()
+_render_hub_recovery_strip()
 
 if terminal_hub == ROOM1_LABEL:
     _render_room1_forensic_front_desk()
