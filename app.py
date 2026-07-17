@@ -163,12 +163,19 @@ ROOM1_SYSTEM_PROMPT = (
     "Enforce this exact un-sugarcoated 6-bullet quantitative deep-dive in order. FORMATTING IS MANDATORY:\n"
     "• Insert a full blank line (double line break) between every bullet so each point starts on a fresh isolated line — never a dense wall of text.\n"
     "• Under each bullet, write significantly shorter, sharper, punchier copy — crisp focused sentences with high-density signals only.\n"
-    "• SAVANT TREND DETERMINATION: State definitively ROCKETING UP, CRASHING DOWN, or SIDELINED IN CONSOLIDATION.\n\n"
+    "• SAVANT TREND DETERMINATION: State the CURRENT tape regime — ROCKETING UP, CRASHING DOWN, "
+    "SIDELINED IN CONSOLIDATION, or LATE-SESSION CONSOLIDATION. "
+    "If morning spiked then afternoon locked flat, say LATE-SESSION CONSOLIDATION (not ROCKETING UP). "
+    "Name the live state; do not narrate the whole day unless needed.\n\n"
     "• THE MACRO STORIES & DRIVERS: Single catalyst driving the active directional trend.\n\n"
-    "• MAIN BUSINESS OF THE COMPANY: Tight snapshot of technology layers, software frameworks, or products.\n\n"
-    "• SOCIAL SENTIMENT MATRIX: Retail psychology, Stocktwits momentum, community volume velocity.\n\n"
-    "• TOMORROW'S SESSION EXPECTATION: Data-backed next-session projection.\n\n"
-    "• CRITICAL TRADER BULLET NOTES: Volume spikes, float traps, squeeze signals, anomalies.\n\n"
+    "• MAIN BUSINESS OF THE COMPANY: Tight snapshot of what the company actually does. "
+    "Use CO_SECTOR / CO_INDUSTRY / BIZ from the payload when present — never invent a wrong industry.\n\n"
+    "• SOCIAL SENTIMENT MATRIX: Retail psychology, Stocktwits momentum, community volume velocity. "
+    "If a morning surge later holds flat near the highs instead of dumping, call that accumulation — not vague Mixed.\n\n"
+    "• TOMORROW'S SESSION EXPECTATION: Data-backed next-session projection with concrete $ support and $ resistance "
+    "(use the afternoon consolidation box or day range when available).\n\n"
+    "• CRITICAL TRADER BULLET NOTES: Volume spikes, float traps, squeeze signals, anomalies — "
+    "plus practical open risk when relevant (tight box break, low-float slippage).\n\n"
     "After all six bullets, insert one full blank line, then ONE highly detailed comprehensive executive summary paragraph "
     "at the absolute bottom. No bullets or headers after the six bullets except that final paragraph.\n\n"
 
@@ -2319,15 +2326,61 @@ def _compute_volatility_engine(
 def _build_data_payload_string(
     ticker: str, name: str, price: float, pct: float, vol: str, vw: str,
     news: list[str], sector_ctx: str, vol_ctx: str, sec_ctx: str, corr_ctx: str,
+    *,
+    co_sector: str = "",
+    co_industry: str = "",
+    biz_summary: str = "",
+    session_regime: str = "",
+    day_high: float | None = None,
+    day_low: float | None = None,
 ) -> str:
     wire = "||".join(_news_wire_plain_lines(news)[:2]) if news else "NONE"
     inst = "TRUE" if st.session_state.institutional_accumulation_detected else "FALSE"
+    biz = re.sub(r"\s+", " ", str(biz_summary or "").strip())[:220]
+    sector = str(co_sector or "").strip() or "NA"
+    industry = str(co_industry or "").strip() or "NA"
+    regime = str(session_regime or "").strip() or "NA"
+    hi = f"{float(day_high):.2f}" if day_high else "NA"
+    lo = f"{float(day_low):.2f}" if day_low else "NA"
     payload = (
         f"12L|TK:{ticker}|CO:{name}|P:{price:.2f}|CHG:{pct:+.2f}%|V:{vol}|VW:{vw}|"
+        f"DAY_HI:{hi}|DAY_LO:{lo}|SESSION_REGIME:{regime}|"
+        f"CO_SECTOR:{sector}|CO_INDUSTRY:{industry}|BIZ:{biz or 'NA'}|"
         f"WIRE:{wire}|{sector_ctx}|{corr_ctx}|{vol_ctx}|{sec_ctx}|INST_ACCUM_FLAG:{inst}"
     )
     st.session_state.data_payload_string = payload
     return payload
+
+
+def _room1_session_regime_hint(ticker: str, price: float, day_high: float, day_low: float) -> str:
+    """Light intraday shape tag for Rule A trend — does not change response format."""
+    try:
+        hist = yf.Ticker(ticker).history(period="1d", interval="5m")
+        if hist is None or len(hist) < 8:
+            return "NA"
+        closes = [float(x) for x in hist["Close"].dropna().tolist()]
+        highs = [float(x) for x in hist["High"].dropna().tolist()]
+        if len(closes) < 8:
+            return "NA"
+        n = len(closes)
+        am_high = max(highs[: max(3, n // 3)])
+        pm = closes[n // 2 :]
+        pm_hi = max(pm)
+        pm_lo = min(pm)
+        box = (pm_hi - pm_lo) / pm_lo * 100.0 if pm_lo else 0.0
+        giveback = (am_high - price) / am_high * 100.0 if am_high else 0.0
+        day_span = (day_high - day_low) / day_low * 100.0 if day_low else 0.0
+        if day_span >= 12.0 and box <= 8.0 and giveback >= 5.0:
+            return "LATE_SESSION_CONSOLIDATION"
+        if price >= am_high * 0.97 and day_span >= 8.0:
+            return "ROCKETING_UP"
+        if giveback >= 15.0 and price <= (day_high + day_low) / 2:
+            return "CRASHING_DOWN"
+        if box <= 5.0:
+            return "SIDELINED_IN_CONSOLIDATION"
+    except Exception:
+        pass
+    return "NA"
 
 
 def _hydrate_room1_tape_snapshot(ticker: str) -> dict:
@@ -2416,9 +2469,19 @@ def get_live_tape_data(ticker):
         st.session_state.institutional_accumulation_detected = inst_flag
         sec_ctx = _fetch_sec_filings(ticker)
         _fetch_big_dog_social_wire(ticker)
+        co_sector = str(info.get("sector") or "").strip()
+        co_industry = str(info.get("industry") or "").strip()
+        biz_summary = str(info.get("longBusinessSummary") or "").strip()
+        session_regime = _room1_session_regime_hint(ticker, price, high, low)
         _build_data_payload_string(
             ticker, name, price, pct, vol, vw_str,
             st.session_state.active_news_wire, sector_ctx, vol_ctx, sec_ctx, corr_ctx,
+            co_sector=co_sector,
+            co_industry=co_industry,
+            biz_summary=biz_summary,
+            session_regime=session_regime,
+            day_high=high,
+            day_low=low,
         )
         return price, pct, vol, vw_str, name
     except Exception:
