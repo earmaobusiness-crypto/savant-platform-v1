@@ -6989,54 +6989,6 @@ def render_room2_forensic_lab():
             if good_deploy and not commit_throttle_active:
                 _handle_room2_deck_submit()
 
-            st.caption(
-                f"Label rubric **{core_quantum.ROOM2_LABEL_RUBRIC_VERSION}** — "
-                "wins mint above; skips / corrections are append-only (never overwrite)."
-            )
-            with st.form("r2_skip_sighting_form", clear_on_submit=True):
-                st.markdown("**👀 Skip sighting** (saw it — not a full archive)")
-                st.text_input("Skip ticker", key="r2_skip_ticker", placeholder="e.g. HAO")
-                st.text_input(
-                    "One-line reason",
-                    key="r2_skip_reason",
-                    placeholder="late chase / thin tape / fake spike / wrong TF...",
-                )
-                skip_go = st.form_submit_button("Log skip (no full mint)", use_container_width=True)
-            if skip_go:
-                ok_skip, skip_msg = core_quantum.log_room2_skip_sighting(
-                    ticker=str(st.session_state.get("r2_skip_ticker") or ""),
-                    reason=str(st.session_state.get("r2_skip_reason") or ""),
-                    session_date=st.session_state.get("r2_good_start_date"),
-                    start_time=str(st.session_state.get("r2_good_start_time") or ""),
-                    end_time=str(st.session_state.get("r2_good_end_time") or ""),
-                    timeframe_resolution=str(
-                        st.session_state.get("r2_timeframe_mode") or "1-Minute"
-                    ),
-                )
-                if ok_skip:
-                    st.success(skip_msg)
-                else:
-                    st.error(skip_msg)
-
-            with st.form("r2_correction_form", clear_on_submit=True):
-                st.markdown("**✏️ Append correction** (does not overwrite prior judgment)")
-                st.text_input("Ticker to correct", key="r2_correction_ticker")
-                st.text_input(
-                    "Correction note",
-                    key="r2_correction_note",
-                    placeholder="Was actually a skip — late entry / halt wick...",
-                )
-                corr_go = st.form_submit_button("Append correction to latest vault row", use_container_width=True)
-            if corr_go:
-                ok_corr, corr_msg = core_quantum.append_vault_correction_event(
-                    ticker=str(st.session_state.get("r2_correction_ticker") or ""),
-                    correction_text=str(st.session_state.get("r2_correction_note") or ""),
-                )
-                if ok_corr:
-                    st.success(corr_msg)
-                else:
-                    st.error(corr_msg)
-
     with col_right:
         _render_matrix_window1_panel(processor_status=processor_status)
         _render_room2_proxy_telemetry_banners()

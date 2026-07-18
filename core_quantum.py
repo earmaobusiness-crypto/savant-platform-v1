@@ -143,12 +143,11 @@ TIMEFRAME_MARGIN_FLOORS = {
 ROOM2_LABEL_RUBRIC_VERSION = "v1"
 ROOM2_LABEL_RUBRIC_BULLETS = (
     "Win = clear directional impulse inside operator Start→End with fillable tape.",
-    "Skip = looked similar but not archived (late, thin, fake spike, wrong TF, or no edge).",
     "Net margin after friction must clear the timeframe floor (1m 1% / 5m 3% / 15m 5%).",
     "No lookahead past Exit; timeframe bin stays isolated (1m≠5m≠15m).",
-    "Corrections append only — never overwrite a prior vault judgment.",
+    "Tape structure is core; news/SEC/Form4 are supporting context only.",
+    "Quality gates trash before vault mint — no fake saves.",
 )
-PATTERN_CATEGORY_SKIP_SIGHTING = "SKIP_SIGHTING"
 NASDAQ_TRADE_HALTS_RSS = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"
 TIMEFRAME_BAR_MINUTES = {
     "1-Minute": 1,
@@ -6147,166 +6146,6 @@ def check_trading_halt_overlap(
     except Exception as exc:
         result["halt_check_status"] = f"error:{str(exc)[:80]}"
         return result
-
-
-def append_vault_correction_event(
-    *,
-    ticker: str,
-    correction_text: str,
-) -> tuple[bool, str]:
-    """
-    Append-only judgment correction on the latest vault row for ticker.
-    Never overwrites structural fields — only extends operator_context.
-    """
-    ticker_clean = str(ticker or "").strip().upper()
-    note = re.sub(r"\s+", " ", str(correction_text or "").strip())
-    if not ticker_clean or not note:
-        return False, "Need ticker + correction text."
-    cfg = vault_bridge.supabase_settings()
-    if not cfg.get("ready"):
-        return False, "Supabase not configured."
-    try:
-        resp = requests.get(
-            f"{cfg['url'].rstrip('/')}/rest/v1/{cfg['table']}"
-            f"?ticker=eq.{urllib.parse.quote(ticker_clean)}"
-            f"&select=id,operator_context,timestamp"
-            f"&order=timestamp.desc&limit=1",
-            headers={
-                "apikey": cfg["key"],
-                "Authorization": f"Bearer {cfg['key']}",
-            },
-            timeout=12,
-        )
-        if not resp.ok or not resp.json():
-            return False, f"No vault row found for {ticker_clean}."
-        row = resp.json()[0]
-        row_id = row.get("id")
-        if row_id in (None, ""):
-            return False, "Latest row missing id — cannot append."
-        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        event = f"CORRECTION|{stamp}|RUBRIC:{ROOM2_LABEL_RUBRIC_VERSION}|{note}"
-        prior = str(row.get("operator_context") or "").strip()
-        updated = f"{prior} | {event}".strip(" |") if prior else event
-        patch = requests.patch(
-            f"{cfg['url'].rstrip('/')}/rest/v1/{cfg['table']}?id=eq.{row_id}",
-            headers={
-                "apikey": cfg["key"],
-                "Authorization": f"Bearer {cfg['key']}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal",
-            },
-            json={"operator_context": updated},
-            timeout=12,
-        )
-        if not patch.ok:
-            return False, f"Append failed: {patch.status_code}"
-        return True, f"Appended correction to {ticker_clean} row id={row_id}."
-    except Exception as exc:
-        return False, f"Append failed: {exc}"
-
-
-def log_room2_skip_sighting(
-    *,
-    ticker: str,
-    reason: str,
-    session_date=None,
-    start_time: str = "",
-    end_time: str = "",
-    timeframe_resolution: str = "1-Minute",
-) -> tuple[bool, str]:
-    """
-    Lightweight skip denominator row — not a full forensic mint.
-    Stores ticker + reason + rubric version so future match rates have a real skip set.
-    """
-    ticker_clean = str(ticker or "").strip().upper()
-    reason_clean = re.sub(r"\s+", " ", str(reason or "").strip())
-    if not ticker_clean or not reason_clean:
-        return False, "Need ticker + one-line skip reason."
-    day = _session_date_value(session_date) or datetime.date.today().isoformat()
-    start_label = str(start_time or "").strip() or "N/A"
-    end_label = str(end_time or "").strip() or "N/A"
-    notes = (
-        f"SKIP_SIGHTING | RUBRIC_VERSION:{ROOM2_LABEL_RUBRIC_VERSION} | "
-        f"REASON:{reason_clean} | DAY:{day} | WINDOW:{start_label}->{end_label} | "
-        f"TF:{timeframe_resolution}"
-    )
-    body = {
-        "ticker": ticker_clean,
-        "pattern_category": PATTERN_CATEGORY_SKIP_SIGHTING,
-        "pattern_type": PATTERN_CATEGORY_SKIP_SIGHTING,
-        "entry_time": f"{day} {start_label}".strip(),
-        "exit_time": f"{day} {end_label}".strip(),
-        "operator_context": notes,
-        "quantum_report": f"SKIP_SIGHTING|{ticker_clean}|{reason_clean[:120]}",
-        "bar_count": 0,
-        "source_room": "forensic_pattern_lab",
-        "state": "skip_sighting",
-        "vault_track": "track_skip_sighting",
-        "timeframe_resolution": timeframe_resolution,
-        "structural_move_pct": 0.0,
-        "layout_match_pct": 0,
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }
-    # Local durable mirror even if cloud write fails.
-    local_key = "room2_skip_sightings"
-    local = list(st.session_state.get(local_key) or [])
-    local.insert(0, body)
-    st.session_state[local_key] = local[:200]
-
-    cfg = vault_bridge.supabase_settings()
-    if not cfg.get("ready"):
-        return True, f"Skip logged locally for {ticker_clean} (Supabase offline)."
-    try:
-        resp = requests.post(
-            f"{cfg['url'].rstrip('/')}/rest/v1/{cfg['table']}",
-            headers={
-                "apikey": cfg["key"],
-                "Authorization": f"Bearer {cfg['key']}",
-                "Content-Type": "application/json",
-                "Prefer": "return=representation",
-            },
-            json=[body],
-            timeout=12,
-        )
-        if resp.ok:
-            return True, f"Skip sighting saved for {ticker_clean}."
-        # Compact fallback — strip extended fields
-        slim = {
-            k: body[k]
-            for k in (
-                "ticker",
-                "pattern_category",
-                "pattern_type",
-                "entry_time",
-                "exit_time",
-                "operator_context",
-                "quantum_report",
-                "bar_count",
-                "source_room",
-                "state",
-                "timestamp",
-            )
-            if k in body
-        }
-        retry = requests.post(
-            f"{cfg['url'].rstrip('/')}/rest/v1/{cfg['table']}",
-            headers={
-                "apikey": cfg["key"],
-                "Authorization": f"Bearer {cfg['key']}",
-                "Content-Type": "application/json",
-                "Prefer": "return=representation",
-            },
-            json=[slim],
-            timeout=12,
-        )
-        if retry.ok:
-            return True, f"Skip sighting saved for {ticker_clean} (compact)."
-        return True, (
-            f"Skip logged locally for {ticker_clean} "
-            f"(cloud write {resp.status_code})."
-        )
-    except Exception as exc:
-        return True, f"Skip logged locally for {ticker_clean} ({exc})."
 
 
 def build_day_context_envelope(
