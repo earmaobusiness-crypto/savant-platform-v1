@@ -214,8 +214,48 @@ VAULT_OPTIONAL_SCHEMA_FIELDS = frozenset({
     "regime_tag",
     "avg_dollar_volume_per_bar",
     "min_dollar_volume_per_bar",
+    "total_dollar_volume",
     "halt_check_status",
     "halt_detected",
+})
+# Hard allowlist for Supabase inserts — unknown keys cause PGRST204 on legacy schemas.
+VAULT_INSERT_ALLOWLIST = frozenset({
+    "ticker",
+    "pattern_category",
+    "pattern_type",
+    "entry_coordinate",
+    "exit_coordinate",
+    "entry_time",
+    "exit_time",
+    "operator_context",
+    "quantum_report",
+    "bar_count",
+    "timeframe_resolution",
+    "timeframe",
+    "macro_weather_layout",
+    "execution_strategy",
+    "buffer_context_window",
+    "vault_track",
+    "data_feed_mode",
+    "polygon_calls_remaining",
+    "institutional_block_accumulation",
+    "form4_insider_summary",
+    "source_room",
+    "state",
+    "deleted_at",
+    "layout_match_pct",
+    "anomaly_repeat_count",
+    "shelf_expires_at",
+    "structural_move_pct",
+    "strategy_trust_tier",
+    "timestamp",
+    "trigger_timestamp",
+    "text_matrix_string",
+    "forensic_dragnet_blob",
+    "master_signature_json",
+    "metric_envelopes_json",
+    "semantic_catalyst_json",
+    "day_context_json",
 })
 VAULT_STATE_INCUBATION = "incubation"
 VAULT_STATE_PURGATORY = "purgatory"
@@ -5240,6 +5280,17 @@ def tick_cinematic_telemetry_show() -> str:
     return "running"
 
 
+def _sanitize_vault_insert_payload(payload: dict) -> dict:
+    """Drop non-schema / optional keys so legacy forensic_patterns inserts never 400."""
+    row = dict(payload or {})
+    for key in list(row.keys()):
+        if key.startswith("_"):
+            continue
+        if key in VAULT_OPTIONAL_SCHEMA_FIELDS or key not in VAULT_INSERT_ALLOWLIST:
+            row.pop(key, None)
+    return row
+
+
 def _patch_vault_scalar_telemetry(
     *,
     supabase_url: str,
@@ -5329,6 +5380,9 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
 
     payload = _align_legacy_forensic_pattern_row(payload)
     raw_operator_notes = str(payload.pop("_raw_operator_notes", "") or "").strip()
+    for key in VAULT_OPTIONAL_SCHEMA_FIELDS:
+        payload.pop(key, None)
+    payload = _sanitize_vault_insert_payload(payload)
     phase2_route = vault_bridge.evaluate_phase2_deploy_route(
         payload,
         raw_operator_notes=raw_operator_notes,
@@ -5374,6 +5428,8 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
         return None
 
     def _post(body: dict):
+        clean = _sanitize_vault_insert_payload(body)
+        clean.pop("_raw_operator_notes", None)
         return requests.post(
             f"{supabase_url}/rest/v1/{table}",
             headers={
@@ -5382,7 +5438,7 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
                 "Content-Type": "application/json",
                 "Prefer": "return=representation",
             },
-            json=[body],
+            json=[clean],
             timeout=12,
         )
 
@@ -5420,8 +5476,13 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
 
         err_text = resp.text.lower()
         if resp.status_code in (400, 404) and (
-            "column" in err_text or "schema" in err_text or "could not" in err_text
+            "column" in err_text or "schema" in err_text or "could not" in err_text or "pgrst204" in err_text
         ):
+            missing = re.findall(
+                r"could not find the '([^']+)' column",
+                resp.text or "",
+                flags=re.IGNORECASE,
+            )
             meta = {
                 field: payload.get(field)
                 for field in (VAULT_MATRIX_BLOB_FIELDS | VAULT_OPTIONAL_SCHEMA_FIELDS)
@@ -5432,12 +5493,15 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
                 for key, value in payload.items()
                 if key not in VAULT_MATRIX_BLOB_FIELDS
                 and key not in VAULT_OPTIONAL_SCHEMA_FIELDS
+                and key not in set(missing)
             }
             ctx = str(slim.get("operator_context", "")).strip()
             meta_blob = json.dumps(meta, default=str)
             slim["operator_context"] = (
                 f"{ctx} | MATRIX_META:{meta_blob}".strip(" |") if ctx else f"MATRIX_META:{meta_blob}"
             )
+            for drop_key in list(missing) + ["day_context_json"]:
+                slim.pop(drop_key, None)
             retry = _post(slim)
             if retry.ok:
                 saved_row = _first_inserted_row(retry.json())
@@ -5448,7 +5512,40 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
                         f"for {payload.get('ticker', 'UNKNOWN')}."
                     ),
                 )
-            return False, f"Vault upload failed: {retry.status_code} {retry.text}", None
+            core_only = {
+                key: slim[key]
+                for key in (
+                    "ticker",
+                    "pattern_category",
+                    "pattern_type",
+                    "entry_coordinate",
+                    "exit_coordinate",
+                    "entry_time",
+                    "exit_time",
+                    "operator_context",
+                    "quantum_report",
+                    "bar_count",
+                    "source_room",
+                    "state",
+                    "timestamp",
+                    "trigger_timestamp",
+                    "structural_move_pct",
+                    "timeframe",
+                    "timeframe_resolution",
+                )
+                if key in slim
+            }
+            retry2 = _post(core_only)
+            if retry2.ok:
+                saved_row = _first_inserted_row(retry2.json())
+                return _finalize_save(
+                    saved_row,
+                    (
+                        f"INTERNET VAULT SYNC CONFIRMED — `{table}` anchored (legacy core fallback) "
+                        f"for {payload.get('ticker', 'UNKNOWN')}."
+                    ),
+                )
+            return False, f"Vault upload failed: {retry2.status_code} {retry2.text}", None
 
         return False, f"Vault upload failed: {resp.status_code} {resp.text}", None
     except Exception as exc:
