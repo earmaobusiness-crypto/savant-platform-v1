@@ -6982,7 +6982,7 @@ def render_room2_forensic_lab():
                     key="r2_single_notes_field",
                 )
                 good_deploy = st.form_submit_button(
-                    "🔥 COMMIT WINNING PATTERN TO INTERNET",
+                    "Archive Pattern",
                     use_container_width=True,
                     disabled=commit_throttle_active,
                 )
