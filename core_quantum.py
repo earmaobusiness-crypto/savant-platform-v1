@@ -207,6 +207,9 @@ VAULT_SCALAR_PATCH_FIELDS = frozenset({
     "state",
     "deleted_at",
     "shelf_expires_at",
+})
+# Only exist after migration 010 — keep in DAY_CONTEXT, never require as insert columns.
+VAULT_OPTIONAL_SCHEMA_FIELDS = frozenset({
     "rubric_version",
     "regime_tag",
     "avg_dollar_volume_per_bar",
@@ -5421,13 +5424,14 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
         ):
             meta = {
                 field: payload.get(field)
-                for field in VAULT_MATRIX_BLOB_FIELDS
+                for field in (VAULT_MATRIX_BLOB_FIELDS | VAULT_OPTIONAL_SCHEMA_FIELDS)
                 if field in payload
             }
             slim = {
                 key: value
                 for key, value in payload.items()
                 if key not in VAULT_MATRIX_BLOB_FIELDS
+                and key not in VAULT_OPTIONAL_SCHEMA_FIELDS
             }
             ctx = str(slim.get("operator_context", "")).strip()
             meta_blob = json.dumps(meta, default=str)
@@ -7177,12 +7181,6 @@ def build_vault_payload(
     sem_json = semantic_catalyst_json or json.dumps(
         audit.get("semantic_catalyst", {}), default=str
     )
-    day_ctx = st.session_state.get("room2_day_context") or {}
-    try:
-        if day_blob and day_blob != "{}":
-            day_ctx = {**day_ctx, **(json.loads(day_blob) if isinstance(day_blob, str) else {})}
-    except Exception:
-        pass
     body = {
         "ticker": ticker.upper(),
         "pattern_category": (pattern_category or "UNCLASSIFIED").strip().upper(),
@@ -7207,12 +7205,6 @@ def build_vault_payload(
             st.session_state.get("forensic_form4_tracker", {}).get("form4_summary", "")
         ),
         "source_room": "forensic_pattern_lab",
-        "rubric_version": str(day_ctx.get("rubric_version") or ROOM2_LABEL_RUBRIC_VERSION),
-        "regime_tag": str(day_ctx.get("regime_tag") or ""),
-        "avg_dollar_volume_per_bar": float(day_ctx.get("avg_dollar_volume_per_bar") or 0.0),
-        "min_dollar_volume_per_bar": float(day_ctx.get("min_dollar_volume_per_bar") or 0.0),
-        "halt_check_status": str(day_ctx.get("halt_check_status") or "unavailable"),
-        "halt_detected": bool(day_ctx.get("halt_detected")),
         "state": vault_state,
         "deleted_at": None,
         "layout_match_pct": layout_match_pct,
