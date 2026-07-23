@@ -3426,6 +3426,205 @@ def _fetch_latest_active_pattern_row() -> dict | None:
     return rows[0] if rows else None
 
 
+_WINDOW4_LAST_N_WORDS = {
+    "one": 1,
+    "1": 1,
+    "two": 2,
+    "2": 2,
+    "three": 3,
+    "3": 3,
+    "four": 4,
+    "4": 4,
+    "five": 5,
+    "5": 5,
+    "six": 6,
+    "6": 6,
+    "seven": 7,
+    "7": 7,
+    "eight": 8,
+    "8": 8,
+    "nine": 9,
+    "9": 9,
+    "ten": 10,
+    "10": 10,
+}
+
+
+def _window4_parse_last_n_query(text: str) -> int | None:
+    """
+    Detect 'last / latest / most recent' vault lookups.
+    Returns N (1–10) or None when this is not a last-N request.
+    """
+    low = str(text or "").lower().strip()
+    if not low or _window4_vault_command_only(low):
+        return None
+    if not re.search(r"\b(last|latest|most recent)\b", low):
+        return None
+
+    # Explicit N first: "last 3", "last three", "latest two", bare "last 2"
+    match = re.search(
+        r"\b(?:last|latest|most recent)\s+"
+        r"(one|two|three|four|five|six|seven|eight|nine|ten|\d{1,2})\b",
+        low,
+    )
+    if match:
+        token = match.group(1)
+        n = _WINDOW4_LAST_N_WORDS.get(token)
+        if n is None:
+            try:
+                n = int(token)
+            except ValueError:
+                n = None
+        if n is not None:
+            return max(1, min(10, n))
+
+    vaultish = (
+        "stock",
+        "ticker",
+        "pattern",
+        "setup",
+        "deploy",
+        "save",
+        "saved",
+        "archive",
+        "archived",
+        "put in",
+        "put into",
+        "logged",
+        "entry",
+        "entries",
+        "thing",
+        "things",
+        "one",
+        "ones",
+        "row",
+        "rows",
+        "vault",
+        "matrix",
+        "lab",
+        "coordinate",
+        "coordinates",
+        "time",
+        "times",
+        "date",
+        "dates",
+    )
+    has_vaultish = any(token in low for token in vaultish)
+    if not has_vaultish and not re.search(r"\b(i|we|you|my|the)\b", low):
+        return None
+
+    # Singular defaults: "the last one", "last stock I put in", "most recent pattern"
+    if re.search(
+        r"\b(last|latest|most recent)\s+"
+        r"(one|stock|ticker|pattern|setup|deploy|save|entry|thing|row)\b",
+        low,
+    ) or re.search(r"\bwhat (?:was|is) the last\b", low):
+        return 1
+    if re.search(r"\b(last|latest|most recent)\b", low) and any(
+        phrase in low
+        for phrase in (
+            "i put",
+            "i just",
+            "just put",
+            "just saved",
+            "just archived",
+            "just logged",
+            "just deployed",
+            "i saved",
+            "i archived",
+            "i logged",
+            "i deployed",
+        )
+    ):
+        return 1
+    return None
+
+
+def _window4_format_pattern_coordinate_card(row: dict, *, index: int) -> str:
+    """One vault row — ticker, session dates/times, registered-at."""
+    ticker = str(row.get("ticker") or "—").strip().upper() or "—"
+    tf = str(row.get("timeframe_resolution") or row.get("timeframe") or "—").strip() or "—"
+    layout = str(row.get("macro_weather_layout") or "—").strip() or "—"
+    strategy = str(row.get("execution_strategy") or "—").strip() or "—"
+    entry_raw = str(row.get("entry_time") or row.get("entry_coordinate") or "").strip()
+    exit_raw = str(row.get("exit_time") or row.get("exit_coordinate") or "").strip()
+    registered = str(row.get("timestamp") or "").strip()
+    registered_bit = registered.replace("T", " ").replace("+00:00", " UTC") if registered else "—"
+    if registered and len(registered_bit) > 19:
+        registered_bit = registered_bit[:19] + " UTC"
+    move = row.get("structural_move_pct")
+    try:
+        move_bit = f"{float(move):.2f}%" if move is not None and str(move) != "" else "—"
+    except (TypeError, ValueError):
+        move_bit = "—"
+    state = str(row.get("state") or "—").strip() or "—"
+    return (
+        f"**#{index} — {ticker}**\n"
+        f"- **Ticker:** {ticker}\n"
+        f"- **Start (entry):** {entry_raw or '—'}\n"
+        f"- **End (exit):** {exit_raw or '—'}\n"
+        f"- **Registered at:** {registered_bit}\n"
+        f"- **Timeframe:** {tf}\n"
+        f"- **Layout:** {layout}\n"
+        f"- **Strategy:** {strategy}\n"
+        f"- **Structural move:** {move_bit}\n"
+        f"- **State:** {state}"
+    )
+
+
+def _window4_build_recent_patterns_reply(n: int) -> str:
+    """Deterministic last-N vault cards — Supabase first, local cache fallback."""
+    n = max(1, min(10, int(n or 1)))
+    _ensure_supabase_session()
+    rows = _fetch_all_active_pattern_rows(limit=n)
+    if not rows:
+        local_rows = vault_bridge.local_pattern_rows()
+        if local_rows:
+            rows = [
+                _pattern_row_effective_fields(row)
+                for row in sorted(
+                    local_rows,
+                    key=lambda r: str(r.get("timestamp") or ""),
+                    reverse=True,
+                )[:n]
+            ]
+    if not rows:
+        return (
+            "No saved patterns found in the vault yet — "
+            "archive one first, then ask for the last / last 2 / last 3."
+        )
+    headline = (
+        f"**Last saved pattern** from the vault:"
+        if n == 1
+        else f"**Last {min(n, len(rows))} saved pattern(s)** from the vault (newest first):"
+    )
+    cards = [
+        _window4_format_pattern_coordinate_card(row, index=i)
+        for i, row in enumerate(rows[:n], start=1)
+    ]
+    note = ""
+    if len(rows) < n:
+        note = f"\n\n_Only {len(rows)} active pattern(s) available._"
+    return headline + "\n\n" + "\n\n".join(cards) + note
+
+
+def _window4_append_recent_patterns_reply(n: int) -> None:
+    st.session_state.room2_chat_history.append(
+        {
+            "speaker": "Forensic Expert",
+            "text": _format_window4_response(
+                _window4_build_recent_patterns_reply(n),
+                vault_safe=True,
+            ),
+            "vault_safe": True,
+        }
+    )
+    st.session_state.window4_status_line = (
+        f"☁️ Last-{int(n)} vault read — ticker + coordinates + registered time."
+    )
+    _sync_matrix_chat_to_cloud()
+
+
 def _queue_room2_form_ticker(ticker: str) -> None:
     """Defer Pattern Ticker widget writes — Streamlit forbids post-render session patches."""
     st.session_state["_pending_r2_good_ticker"] = str(ticker or "").strip().upper()
@@ -4047,6 +4246,8 @@ def _window4_should_use_vault_roster(text: str) -> bool:
     low = str(text or "").lower().strip()
     if not low:
         return False
+    if _window4_parse_last_n_query(low) is not None:
+        return False
     if low in ("stock", "stocks", "and stock", "and stocks"):
         return True
     if _window4_vault_command_only(low):
@@ -4493,10 +4694,12 @@ def _window4_is_conversational_message(text: str) -> bool:
 
 
 def _window4_route_message(text: str) -> str:
-    """Router — vault commands, cloud inventory, live data track, or conversational."""
+    """Router — vault commands, last-N lookup, cloud inventory, live data, or chat."""
     clean = str(text or "").strip()
     if _window4_vault_command_only(clean):
         return "vault"
+    if _window4_parse_last_n_query(clean) is not None:
+        return "recent"
     if _window4_should_use_vault_roster(clean):
         return "inventory"
     if _window4_is_technical_data_query(clean):
@@ -4917,6 +5120,11 @@ def _window4_handle_chat_submit(user_text: str) -> None:
 
     route = _window4_route_message(clean)
 
+    if route == "recent":
+        n = _window4_parse_last_n_query(clean) or 1
+        _window4_append_recent_patterns_reply(n)
+        return
+
     if route == "inventory":
         _window4_append_vault_roster_reply()
         _sync_matrix_chat_to_cloud()
@@ -5165,7 +5373,7 @@ def _render_window4_conversation_wire() -> None:
         st.text_input(
             "Lab Input",
             key="room2_text_buffer",
-            placeholder="Ask the Forensic Expert · restore all · delete pattern...",
+            placeholder="Ask · last one · last 3 · restore all · delete pattern...",
             label_visibility="collapsed",
         )
         submitted = st.form_submit_button("Send")
