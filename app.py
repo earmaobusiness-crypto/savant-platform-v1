@@ -2975,10 +2975,16 @@ def _micro_feed_readout_label() -> str:
 
 
 def _pattern_row_effective_fields(row: dict) -> dict:
-    """Merge top-level vault columns with MATRIX_META fallback blob."""
+    """Merge top-level vault columns with CLUSTER_IDENTITY / MATRIX_META fallback."""
     merged = dict(row or {})
     meta = core_quantum.parse_matrix_meta_from_context(merged.get("operator_context", ""))
     for key, value in meta.items():
+        if merged.get(key) in (None, ""):
+            merged[key] = value
+    identity = core_quantum.parse_cluster_identity_from_context(
+        merged.get("operator_context", "")
+    )
+    for key, value in identity.items():
         if merged.get(key) in (None, ""):
             merged[key] = value
     ctx = str(merged.get("operator_context") or "")
@@ -3385,6 +3391,7 @@ def _format_vault_pattern_roster(rows: list[dict], *, trash: int) -> str:
     stock_n, deploy_n, incubation_n = _inventory_summary_counts(rows)
     active_rows, incubation_rows = _inventory_rows_by_state(_dedupe_inventory_rows(rows))
     tickers = _inventory_unique_tickers(_dedupe_inventory_rows(rows))
+    health = core_quantum.compute_vault_cluster_health(rows)
     headline = f"**{stock_n} stock(s)** in Supabase"
     parts = [f"**{deploy_n} active save(s)**"]
     if incubation_n:
@@ -3392,26 +3399,34 @@ def _format_vault_pattern_roster(rows: list[dict], *, trash: int) -> str:
     parts.append(f"({trash} in Trash Vault)")
     headline += " · " + " · ".join(parts)
     lines = [headline + ":", ""]
+    lines.append(core_quantum.format_vault_cluster_health_report(health))
+    lines.append("")
     if tickers:
         lines.append(f"**Tickers:** {', '.join(tickers)}")
         lines.append("")
     lines.append(
-        "_Each save = one deploy commit. Same stock on 5M vs 15M = separate tracks._"
+        "_Each save = one deploy commit. Clustering only counts rows with real "
+        "layout+strategy **columns** (CLUSTER OK). Notes text alone does not count._"
     )
     lines.append("")
     display_rows = active_rows or rows
-    for row in display_rows[:12]:
+    labeled_rows = [
+        row for row in display_rows if core_quantum.row_has_usable_cluster_identity(row)
+    ]
+    show_rows = labeled_rows or display_rows
+    for row in show_rows[:12]:
         ticker = str(row.get("ticker") or "?").strip().upper()
-        layout = str(
-            row.get("macro_weather_layout") or row.get("execution_strategy") or "—"
-        ).strip()
+        layout = str(row.get("macro_weather_layout") or "").strip() or "UNLABELED"
+        strategy = str(row.get("execution_strategy") or "").strip() or "—"
         ts = str(row.get("timestamp") or "")[:10]
         tf = str(row.get("timeframe_resolution") or "").strip()
         margin = row.get("structural_move_pct") or row.get("margin_pct")
         margin_bit = f" · {float(margin):.2f}% move" if margin is not None else ""
-        lines.append(f"- **{ticker}** · {layout} · {tf}{margin_bit} · {ts}")
-    if len(display_rows) > 12:
-        lines.append(f"- …and {len(display_rows) - 12} more not shown.")
+        lines.append(
+            f"- **{ticker}** · {layout} · {strategy} · {tf}{margin_bit} · {ts}"
+        )
+    if len(show_rows) > 12:
+        lines.append(f"- …and {len(show_rows) - 12} more not shown.")
     if incubation_n:
         lines.append("")
         lines.append(f"_{incubation_n} incubation row(s) not listed above — not TRUSTED yet._")
@@ -4693,13 +4708,64 @@ def _window4_is_conversational_message(text: str) -> bool:
     return not _window4_is_technical_data_query(clean)
 
 
+def _window4_is_cluster_health_query(text: str) -> bool:
+    """Questions about whether layouts/strategies are actually forming."""
+    low = str(text or "").lower().strip()
+    if not low:
+        return False
+    probes = (
+        "forming",
+        "clustering",
+        "cluster health",
+        "layouts forming",
+        "strategy forming",
+        "strategies forming",
+        "is it working",
+        "is stuff working",
+        "stuff forming",
+        "are layouts",
+        "any layouts",
+        "labeled",
+        "unlabeled",
+        "room 3 ready",
+        "ready for room 3",
+        "column-truth",
+        "cluster ok",
+    )
+    return any(probe in low for probe in probes)
+
+
+def _window4_append_cluster_health_reply() -> None:
+    _ensure_supabase_session()
+    rows = _fetch_all_active_pattern_rows(limit=500)
+    health = core_quantum.compute_vault_cluster_health(rows)
+    st.session_state.room2_chat_history.append(
+        {
+            "speaker": "Forensic Expert",
+            "text": _format_window4_response(
+                core_quantum.format_vault_cluster_health_report(health),
+                vault_safe=True,
+            ),
+            "vault_safe": True,
+        }
+    )
+    st.session_state.window4_status_line = (
+        f"☁️ Cluster health — {health.get('status')} · "
+        f"{health.get('labeled_rows', 0)} labeled / {health.get('total_rows', 0)} total "
+        "(columns only)."
+    )
+    _sync_matrix_chat_to_cloud()
+
+
 def _window4_route_message(text: str) -> str:
-    """Router — vault commands, last-N lookup, cloud inventory, live data, or chat."""
+    """Router — vault commands, last-N, cluster health, inventory, live data, or chat."""
     clean = str(text or "").strip()
     if _window4_vault_command_only(clean):
         return "vault"
     if _window4_parse_last_n_query(clean) is not None:
         return "recent"
+    if _window4_is_cluster_health_query(clean):
+        return "cluster_health"
     if _window4_should_use_vault_roster(clean):
         return "inventory"
     if _window4_is_technical_data_query(clean):
@@ -5123,6 +5189,10 @@ def _window4_handle_chat_submit(user_text: str) -> None:
     if route == "recent":
         n = _window4_parse_last_n_query(clean) or 1
         _window4_append_recent_patterns_reply(n)
+        return
+
+    if route == "cluster_health":
+        _window4_append_cluster_health_reply()
         return
 
     if route == "inventory":
@@ -6459,15 +6529,38 @@ def _advance_room2_processor() -> str:
                 },
                 default=str,
             )
-            macro_weather_layout = str(
+            match_score = int(
+                math_block.get("match_probability")
+                or funnel.get("window4_spatial_match_pct")
+                or 0
+            )
+            layout_seed = str(
                 funnel.get("master_layout_container")
                 or math_block.get("nearest_layout_id")
                 or _resolve_auto_layout_id()
             )
-            match_score = int(math_block.get("match_probability") or 0)
+            weather = (
+                (funnel.get("market_weather") if isinstance(funnel.get("market_weather"), dict) else {})
+                or st.session_state.get("market_weather_snapshot")
+                or {}
+            )
+            vibe = str(
+                ((funnel.get("stage1_vibe") or {}) if isinstance(funnel.get("stage1_vibe"), dict) else {}).get(
+                    "vibe_profile"
+                )
+                or weather.get("vibe_profile")
+                or "neutral"
+            )
+            macro_weather_layout = core_quantum.resolve_layout_with_market_weather(
+                layout_seed,
+                vibe_profile=vibe,
+                weather=weather,
+                spatial_match_pct=match_score,
+            )
             execution_strategy = str(
                 funnel.get("execution_strategy")
                 or st.session_state.get("room2_funnel_execution_strategy")
+                or math_block.get("selected_strategy")
                 or core_quantum.resolve_matrix_strategy_id(
                     layout_id=macro_weather_layout,
                     timeframe_resolution=timeframe_resolution,

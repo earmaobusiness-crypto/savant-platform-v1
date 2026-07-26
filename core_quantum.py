@@ -218,6 +218,20 @@ VAULT_OPTIONAL_SCHEMA_FIELDS = frozenset({
     "halt_check_status",
     "halt_detected",
 })
+# Clustering identity — must survive every vault write / compact fallback.
+VAULT_CLUSTER_IDENTITY_FIELDS = frozenset({
+    "macro_weather_layout",
+    "execution_strategy",
+    "layout_match_pct",
+    "strategy_trust_tier",
+    "timeframe_resolution",
+    "structural_move_pct",
+    "state",
+    "vault_track",
+})
+VAULT_PLACEHOLDER_LAYOUT_IDS = frozenset(
+    {"", "NEW_LAYOUT", "PURGATORY_PENDING", "—", "-", "NULL", "NONE"}
+)
 # Hard allowlist for Supabase inserts — unknown keys cause PGRST204 on legacy schemas.
 VAULT_INSERT_ALLOWLIST = frozenset({
     "ticker",
@@ -2178,17 +2192,289 @@ def resolve_matrix_strategy_id(
 def parse_matrix_meta_from_context(operator_context: str) -> dict:
     """Recover extended vault fields embedded via compact schema fallback."""
     ctx = str(operator_context or "")
+    out: dict = {}
+    # Prefer durable scalar stamp — MATRIX_META JSON often breaks on nested blobs.
+    identity = parse_cluster_identity_from_context(ctx)
+    if identity:
+        out.update(identity)
     marker = "MATRIX_META:"
     if marker not in ctx:
-        return {}
+        return out
     try:
         blob = ctx.split(marker, 1)[1].strip()
         if " | " in blob:
             blob = blob.split(" | ", 1)[0]
         parsed = json.loads(blob)
-        return parsed if isinstance(parsed, dict) else {}
+        if isinstance(parsed, dict):
+            for key, value in parsed.items():
+                if out.get(key) in (None, ""):
+                    out[key] = value
+    except Exception:
+        pass
+    return out
+
+
+def parse_cluster_identity_from_context(operator_context: str) -> dict:
+    """Parse CLUSTER_IDENTITY:LAYOUT=...|STRATEGY=...|MATCH=...|TF=... stamp."""
+    ctx = str(operator_context or "")
+    marker = "CLUSTER_IDENTITY:"
+    if marker not in ctx:
+        return {}
+    blob = ctx.split(marker, 1)[1].strip()
+    if " | " in blob:
+        blob = blob.split(" | ", 1)[0]
+    out: dict = {}
+    for part in blob.split("|"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip().upper()
+        value = value.strip()
+        if not value:
+            continue
+        if key == "LAYOUT":
+            out["macro_weather_layout"] = value
+        elif key == "STRATEGY":
+            out["execution_strategy"] = value
+        elif key == "MATCH":
+            try:
+                out["layout_match_pct"] = int(float(value))
+            except (TypeError, ValueError):
+                pass
+        elif key == "TF":
+            out["timeframe_resolution"] = value
+    return out
+
+
+def _is_placeholder_layout_id(layout_id: str) -> bool:
+    clean = str(layout_id or "").strip()
+    return clean.upper() in {item.upper() for item in VAULT_PLACEHOLDER_LAYOUT_IDS}
+
+
+def _session_dict(key: str) -> dict:
+    try:
+        value = st.session_state.get(key) or {}
     except Exception:
         return {}
+    return value if isinstance(value, dict) else {}
+
+
+def stamp_cluster_identity_into_notes(
+    notes: str,
+    *,
+    layout: str,
+    strategy: str,
+    match_pct: int,
+    timeframe_resolution: str,
+) -> str:
+    """Append / refresh a parse-safe CLUSTER_IDENTITY stamp on operator_context."""
+    text = str(notes or "").strip()
+    stamp = (
+        f"CLUSTER_IDENTITY:LAYOUT={str(layout or '').strip()}"
+        f"|STRATEGY={str(strategy or '').strip()}"
+        f"|MATCH={int(match_pct or 0)}"
+        f"|TF={str(timeframe_resolution or '').strip()}"
+    )
+    if "CLUSTER_IDENTITY:" in text:
+        head, rest = text.split("CLUSTER_IDENTITY:", 1)
+        if " | " in rest:
+            rest = rest.split(" | ", 1)[1]
+            text = f"{head.strip(' |')} | {rest}".strip(" |")
+        else:
+            text = head.strip(" |")
+    return f"{text} | {stamp}".strip(" |") if text else stamp
+
+
+def coerce_vault_cluster_identity(payload: dict) -> dict:
+    """
+    Guarantee layout + strategy + match exist before any Supabase write.
+    Pulls from payload, regime funnel, math block, then mints if still blank.
+    """
+    row = dict(payload or {})
+    funnel = _session_dict("room2_regime_funnel")
+    math_block = _session_dict("room2_last_math_block")
+    spatial = _session_dict("room2_spatial_cluster")
+    stage1 = funnel.get("stage1_vibe") if isinstance(funnel.get("stage1_vibe"), dict) else {}
+    weather = (
+        _session_dict("market_weather_snapshot")
+        or (funnel.get("market_weather") if isinstance(funnel.get("market_weather"), dict) else {})
+        or {}
+    )
+
+    layout = str(row.get("macro_weather_layout") or "").strip()
+    if _is_placeholder_layout_id(layout):
+        layout = str(
+            funnel.get("master_layout_container")
+            or math_block.get("nearest_layout_id")
+            or spatial.get("nearest_layout_id")
+            or ""
+        ).strip()
+    match_pct = int(row.get("layout_match_pct") or 0)
+    if match_pct <= 0:
+        match_pct = int(
+            math_block.get("match_probability")
+            or funnel.get("window4_spatial_match_pct")
+            or spatial.get("spatial_match_pct")
+            or stage1.get("spatial_match_pct")
+            or 0
+        )
+    if _is_placeholder_layout_id(layout):
+        vibe = str(
+            stage1.get("vibe_profile")
+            or weather.get("vibe_profile")
+            or "neutral"
+        )
+        layout = resolve_layout_with_market_weather(
+            "NEW_LAYOUT",
+            vibe_profile=vibe,
+            weather=weather,
+            spatial_match_pct=match_pct,
+        )
+
+    timeframe_resolution = str(
+        row.get("timeframe_resolution") or row.get("timeframe") or ""
+    ).strip()
+    if not timeframe_resolution:
+        try:
+            timeframe_resolution = str(st.session_state.get("r2_timeframe_mode") or "").strip()
+        except Exception:
+            timeframe_resolution = ""
+    if not timeframe_resolution:
+        timeframe_resolution = "15-Minute"
+
+    strategy = str(row.get("execution_strategy") or "").strip()
+    if not strategy:
+        try:
+            strategy = str(st.session_state.get("room2_funnel_execution_strategy") or "").strip()
+        except Exception:
+            strategy = ""
+    if not strategy:
+        strategy = str(
+            funnel.get("execution_strategy")
+            or math_block.get("selected_strategy")
+            or ""
+        ).strip()
+    if not strategy:
+        strategy = resolve_matrix_strategy_id(
+            layout_id=layout,
+            timeframe_resolution=timeframe_resolution,
+            spatial_match_pct=match_pct,
+        )
+
+    row["macro_weather_layout"] = str(layout or "").strip()
+    row["execution_strategy"] = str(strategy or "").strip()
+    row["layout_match_pct"] = int(match_pct or 0)
+    row["timeframe_resolution"] = timeframe_resolution
+    row.setdefault("timeframe", str(timeframe_resolution)[:10])
+    row["operator_context"] = stamp_cluster_identity_into_notes(
+        str(row.get("operator_context") or ""),
+        layout=row["macro_weather_layout"],
+        strategy=row["execution_strategy"],
+        match_pct=int(row["layout_match_pct"]),
+        timeframe_resolution=timeframe_resolution,
+    )
+    return row
+
+
+def row_has_usable_cluster_identity(row: dict) -> bool:
+    """Column-truth only — notes/context text does NOT count as forming DNA."""
+    if not isinstance(row, dict):
+        return False
+    layout = str(row.get("macro_weather_layout") or "").strip()
+    strategy = str(row.get("execution_strategy") or "").strip()
+    return (not _is_placeholder_layout_id(layout)) and bool(strategy)
+
+
+def compute_vault_cluster_health(rows: list[dict] | None) -> dict:
+    """
+    Honest cluster health from real Supabase columns only.
+    Never treat notes/MATRIX_META story text as proof that layouts are forming.
+    """
+    active = [row for row in (rows or []) if isinstance(row, dict)]
+    labeled = [row for row in active if row_has_usable_cluster_identity(row)]
+    unlabeled = len(active) - len(labeled)
+    layouts: dict[str, int] = {}
+    strategies: dict[str, int] = {}
+    match_ge_85 = 0
+    for row in labeled:
+        layout = str(row.get("macro_weather_layout") or "").strip()
+        strategy = str(row.get("execution_strategy") or "").strip()
+        layouts[layout] = layouts.get(layout, 0) + 1
+        strategies[strategy] = strategies.get(strategy, 0) + 1
+        try:
+            if int(float(row.get("layout_match_pct") or 0)) >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
+                match_ge_85 += 1
+        except (TypeError, ValueError):
+            pass
+    labeled_n = len(labeled)
+    if labeled_n <= 0:
+        status = "NOT_FORMING"
+        verdict = (
+            "NOT FORMING — 0 rows have real layout+strategy columns. "
+            "Raw volume does not count as clustering DNA."
+        )
+    elif labeled_n < 20 or len(layouts) < 1:
+        status = "EARLY"
+        verdict = (
+            f"EARLY — {labeled_n} labeled row(s) with real columns. "
+            "Too thin to call clustering mature."
+        )
+    elif match_ge_85 >= 10 and len(layouts) >= 1:
+        status = "FORMING"
+        verdict = (
+            f"FORMING — {labeled_n} labeled / {len(active)} total · "
+            f"{len(layouts)} layout bucket(s) · {match_ge_85} at ≥85% match "
+            "(column-truth only)."
+        )
+    else:
+        status = "EARLY"
+        verdict = (
+            f"EARLY — {labeled_n} labeled / {len(active)} total · "
+            f"{len(layouts)} layout(s) · {match_ge_85} at ≥85% match. "
+            "Keep filling only CLUSTER OK saves."
+        )
+    return {
+        "status": status,
+        "verdict": verdict,
+        "total_rows": len(active),
+        "labeled_rows": labeled_n,
+        "unlabeled_rows": unlabeled,
+        "unique_layouts": len(layouts),
+        "unique_strategies": len(strategies),
+        "match_ge_85": match_ge_85,
+        "layout_counts": dict(sorted(layouts.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "strategy_counts": dict(sorted(strategies.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "forming": status == "FORMING",
+    }
+
+
+def format_vault_cluster_health_report(health: dict) -> str:
+    """Plain operator report — never overstates unlabeled volume as forming."""
+    h = health or {}
+    lines = [
+        f"**Cluster health (column-truth only): {h.get('status') or 'UNKNOWN'}**",
+        "",
+        str(h.get("verdict") or "No health data."),
+        "",
+        f"- **Total vault rows:** {int(h.get('total_rows') or 0)}",
+        f"- **Labeled (layout+strategy columns filled):** {int(h.get('labeled_rows') or 0)}",
+        f"- **Unlabeled / useless for clustering:** {int(h.get('unlabeled_rows') or 0)}",
+        f"- **Unique layouts:** {int(h.get('unique_layouts') or 0)}",
+        f"- **Unique strategies:** {int(h.get('unique_strategies') or 0)}",
+        f"- **≥85% match (labeled only):** {int(h.get('match_ge_85') or 0)}",
+    ]
+    layout_counts = h.get("layout_counts") or {}
+    if layout_counts:
+        lines.append("")
+        lines.append("**Layouts (columns only):**")
+        for name, count in list(layout_counts.items())[:8]:
+            lines.append(f"- {count} × {name}")
+    if int(h.get("unlabeled_rows") or 0) > 0:
+        lines.append("")
+        lines.append(
+            "_Unlabeled rows do **not** count toward Room 3 / clustering progress._"
+        )
+    return "\n".join(lines)
 
 
 def _strategy_executions_table() -> str:
@@ -5305,7 +5591,7 @@ def _patch_vault_scalar_telemetry(
     patch_body = {
         key: payload[key]
         for key in VAULT_SCALAR_PATCH_FIELDS
-        if key in payload and payload[key] is not None
+        if key in payload and payload[key] not in (None, "")
     }
     if not patch_body:
         return
@@ -5382,6 +5668,17 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
     raw_operator_notes = str(payload.pop("_raw_operator_notes", "") or "").strip()
     for key in VAULT_OPTIONAL_SCHEMA_FIELDS:
         payload.pop(key, None)
+    # Force layout/strategy/match before sanitize — empty cluster identity is a hard bug.
+    payload = coerce_vault_cluster_identity(payload)
+    if _is_placeholder_layout_id(str(payload.get("macro_weather_layout") or "")) or not str(
+        payload.get("execution_strategy") or ""
+    ).strip():
+        return (
+            False,
+            "VAULT BLOCKED — layout/strategy identity missing after coerce "
+            "(cluster labels must be set before Supabase write).",
+            None,
+        )
     payload = _sanitize_vault_insert_payload(payload)
     phase2_route = vault_bridge.evaluate_phase2_deploy_route(
         payload,
@@ -5456,6 +5753,66 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
                 row_id=saved_row.get("id"),
                 payload=payload,
             )
+            # If representation came back blank on cluster columns, force a targeted patch.
+            need_layout = _is_placeholder_layout_id(str(saved_row.get("macro_weather_layout") or ""))
+            need_strategy = not str(saved_row.get("execution_strategy") or "").strip()
+            if need_layout or need_strategy or int(saved_row.get("layout_match_pct") or 0) <= 0:
+                force_body = {
+                    "macro_weather_layout": payload.get("macro_weather_layout"),
+                    "execution_strategy": payload.get("execution_strategy"),
+                    "layout_match_pct": int(payload.get("layout_match_pct") or 0),
+                    "timeframe_resolution": payload.get("timeframe_resolution"),
+                    "strategy_trust_tier": payload.get("strategy_trust_tier"),
+                    "operator_context": payload.get("operator_context"),
+                }
+                try:
+                    patch = requests.patch(
+                        f"{supabase_url.rstrip('/')}/rest/v1/{table}?id=eq.{saved_row.get('id')}",
+                        headers={
+                            "apikey": supabase_key,
+                            "Authorization": f"Bearer {supabase_key}",
+                            "Content-Type": "application/json",
+                            "Prefer": "return=representation",
+                        },
+                        json=force_body,
+                        timeout=12,
+                    )
+                    if patch.ok:
+                        patched = _first_inserted_row(patch.json())
+                        if patched:
+                            saved_row = patched
+                except Exception:
+                    pass
+            layout_final = str((saved_row or {}).get("macro_weather_layout") or "").strip()
+            strategy_final = str((saved_row or {}).get("execution_strategy") or "").strip()
+            if not _is_placeholder_layout_id(layout_final) and strategy_final:
+                base_msg = (
+                    f"{base_msg} · CLUSTER OK — {layout_final} / {strategy_final} "
+                    f"({int((saved_row or {}).get('layout_match_pct') or payload.get('layout_match_pct') or 0)}% match)."
+                )
+            else:
+                # Hard fail — never let blank-cluster rows count as successful DNA.
+                row_id = (saved_row or {}).get("id")
+                if row_id not in (None, ""):
+                    try:
+                        requests.delete(
+                            f"{supabase_url.rstrip('/')}/rest/v1/{table}?id=eq.{row_id}",
+                            headers={
+                                "apikey": supabase_key,
+                                "Authorization": f"Bearer {supabase_key}",
+                                "Prefer": "return=minimal",
+                            },
+                            timeout=12,
+                        )
+                    except Exception:
+                        pass
+                return (
+                    False,
+                    "VAULT SYNC FAILED — CLUSTER GATE — layout/strategy blank on Supabase "
+                    "readback. Incomplete row was removed so blank DNA cannot pile up. "
+                    "Redeploy after restart; do not trust volume without CLUSTER OK.",
+                    None,
+                )
         if saved_row and route:
             _, post_note = vault_bridge.apply_phase2_post_save(payload, route)
             if post_note:
@@ -5483,11 +5840,15 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
                 resp.text or "",
                 flags=re.IGNORECASE,
             )
+            # Scalars only in MATRIX_META — nested JSON blobs break parse_matrix_meta.
             meta = {
                 field: payload.get(field)
-                for field in (VAULT_MATRIX_BLOB_FIELDS | VAULT_OPTIONAL_SCHEMA_FIELDS)
-                if field in payload
+                for field in VAULT_CLUSTER_IDENTITY_FIELDS
+                if field in payload and payload.get(field) not in (None, "")
             }
+            for field in VAULT_OPTIONAL_SCHEMA_FIELDS:
+                if field in payload and payload.get(field) not in (None, ""):
+                    meta[field] = payload.get(field)
             slim = {
                 key: value
                 for key, value in payload.items()
@@ -5495,10 +5856,21 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
                 and key not in VAULT_OPTIONAL_SCHEMA_FIELDS
                 and key not in set(missing)
             }
+            # Keep cluster identity on the row whenever the schema has those columns.
+            for field in VAULT_CLUSTER_IDENTITY_FIELDS:
+                if field in payload and field not in set(missing):
+                    slim[field] = payload.get(field)
             ctx = str(slim.get("operator_context", "")).strip()
             meta_blob = json.dumps(meta, default=str)
             slim["operator_context"] = (
                 f"{ctx} | MATRIX_META:{meta_blob}".strip(" |") if ctx else f"MATRIX_META:{meta_blob}"
+            )
+            slim["operator_context"] = stamp_cluster_identity_into_notes(
+                str(slim.get("operator_context") or ""),
+                layout=str(payload.get("macro_weather_layout") or ""),
+                strategy=str(payload.get("execution_strategy") or ""),
+                match_pct=int(payload.get("layout_match_pct") or 0),
+                timeframe_resolution=str(payload.get("timeframe_resolution") or ""),
             )
             for drop_key in list(missing) + ["day_context_json"]:
                 slim.pop(drop_key, None)
@@ -5532,9 +5904,24 @@ def stream_payload_to_vault(payload: dict) -> tuple[bool, str, dict | None]:
                     "structural_move_pct",
                     "timeframe",
                     "timeframe_resolution",
+                    "macro_weather_layout",
+                    "execution_strategy",
+                    "layout_match_pct",
+                    "strategy_trust_tier",
+                    "vault_track",
                 )
                 if key in slim
             }
+            # Always carry cluster identity from the coerced payload when present.
+            for field in (
+                "macro_weather_layout",
+                "execution_strategy",
+                "layout_match_pct",
+                "timeframe_resolution",
+                "operator_context",
+            ):
+                if payload.get(field) not in (None, "") and field not in set(missing):
+                    core_only[field] = payload.get(field)
             retry2 = _post(core_only)
             if retry2.ok:
                 saved_row = _first_inserted_row(retry2.json())
@@ -7319,4 +7706,5 @@ def build_vault_payload(
     if day_blob and day_blob != "{}":
         body["day_context_json"] = day_blob
     body["_raw_operator_notes"] = operator_notes.strip()
-    return body
+    # Final guarantee — layout/strategy/match stamped before caller streams to vault.
+    return coerce_vault_cluster_identity(body)
