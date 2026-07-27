@@ -7082,11 +7082,13 @@ def _render_dynamic_layout_registry() -> None:
     if folders:
         preview = " · ".join(folders[:16])
         extra = f" · +{len(folders) - 16} more" if len(folders) > 16 else ""
-        st.caption(f"📂 **Active Layout Folders:** {preview}{extra}")
+        st.caption(
+            f"📂 **Layout folders (vault, incl. incubation):** {preview}{extra}"
+        )
     else:
         st.caption(
-            "📂 **Active Layout Folders:** awaiting first cloud mint — "
-            "the math core assigns numbered folders automatically."
+            "📂 **Layout folders:** awaiting first cloud mint — "
+            "same weather reuses one folder; strategies nest inside."
         )
 
 

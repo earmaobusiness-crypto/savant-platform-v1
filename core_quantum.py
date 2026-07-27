@@ -3971,15 +3971,19 @@ def register_layout_vector_in_master_index(
     ticker: str,
     timeframe_resolution: str,
 ) -> None:
-    """Layout registry metadata only — vectors persist in Supabase vault, not local RAM."""
-    _ = vector
+    """Keep layout id + feature vector in session so spatial match can join buckets."""
+    clean_layout = str(layout_id or "").strip()
+    if not clean_layout or _is_placeholder_layout_id(clean_layout):
+        return
+    vec = [float(x) for x in (vector or [])] if vector else []
     index = list(st.session_state.get("layout_master_matrix_index", []))
     index.insert(
         0,
         {
-            "layout_id": layout_id,
+            "layout_id": clean_layout,
             "ticker": str(ticker).upper(),
             "timeframe_resolution": timeframe_resolution,
+            "vector": vec,
         },
     )
     st.session_state.layout_master_matrix_index = index[:256]
@@ -4032,12 +4036,13 @@ def hydrate_layout_library_from_vault() -> int:
     table = _supabase_table_name()
     try:
         supabase_url = st.secrets["SUPABASE_URL"].rstrip("/")
+        # Include incubation — early labeled DNA still teaches spatial join.
         resp = requests.get(
             f"{supabase_url}/rest/v1/{table}"
             "?select=macro_weather_layout,ticker,timeframe_resolution,master_signature_json,"
             "structural_move_pct,vault_track,state"
-            "&vault_track=eq.track_1_validated"
-            "&or=(state.is.null,state.eq.active)"
+            "&macro_weather_layout=not.is.null"
+            "&or=(state.is.null,state.eq.active,state.eq.incubation)"
             "&order=timestamp.desc&limit=500",
             headers=headers,
             timeout=20,
@@ -4054,18 +4059,20 @@ def hydrate_layout_library_from_vault() -> int:
     seen: set[str] = set()
     for row in rows:
         layout_id = str(row.get("macro_weather_layout") or "").strip()
-        if not layout_id:
+        if not layout_id or _is_placeholder_layout_id(layout_id):
             continue
         dedupe = f"{layout_id}|{row.get('timeframe_resolution')}|{row.get('ticker')}"
         if dedupe in seen:
             continue
         seen.add(dedupe)
+        vec = _parse_master_signature_from_row(row)
         index.append(
             {
                 "layout_id": layout_id,
                 "ticker": str(row.get("ticker") or "").upper(),
                 "timeframe_resolution": str(row.get("timeframe_resolution") or ""),
                 "structural_move_pct": float(row.get("structural_move_pct") or 0.0),
+                "vector": vec,
             }
         )
 
@@ -6296,20 +6303,56 @@ def compute_market_weather_snapshot(*, ticker: str = "", force_refresh: bool = F
     return snapshot
 
 
-def mint_market_weather_layout_label(*, vibe_profile: str, weather_mood: str) -> str:
-    """Mint numbered layout bucket — weather footprint first, strategies follow."""
-    folders = fetch_distinct_layout_folders()
-    max_num = 0
-    for label in folders:
-        match = re.search(r"(\d+)", label)
-        if match:
-            max_num = max(max_num, int(match.group(1)))
-    vibe_token = {
+def _layout_vibe_token(vibe_profile: str) -> str:
+    return {
         "expansion": "Volatile",
         "compressed": "Tight",
         "neutral": "Neutral",
     }.get(str(vibe_profile or "neutral"), "Neutral")
-    return f"Layout {max_num + 1} — {vibe_token} / {weather_mood}"
+
+
+def _layout_num(label: str) -> int:
+    match = re.search(r"(\d+)", str(label or ""))
+    return int(match.group(1)) if match else 10**9
+
+
+def find_existing_layout_for_weather(*, vibe_profile: str, weather_mood: str) -> str:
+    """Reuse lowest-number folder with the same vibe/mood — never fork duplicates."""
+    vibe_token = _layout_vibe_token(vibe_profile)
+    mood = str(weather_mood or "Mixed Session").strip() or "Mixed Session"
+    suffix = f"{vibe_token} / {mood}"
+    folders = fetch_distinct_layout_folders()
+    exact = [
+        label
+        for label in folders
+        if str(label).endswith(suffix) or f" — {suffix}" in str(label)
+    ]
+    if exact:
+        return sorted(exact, key=_layout_num)[0]
+    mood_hits = [label for label in folders if mood in str(label)]
+    if mood_hits:
+        return sorted(mood_hits, key=_layout_num)[0]
+    return ""
+
+
+def mint_market_weather_layout_label(*, vibe_profile: str, weather_mood: str) -> str:
+    """
+    Mint numbered layout bucket — weather footprint first, strategies follow.
+    Same vibe/mood always reuses the existing folder (no Layout 1..13 spam).
+    """
+    existing = find_existing_layout_for_weather(
+        vibe_profile=vibe_profile,
+        weather_mood=weather_mood,
+    )
+    if existing:
+        return existing
+    folders = fetch_distinct_layout_folders()
+    max_num = 0
+    for label in folders:
+        max_num = max(max_num, _layout_num(label) if _layout_num(label) < 10**9 else 0)
+    vibe_token = _layout_vibe_token(vibe_profile)
+    mood = str(weather_mood or "Mixed Session").strip() or "Mixed Session"
+    return f"Layout {max_num + 1} — {vibe_token} / {mood}"
 
 
 def resolve_layout_with_market_weather(
@@ -6321,24 +6364,46 @@ def resolve_layout_with_market_weather(
 ) -> str:
     """
     Layout bucket = market weather footprint.
-    Match existing bucket when spatial math aligns; otherwise mint a new numbered layout.
+    Join existing bucket on spatial match OR same weather mood.
+    Only mint a new number when that weather footprint does not exist yet.
     """
     layout = str(layout_id or "NEW_LAYOUT").strip()
-    if layout not in ("NEW_LAYOUT", "PURGATORY_PENDING", ""):
+    if not _is_placeholder_layout_id(layout):
         return layout
 
     wx = weather or st.session_state.get("market_weather_snapshot") or {}
     nearest = str(wx.get("nearest_weather_layout") or "NEW_LAYOUT")
     wx_match = int(wx.get("spatial_match_pct") or spatial_match_pct or 0)
 
-    if nearest not in ("NEW_LAYOUT", "PURGATORY_PENDING", "") and wx_match >= LAYOUT_SIGNATURE_MATCH_THRESHOLD:
+    if (
+        not _is_placeholder_layout_id(nearest)
+        and wx_match >= LAYOUT_SIGNATURE_MATCH_THRESHOLD
+    ):
         return nearest
-    if wx_match >= LAYOUT_SIGNATURE_MATCH_THRESHOLD and nearest not in ("NEW_LAYOUT", "PURGATORY_PENDING"):
-        return nearest
+
+    weather_mood = str(wx.get("weather_mood") or "Mixed Session")
+    # Same weather footprint → always join the lowest existing folder.
+    # Do this before structural match_probability (that score is not layout-id proof).
+    existing = find_existing_layout_for_weather(
+        vibe_profile=vibe_profile,
+        weather_mood=weather_mood,
+    )
+    if existing:
+        return existing
+
+    # Tape spatial nearest from session index vectors only (cosine%), not structural %.
+    spatial = _session_dict("room2_spatial_cluster")
+    tape_nearest = str(spatial.get("nearest_layout_id") or "").strip()
+    tape_match = int(spatial.get("spatial_match_pct") or 0)
+    if (
+        not _is_placeholder_layout_id(tape_nearest)
+        and tape_match >= LAYOUT_SIGNATURE_MATCH_THRESHOLD
+    ):
+        return tape_nearest
 
     return mint_market_weather_layout_label(
         vibe_profile=vibe_profile,
-        weather_mood=str(wx.get("weather_mood") or "Mixed Session"),
+        weather_mood=weather_mood,
     )
 
 
