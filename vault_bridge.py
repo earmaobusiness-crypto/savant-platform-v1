@@ -24,6 +24,9 @@ ANOMALY_SHELF_DAYS = 30
 ANOMALY_PERMANENT_MINT_COUNT = 5
 VAULT_STATE_INCUBATION = "incubation"
 VAULT_STATE_ACTIVE = "active"
+# Hard ceiling for inventory / collective library pulls — the old 200 cap
+# silently truncated health, join, and Window 4 once the vault grew.
+VAULT_LIBRARY_FETCH_LIMIT = 5000
 PLACEHOLDER_LAYOUT_IDS = frozenset({"NEW_LAYOUT", "PURGATORY_PENDING", "—", "-", ""})
 PROJECT_ROOT = Path(__file__).resolve().parent
 PROJECT_SECRETS_PATH = PROJECT_ROOT / ".streamlit" / "secrets.toml"
@@ -287,7 +290,7 @@ def _incubation_shelf_iso(*, days: int = ANOMALY_SHELF_DAYS) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=int(days))).isoformat()
 
 
-def fetch_library_rows_all(*, limit: int = 200) -> list[dict]:
+def fetch_library_rows_all(*, limit: int = VAULT_LIBRARY_FETCH_LIMIT) -> list[dict]:
     """Full collective library — active + incubation rows for cross-ticker compare."""
     status, body, err = supabase_rest(
         "GET",
@@ -519,42 +522,43 @@ def evaluate_phase2_collective_route(
         timeframe_resolution=tf,
     )
     rhyme_count = len(rhyme_rows) + 1
-    has_lane = _library_has_layout_lane(
-        library,
-        macro_weather_layout=layout,
-        timeframe_resolution=tf,
-    )
-    layout_click = match_pct >= LAYOUT_MATCH_THRESHOLD and has_lane
+    # ≥85% on a real layout folder is an immediate validated click — do NOT
+    # require an existing lane first (that left strong matches stuck in incubation).
+    layout_click = match_pct >= LAYOUT_MATCH_THRESHOLD and _is_real_layout(layout)
+    # Sub-85% only promotes after enough layout+tf rhymes (permanent mint path).
     mint_ready = rhyme_count >= ANOMALY_PERMANENT_MINT_COUNT and _is_real_layout(layout)
+    # Trusted cannot bypass the 85% floor — trust is strategy depth, not layout fit.
+    trusted_ok = bool(trusted) and match_pct >= LAYOUT_MATCH_THRESHOLD and _is_real_layout(layout)
     promote_cluster = mint_ready
 
-    if trusted or layout_click or mint_ready:
+    if trusted_ok or layout_click or mint_ready:
         vault_state = VAULT_STATE_ACTIVE
         shelf_expires_at = ""
-        if mint_ready:
+        if layout_click:
+            route_msg = (
+                f"PHASE 2 — **{match_pct}%** layout fit — **{clean_ticker}** clicks into "
+                f"**{layout}** on **{tf}** (**active** vault)."
+            )
+        elif mint_ready:
             route_msg = (
                 f"PHASE 2 — **{rhyme_count}/{ANOMALY_PERMANENT_MINT_COUNT} layout rhymes** "
                 f"for **{layout}** on **{tf}** — cluster promoted to **active** layout lane."
             )
-        elif layout_click:
-            route_msg = (
-                f"PHASE 2 — **{match_pct}%** layout fit — **{clean_ticker}** clicks into "
-                f"existing **{layout}** lane on **{tf}** (**active** vault)."
-            )
         else:
             route_msg = (
-                f"PHASE 2 — strategy **TRUSTED** — **{clean_ticker}** saved to **active** vault."
+                f"PHASE 2 — strategy **TRUSTED** at **{match_pct}%** — "
+                f"**{clean_ticker}** saved to **active** vault."
             )
     else:
         vault_state = VAULT_STATE_INCUBATION
         shelf_expires_at = _incubation_shelf_iso()
-        if not library:
+        if match_pct < LAYOUT_MATCH_THRESHOLD and not library:
             route_msg = (
                 f"PHASE 2 — first save in empty library — **{clean_ticker}** on **{tf}** "
                 f"held in **incubation** ({match_pct}% layout fit · "
                 f"rhyme {rhyme_count}/{ANOMALY_PERMANENT_MINT_COUNT})."
             )
-        elif rhyme_count > 1:
+        elif match_pct < LAYOUT_MATCH_THRESHOLD and rhyme_count > 1:
             route_msg = (
                 f"PHASE 2 — **{rhyme_count}/{ANOMALY_PERMANENT_MINT_COUNT}** layout rhymes "
                 f"for **{layout}** on **{tf}** ({match_pct}% fit) — still **incubation** "
@@ -563,7 +567,8 @@ def evaluate_phase2_collective_route(
         else:
             route_msg = (
                 f"PHASE 2 — **{match_pct}%** layout fit on **{tf}** — **incubation** "
-                f"(no layout click yet · {rhyme_count}/{ANOMALY_PERMANENT_MINT_COUNT} rhymes)."
+                f"(need {LAYOUT_MATCH_THRESHOLD}% click-in or "
+                f"{ANOMALY_PERMANENT_MINT_COUNT} rhymes · {rhyme_count}/{ANOMALY_PERMANENT_MINT_COUNT})."
             )
 
     return {
@@ -873,7 +878,7 @@ def supabase_probe() -> tuple[bool, str | None]:
     return False, err or f"HTTP {status}"
 
 
-def supabase_fetch_raw_rows(*, limit: int = 100) -> tuple[list[dict], str | None]:
+def supabase_fetch_raw_rows(*, limit: int = VAULT_LIBRARY_FETCH_LIMIT) -> tuple[list[dict], str | None]:
     """Unfiltered table pull for inventory + trash counts."""
     status, body, err = supabase_rest(
         "GET",
@@ -895,7 +900,7 @@ def supabase_fetch_raw_rows(*, limit: int = 100) -> tuple[list[dict], str | None
     return body, None
 
 
-def supabase_fetch_patterns(*, limit: int = 50) -> tuple[list[dict], str | None]:
+def supabase_fetch_patterns(*, limit: int = VAULT_LIBRARY_FETCH_LIMIT) -> tuple[list[dict], str | None]:
     rows, err = supabase_fetch_raw_rows(limit=int(limit))
     if err:
         return [], err

@@ -3031,7 +3031,9 @@ def _count_cloud_pattern_rows(*, trash_only: bool = False) -> int:
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return 0
-    raw_rows, _ = _supabase_fetch_raw_pattern_rows(limit=200)
+    raw_rows, _ = _supabase_fetch_raw_pattern_rows(
+        limit=int(getattr(vault_bridge, "VAULT_LIBRARY_FETCH_LIMIT", 5000))
+    )
     return sum(
         1 for row in raw_rows if isinstance(row, dict) and _is_archived_pattern_row(row, trash_only=trash_only)
     )
@@ -3049,8 +3051,13 @@ def _is_archived_pattern_row(row: dict, *, trash_only: bool = False) -> bool:
     return state != "soft_deleted"
 
 
-def _supabase_fetch_raw_pattern_rows(*, limit: int = 100) -> tuple[list[dict], str | None]:
+def _supabase_fetch_raw_pattern_rows(
+    *,
+    limit: int | None = None,
+) -> tuple[list[dict], str | None]:
     """Raw Supabase pull — vault_bridge when available, else direct REST."""
+    if limit is None:
+        limit = int(getattr(vault_bridge, "VAULT_LIBRARY_FETCH_LIMIT", 5000))
     _ensure_supabase_session()
     if not st.session_state.get("supabase_ready"):
         return [], "supabase_offline"
@@ -3086,9 +3093,12 @@ def _supabase_fetch_raw_pattern_rows(*, limit: int = 100) -> tuple[list[dict], s
     return rows, err
 
 
-def _fetch_all_active_pattern_rows(*, limit: int = 50) -> list[dict]:
+def _fetch_all_active_pattern_rows(*, limit: int | None = None) -> list[dict]:
     """All active matrix rows from Supabase — source of truth for Window 4 inventory."""
-    raw_rows, err = _supabase_fetch_raw_pattern_rows(limit=max(int(limit), 50))
+    fetch_ceiling = int(getattr(vault_bridge, "VAULT_LIBRARY_FETCH_LIMIT", 5000))
+    if limit is None:
+        limit = fetch_ceiling
+    raw_rows, err = _supabase_fetch_raw_pattern_rows(limit=max(int(limit), min(50, fetch_ceiling)))
     st.session_state.matrix_vault_fetch_error = err
     rows: list[dict] = []
     for row in raw_rows:
@@ -3242,7 +3252,7 @@ def _collect_matrix_inventory_rows() -> list[dict]:
     """Supabase is the only source of truth for matrix inventory."""
     if not st.session_state.get("supabase_ready"):
         return []
-    return _fetch_all_active_pattern_rows(limit=50)
+    return _fetch_all_active_pattern_rows()
 
 
 def _unsynced_local_draft_count() -> int:
@@ -3251,7 +3261,7 @@ def _unsynced_local_draft_count() -> int:
         return 0
     cloud_tickers = {
         str(row.get("ticker") or "").strip().upper()
-        for row in _fetch_all_active_pattern_rows(limit=50)
+        for row in _fetch_all_active_pattern_rows()
         if isinstance(row, dict) and str(row.get("ticker") or "").strip()
     }
     drafts = 0
@@ -3321,7 +3331,7 @@ def _sync_matrix_active_pattern_count_from_cloud() -> int:
         st.session_state.matrix_incubation_count = 0
         st.session_state.matrix_trash_vault_count = 0
         return 0
-    rows = _fetch_all_active_pattern_rows(limit=100)
+    rows = _fetch_all_active_pattern_rows()
     stocks, active_saves, incubation_saves = _inventory_summary_counts(rows)
     st.session_state.matrix_active_pattern_count = stocks
     st.session_state.matrix_active_save_count = active_saves
@@ -3834,7 +3844,7 @@ def _refresh_matrix_cloud_wire(*, reload_chat: bool = False) -> None:
     _ = reload_chat
     _ensure_supabase_session()
     if st.session_state.get("supabase_ready"):
-        cloud_rows = _fetch_all_active_pattern_rows(limit=50)
+        cloud_rows = _fetch_all_active_pattern_rows()
         if cloud_rows:
             cloud_registry = [_registry_entry_from_pattern_row(row) for row in cloud_rows]
             session_reg = [
@@ -4026,7 +4036,7 @@ def _soft_delete_latest_pattern_to_vault() -> str:
 
 def _count_supabase_vault_pattern_rows() -> int:
     """Pattern rows in cloud — excludes the Matrix chat log ticker only."""
-    raw_rows, _ = _supabase_fetch_raw_pattern_rows(limit=200)
+    raw_rows, _ = _supabase_fetch_raw_pattern_rows()
     return sum(
         1
         for row in raw_rows
@@ -4737,7 +4747,7 @@ def _window4_is_cluster_health_query(text: str) -> bool:
 
 def _window4_append_cluster_health_reply() -> None:
     _ensure_supabase_session()
-    rows = _fetch_all_active_pattern_rows(limit=500)
+    rows = _fetch_all_active_pattern_rows()
     health = core_quantum.compute_vault_cluster_health(rows)
     st.session_state.room2_chat_history.append(
         {

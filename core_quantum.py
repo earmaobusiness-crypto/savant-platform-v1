@@ -6174,7 +6174,7 @@ def fetch_symbol_velocity_series(symbol: str, periods: int = 20) -> list[float]:
 
 
 def fetch_distinct_layout_folders() -> list[str]:
-    """Active layout buckets minted in Supabase."""
+    """Active + incubation layout buckets minted in Supabase."""
     headers = _supabase_rest_headers()
     if not headers:
         return []
@@ -6187,9 +6187,8 @@ def fetch_distinct_layout_folders() -> list[str]:
             params={
                 "select": "macro_weather_layout",
                 "macro_weather_layout": "not.is.null",
-                "vault_track": "eq.track_1_validated",
                 "or": "(state.is.null,state.eq.active,state.eq.incubation)",
-                "limit": "256",
+                "limit": "2000",
             },
             timeout=12,
         )
@@ -6205,6 +6204,19 @@ def fetch_distinct_layout_folders() -> list[str]:
         return sorted(folders)
     except Exception:
         return []
+
+
+def _layout_mood_family(weather_mood: str) -> str:
+    """
+    Collapse fine-grained weather labels into layout-join families.
+    Risk-Off Slide / Risk-Off Volatile must share one layout folder.
+    """
+    mood = str(weather_mood or "Mixed Session").strip() or "Mixed Session"
+    if mood.startswith("Risk-Off"):
+        return "Risk-Off"
+    if mood.startswith("Risk-On"):
+        return "Risk-On"
+    return mood
 
 
 def _weather_mood_from_macro(
@@ -6317,10 +6329,10 @@ def _layout_num(label: str) -> int:
 
 
 def find_existing_layout_for_weather(*, vibe_profile: str, weather_mood: str) -> str:
-    """Reuse lowest-number folder with the same vibe/mood — never fork duplicates."""
+    """Reuse lowest-number folder with the same vibe/mood family — never fork duplicates."""
     vibe_token = _layout_vibe_token(vibe_profile)
-    mood = str(weather_mood or "Mixed Session").strip() or "Mixed Session"
-    suffix = f"{vibe_token} / {mood}"
+    family = _layout_mood_family(weather_mood)
+    suffix = f"{vibe_token} / {family}"
     folders = fetch_distinct_layout_folders()
     exact = [
         label
@@ -6329,16 +6341,21 @@ def find_existing_layout_for_weather(*, vibe_profile: str, weather_mood: str) ->
     ]
     if exact:
         return sorted(exact, key=_layout_num)[0]
-    mood_hits = [label for label in folders if mood in str(label)]
-    if mood_hits:
-        return sorted(mood_hits, key=_layout_num)[0]
+    # Legacy fine-grained labels (Risk-Off Slide / Risk-Off Volatile, etc.)
+    family_hits = [
+        label
+        for label in folders
+        if vibe_token in str(label) and family in str(label)
+    ]
+    if family_hits:
+        return sorted(family_hits, key=_layout_num)[0]
     return ""
 
 
 def mint_market_weather_layout_label(*, vibe_profile: str, weather_mood: str) -> str:
     """
     Mint numbered layout bucket — weather footprint first, strategies follow.
-    Same vibe/mood always reuses the existing folder (no Layout 1..13 spam).
+    Same vibe/mood family always reuses the existing folder (no Layout 1..13 spam).
     """
     existing = find_existing_layout_for_weather(
         vibe_profile=vibe_profile,
@@ -6351,8 +6368,8 @@ def mint_market_weather_layout_label(*, vibe_profile: str, weather_mood: str) ->
     for label in folders:
         max_num = max(max_num, _layout_num(label) if _layout_num(label) < 10**9 else 0)
     vibe_token = _layout_vibe_token(vibe_profile)
-    mood = str(weather_mood or "Mixed Session").strip() or "Mixed Session"
-    return f"Layout {max_num + 1} — {vibe_token} / {mood}"
+    family = _layout_mood_family(weather_mood)
+    return f"Layout {max_num + 1} — {vibe_token} / {family}"
 
 
 def resolve_layout_with_market_weather(
