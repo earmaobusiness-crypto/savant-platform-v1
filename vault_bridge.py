@@ -31,6 +31,7 @@ PLACEHOLDER_LAYOUT_IDS = frozenset({"NEW_LAYOUT", "PURGATORY_PENDING", "—", "-
 PROJECT_ROOT = Path(__file__).resolve().parent
 PROJECT_SECRETS_PATH = PROJECT_ROOT / ".streamlit" / "secrets.toml"
 CACHE_PATH = PROJECT_ROOT / ".streamlit" / "matrix_vault_cache.json"
+VAULT_BACKUP_DIR = PROJECT_ROOT / "vault_backups"
 _PROJECT_SECRETS_CACHE: dict[str, str] | None = None
 
 
@@ -985,3 +986,73 @@ def supabase_load_chat_blob() -> tuple[str, str, str | None]:
         str(row.get("quantum_report") or ""),
         None,
     )
+
+
+def export_vault_snapshot(*, note: str = "") -> tuple[Path | None, str]:
+    """
+    Write a full forensic_patterns JSON snapshot under vault_backups/.
+    Use before risky fixes / migrations — restore is a separate explicit step.
+    """
+    rows, err = supabase_fetch_raw_rows(limit=VAULT_LIBRARY_FETCH_LIMIT)
+    if err:
+        return None, f"snapshot_fetch_failed: {err}"
+    patterns = [
+        row
+        for row in (rows or [])
+        if isinstance(row, dict)
+        and str(row.get("ticker") or "").strip().upper() not in ("", MATRIX_CHAT_LOG_TICKER)
+        and str(row.get("pattern_category") or "").strip().upper() != MATRIX_CHAT_LOG_CATEGORY
+    ]
+    VAULT_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = VAULT_BACKUP_DIR / f"vault_snapshot_{stamp}.json"
+    payload = {
+        "v": 1,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "table": supabase_settings().get("table") or "forensic_patterns",
+        "note": str(note or "").strip(),
+        "row_count": len(patterns),
+        "rows": patterns,
+    }
+    try:
+        path.write_text(json.dumps(payload, default=str), encoding="utf-8")
+    except Exception as exc:
+        return None, f"snapshot_write_failed: {exc}"
+    return path, f"snapshot_ok:{len(patterns)}:{path.name}"
+
+
+def list_vault_snapshots(*, limit: int = 12) -> list[dict]:
+    """Newest local vault snapshots first."""
+    if not VAULT_BACKUP_DIR.is_dir():
+        return []
+    files = sorted(
+        VAULT_BACKUP_DIR.glob("vault_snapshot_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    out: list[dict] = []
+    for path in files[: max(1, int(limit))]:
+        meta = {"path": str(path), "name": path.name, "bytes": path.stat().st_size}
+        try:
+            head = json.loads(path.read_text(encoding="utf-8"))
+            meta["exported_at"] = head.get("exported_at")
+            meta["row_count"] = head.get("row_count")
+            meta["note"] = head.get("note")
+        except Exception:
+            pass
+        out.append(meta)
+    return out
+
+
+def load_vault_snapshot(path: str | Path) -> tuple[dict | None, str]:
+    """Load a snapshot file for inspection / future restore — does not write to Supabase."""
+    target = Path(path)
+    if not target.is_file():
+        return None, "snapshot_not_found"
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return None, f"snapshot_read_failed: {exc}"
+    if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
+        return None, "snapshot_invalid"
+    return payload, f"snapshot_loaded:{len(payload.get('rows') or [])}"

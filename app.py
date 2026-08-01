@@ -4767,11 +4767,83 @@ def _window4_append_cluster_health_reply() -> None:
     _sync_matrix_chat_to_cloud()
 
 
+def _window4_is_backup_query(text: str) -> bool:
+    low = str(text or "").lower().strip()
+    if not low:
+        return False
+    return any(
+        phrase in low
+        for phrase in (
+            "backup vault",
+            "vault backup",
+            "snapshot vault",
+            "vault snapshot",
+            "list backups",
+            "list snapshots",
+            "show backups",
+            "show snapshots",
+        )
+    )
+
+
+def _window4_append_vault_backup_reply(text: str) -> None:
+    """Snapshot forensic patterns to local vault_backups/ — does not wipe cloud."""
+    low = str(text or "").lower()
+    list_only = any(
+        phrase in low for phrase in ("list backup", "list snapshot", "show backup", "show snapshot")
+    )
+    if list_only:
+        snaps = vault_bridge.list_vault_snapshots(limit=8)
+        if not snaps:
+            body = "No local vault snapshots yet. Say **backup vault** to create one."
+        else:
+            lines = ["**Local vault snapshots** (newest first):"]
+            for snap in snaps:
+                lines.append(
+                    f"- `{snap.get('name')}` · {snap.get('row_count', '?')} rows · "
+                    f"{str(snap.get('exported_at') or '')[:19]}"
+                )
+            body = "\n".join(lines)
+        st.session_state.room2_chat_history.append(
+            {
+                "speaker": "Forensic Expert",
+                "text": _format_window4_response(body, vault_safe=True),
+                "vault_safe": True,
+            }
+        )
+        st.session_state.window4_status_line = "💾 Snapshot inventory listed."
+        _sync_matrix_chat_to_cloud()
+        return
+
+    path, msg = vault_bridge.export_vault_snapshot(note="window4_operator_backup")
+    if path is None:
+        body = f"⚠️ Vault snapshot failed — {msg}"
+    else:
+        body = (
+            f"💾 **Vault snapshot saved** — `{path.name}`\n"
+            f"{msg}\n"
+            f"Folder: `vault_backups/` · cloud vault untouched."
+        )
+    st.session_state.room2_chat_history.append(
+        {
+            "speaker": "Forensic Expert",
+            "text": _format_window4_response(body, vault_safe=True),
+            "vault_safe": True,
+        }
+    )
+    st.session_state.window4_status_line = (
+        f"💾 Snapshot {'OK' if path else 'FAILED'} — {path.name if path else msg}"
+    )
+    _sync_matrix_chat_to_cloud()
+
+
 def _window4_route_message(text: str) -> str:
     """Router — vault commands, last-N, cluster health, inventory, live data, or chat."""
     clean = str(text or "").strip()
     if _window4_vault_command_only(clean):
         return "vault"
+    if _window4_is_backup_query(clean):
+        return "backup"
     if _window4_parse_last_n_query(clean) is not None:
         return "recent"
     if _window4_is_cluster_health_query(clean):
@@ -5195,6 +5267,10 @@ def _window4_handle_chat_submit(user_text: str) -> None:
         return
 
     route = _window4_route_message(clean)
+
+    if route == "backup":
+        _window4_append_vault_backup_reply(clean)
+        return
 
     if route == "recent":
         n = _window4_parse_last_n_query(clean) or 1
@@ -6576,6 +6652,10 @@ def _advance_room2_processor() -> str:
                     timeframe_resolution=timeframe_resolution,
                     spatial_match_pct=match_score,
                 )
+            )
+            execution_strategy = core_quantum.align_execution_strategy_to_timeframe(
+                execution_strategy,
+                timeframe_resolution,
             )
 
             if not (st.session_state.get("room2_chart_coupling") or {}).get("passed"):

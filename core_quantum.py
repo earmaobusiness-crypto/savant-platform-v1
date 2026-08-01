@@ -2158,6 +2158,32 @@ def _timeframe_token(timeframe_resolution: str) -> str:
     )
 
 
+def align_execution_strategy_to_timeframe(
+    strategy: str,
+    timeframe_resolution: str,
+) -> str:
+    """
+    Force strategy label TF token to match the row timeframe.
+    Prevents stale funnel labels like '3A (15M)' landing on a 1-Minute save.
+    """
+    label = str(strategy or "").strip()
+    if not label:
+        return label
+    tf = _timeframe_token(timeframe_resolution)
+    if re.search(r"\(\s*(1M|5M|15M)\s*\)", label, flags=re.IGNORECASE):
+        return re.sub(
+            r"\(\s*(1M|5M|15M)\s*\)",
+            f"({tf})",
+            label,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    # Bare letter labels (rare) — append TF token.
+    if re.fullmatch(r"\d+[A-Z]", label, flags=re.IGNORECASE):
+        return f"{label.upper()} ({tf})"
+    return label
+
+
 def resolve_matrix_strategy_id(
     *,
     layout_id: str,
@@ -2360,6 +2386,7 @@ def coerce_vault_cluster_identity(payload: dict) -> dict:
             timeframe_resolution=timeframe_resolution,
             spatial_match_pct=match_pct,
         )
+    strategy = align_execution_strategy_to_timeframe(strategy, timeframe_resolution)
 
     row["macro_weather_layout"] = str(layout or "").strip()
     row["execution_strategy"] = str(strategy or "").strip()
