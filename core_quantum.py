@@ -141,6 +141,9 @@ TIMEFRAME_MARGIN_FLOORS = {
 }
 # Versioned labeling rubric — stamp on every mint/skip so month-1 "good" stays comparable.
 ROOM2_LABEL_RUBRIC_VERSION = "v1"
+# Structural move formula — facts (ticker/window/TF) stay; derived prices can be recalculated.
+STRUCTURAL_MOVE_FORMULA_ID = "start_wick_to_end_wick_v1"
+STRUCTURAL_MOVE_FORMULA_LABEL = "start-bar low wick → end-bar high wick"
 ROOM2_LABEL_RUBRIC_BULLETS = (
     "Win = clear directional impulse inside operator Start→End with fillable tape.",
     "Net margin after friction must clear the timeframe floor (1m 1% / 5m 3% / 15m 5%).",
@@ -6635,6 +6638,322 @@ def _operator_window_spike_metrics(
         return empty
 
 
+def _split_vault_boundary_timestamp(raw: str) -> tuple[str | None, str | None]:
+    """Split vault entry_time/exit_time into (YYYY-MM-DD, HH:MM AM/PM)."""
+    text = str(raw or "").strip()
+    if not text:
+        return None, None
+    # Common vault form: "2026-07-01 9:10 AM"
+    m = re.match(
+        r"^(\d{4}-\d{2}-\d{2})[ T]+(\d{1,2}:\d{2})(?::\d{2})?\s*([AP]M)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        date_str = m.group(1)
+        hm = m.group(2)
+        ampm = m.group(3).upper()
+        try:
+            dt = datetime.datetime.strptime(
+                f"{date_str} {hm} {ampm}", "%Y-%m-%d %I:%M %p"
+            )
+            return date_str, dt.strftime("%I:%M %p")
+        except Exception:
+            return date_str, f"{hm} {ampm}"
+    # ISO-ish: 2026-07-01T09:10:00
+    m2 = re.match(r"^(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{2})", text)
+    if m2:
+        date_str = m2.group(1)
+        try:
+            dt = datetime.datetime(
+                int(date_str[:4]),
+                int(date_str[5:7]),
+                int(date_str[8:10]),
+                int(m2.group(2)),
+                int(m2.group(3)),
+            )
+            return date_str, dt.strftime("%I:%M %p")
+        except Exception:
+            return date_str, None
+    return None, None
+
+
+def parse_vault_row_operator_window(row: dict) -> dict:
+    """Recover operator start/end date+time from a stored vault row."""
+    entry_date, entry_time = _split_vault_boundary_timestamp(str(row.get("entry_time") or ""))
+    exit_date, exit_time = _split_vault_boundary_timestamp(str(row.get("exit_time") or ""))
+    ok = bool(entry_date and entry_time and exit_date and exit_time)
+    return {
+        "ok": ok,
+        "start_date": entry_date,
+        "start_time": entry_time,
+        "end_date": exit_date,
+        "end_time": exit_time,
+        "ticker": str(row.get("ticker") or "").strip().upper(),
+        "timeframe_resolution": str(
+            row.get("timeframe_resolution") or row.get("timeframe") or "15-Minute"
+        ).strip()
+        or "15-Minute",
+    }
+
+
+def _recalc_session_track_cache() -> dict:
+    cache = st.session_state.setdefault("_vault_recalc_track_cache", {})
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state._vault_recalc_track_cache = cache
+    return cache
+
+
+def load_session_track_for_recalc(
+    ticker: str,
+    *,
+    start_date,
+    end_date,
+    timeframe_resolution: str,
+):
+    """
+    Load TF track for vault recalculation. Reuses session cache per ticker/day
+    so a full vault pass does not re-hit Massive for every row on the same session.
+    """
+    ticker_clean = str(ticker or "").strip().upper()
+    if not ticker_clean:
+        return None, "missing_ticker"
+    fetch_pad_days = _lookback_fetch_padding_days(timeframe_resolution)
+    fetch_start_date = _shift_session_date_backward(start_date, fetch_pad_days)
+    cache_key = (
+        f"{ticker_clean}|{_session_date_value(fetch_start_date)}"
+        f"|{_session_date_value(end_date)}|{timeframe_resolution}"
+    )
+    cache = _recalc_session_track_cache()
+    cached = cache.get(cache_key)
+    if is_usable_data_stream(cached):
+        return cached, None
+
+    bars, signal = fetch_polygon_session_1m_package(
+        ticker_clean,
+        start_date=fetch_start_date,
+        end_date=end_date,
+    )
+    if signal == "THROTTLE":
+        return None, "THROTTLE"
+    if signal in (MASSIVE_PLAN_TIMEFRAME_BLOCKED, POLYGON_REST_DATA_EMPTY) or not bars:
+        return None, str(signal or POLYGON_REST_DATA_EMPTY)
+    frame_1m = _polygon_aggs_to_dataframe(bars)
+    if not is_usable_data_stream(frame_1m):
+        return None, POLYGON_REST_DATA_EMPTY
+    frame_1m = _strip_dataframe_index_timezone(frame_1m)
+    track = _resolve_track_from_1m(frame_1m, timeframe_resolution)
+    if not is_usable_data_stream(track):
+        return None, POLYGON_REST_DATA_EMPTY
+    cache[cache_key] = track
+    return track, None
+
+
+def recompute_vault_row_structural_measure(row: dict) -> dict:
+    """
+    Recompute start-wick → end-wick for one vault row. Does not write.
+    Leaves layout/DNA/state untouched — caller patches price fields only.
+    """
+    window = parse_vault_row_operator_window(row)
+    base = {
+        "id": row.get("id"),
+        "ticker": window.get("ticker"),
+        "ok": False,
+        "changed": False,
+        "error": None,
+        "old_move_pct": float(row.get("structural_move_pct") or 0.0),
+        "old_entry": str(row.get("entry_coordinate") or ""),
+        "old_exit": str(row.get("exit_coordinate") or ""),
+        "new_move_pct": None,
+        "new_entry": None,
+        "new_exit": None,
+        "formula_id": STRUCTURAL_MOVE_FORMULA_ID,
+    }
+    if not window.get("ok"):
+        base["error"] = "bad_entry_exit_time"
+        return base
+    track, err = load_session_track_for_recalc(
+        window["ticker"],
+        start_date=window["start_date"],
+        end_date=window["end_date"],
+        timeframe_resolution=window["timeframe_resolution"],
+    )
+    if err or not is_usable_data_stream(track):
+        base["error"] = str(err or "no_bars")
+        return base
+    quality = evaluate_playbook_quality_barrier(
+        track,
+        start_date=window["start_date"],
+        start_time=window["start_time"],
+        end_date=window["end_date"],
+        end_time=window["end_time"],
+        timeframe_resolution=window["timeframe_resolution"],
+    )
+    spike = quality.get("operator_spike_metrics") or {}
+    new_entry = spike.get("start_bar_low")
+    new_exit = spike.get("end_bar_high")
+    new_move = quality.get("structural_move_pct")
+    if new_entry is None or new_exit is None or new_move is None:
+        base["error"] = "measure_failed"
+        return base
+    new_entry_s = f"{float(new_entry):.6f}".rstrip("0").rstrip(".")
+    new_exit_s = f"{float(new_exit):.6f}".rstrip("0").rstrip(".")
+    new_move_f = round(float(new_move), 4)
+    old_move_f = round(float(base["old_move_pct"]), 4)
+    try:
+        old_entry_f = float(base["old_entry"]) if str(base["old_entry"]).strip() else None
+    except Exception:
+        old_entry_f = None
+    try:
+        old_exit_f = float(base["old_exit"]) if str(base["old_exit"]).strip() else None
+    except Exception:
+        old_exit_f = None
+    changed = (
+        abs(old_move_f - new_move_f) > 0.0005
+        or old_entry_f is None
+        or old_exit_f is None
+        or abs(float(old_entry_f) - float(new_entry)) > 1e-6
+        or abs(float(old_exit_f) - float(new_exit)) > 1e-6
+    )
+    base.update(
+        {
+            "ok": True,
+            "changed": changed,
+            "new_move_pct": new_move_f,
+            "new_entry": new_entry_s,
+            "new_exit": new_exit_s,
+            "net_direction_pct": quality.get("net_direction_pct"),
+            "rally_ok": quality.get("rally_chronology_ok"),
+        }
+    )
+    return base
+
+
+def recalculate_vault_structural_measures(
+    *,
+    dry_run: bool = True,
+    limit: int | None = None,
+    max_writes: int | None = None,
+) -> dict:
+    """
+    Lean pivot pass: reload bars → recompute start-wick/end-wick → optional write.
+
+    Touches ONLY: structural_move_pct, entry_coordinate, exit_coordinate,
+    and a MEASURE: stamp inside operator_context.
+    Never edits layout, strategy, DNA, state, or match %.
+    """
+    rows, err = vault_bridge.supabase_fetch_patterns(
+        limit=int(getattr(vault_bridge, "VAULT_LIBRARY_FETCH_LIMIT", 5000))
+    )
+    if err:
+        return {"ok": False, "error": err, "dry_run": dry_run}
+    patterns = [
+        row
+        for row in (rows or [])
+        if isinstance(row, dict)
+        and str(row.get("ticker") or "").strip().upper()
+        not in ("", getattr(vault_bridge, "MATRIX_CHAT_LOG_TICKER", "_LAB_SESSION_"))
+    ]
+    if limit is not None:
+        patterns = patterns[: max(0, int(limit))]
+
+    summary = {
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "formula_id": STRUCTURAL_MOVE_FORMULA_ID,
+        "formula_label": STRUCTURAL_MOVE_FORMULA_LABEL,
+        "scanned": 0,
+        "ok_rows": 0,
+        "changed": 0,
+        "unchanged": 0,
+        "written": 0,
+        "skipped": 0,
+        "errors": 0,
+        "throttle": False,
+        "samples": [],
+        "error_samples": [],
+    }
+    writes_left = None if max_writes is None else max(0, int(max_writes))
+
+    for row in patterns:
+        summary["scanned"] += 1
+        result = recompute_vault_row_structural_measure(row)
+        if result.get("error") == "THROTTLE":
+            summary["throttle"] = True
+            summary["errors"] += 1
+            summary["error_samples"].append(
+                {
+                    "id": result.get("id"),
+                    "ticker": result.get("ticker"),
+                    "error": "THROTTLE",
+                }
+            )
+            break
+        if not result.get("ok"):
+            summary["errors"] += 1
+            if len(summary["error_samples"]) < 12:
+                summary["error_samples"].append(
+                    {
+                        "id": result.get("id"),
+                        "ticker": result.get("ticker"),
+                        "error": result.get("error"),
+                    }
+                )
+            continue
+        summary["ok_rows"] += 1
+        if not result.get("changed"):
+            summary["unchanged"] += 1
+            continue
+        summary["changed"] += 1
+        if len(summary["samples"]) < 12:
+            summary["samples"].append(
+                {
+                    "id": result.get("id"),
+                    "ticker": result.get("ticker"),
+                    "old_move": result.get("old_move_pct"),
+                    "new_move": result.get("new_move_pct"),
+                    "old_entry": result.get("old_entry"),
+                    "new_entry": result.get("new_entry"),
+                    "old_exit": result.get("old_exit"),
+                    "new_exit": result.get("new_exit"),
+                }
+            )
+        if dry_run:
+            continue
+        if writes_left is not None and writes_left <= 0:
+            summary["skipped"] += 1
+            continue
+        ctx = str(row.get("operator_context") or "")
+        stamp = f"MEASURE:{STRUCTURAL_MOVE_FORMULA_ID}"
+        if stamp not in ctx:
+            ctx = f"{ctx} | {stamp}".strip(" |") if ctx else stamp
+        ok_write, write_err = vault_bridge.patch_pattern_row(
+            result.get("id"),
+            {
+                "structural_move_pct": result.get("new_move_pct"),
+                "entry_coordinate": result.get("new_entry"),
+                "exit_coordinate": result.get("new_exit"),
+                "operator_context": ctx,
+            },
+        )
+        if ok_write:
+            summary["written"] += 1
+            if writes_left is not None:
+                writes_left -= 1
+        else:
+            summary["errors"] += 1
+            if len(summary["error_samples"]) < 12:
+                summary["error_samples"].append(
+                    {
+                        "id": result.get("id"),
+                        "ticker": result.get("ticker"),
+                        "error": write_err or "patch_failed",
+                    }
+                )
+    return summary
+
+
 def evaluate_session_data_quality(
     data_stream,
     *,
@@ -7821,6 +8140,12 @@ def build_vault_payload(
         notes = f"{notes} | DAY_CONTEXT:{day_blob}".strip(" |") if notes else f"DAY_CONTEXT:{day_blob}"
     if strategy_trust_tier and "TRUST_TIER:" not in notes:
         notes = f"{notes} | TRUST_TIER:{strategy_trust_tier}".strip(" |")
+    if f"MEASURE:{STRUCTURAL_MOVE_FORMULA_ID}" not in notes:
+        notes = (
+            f"{notes} | MEASURE:{STRUCTURAL_MOVE_FORMULA_ID}".strip(" |")
+            if notes
+            else f"MEASURE:{STRUCTURAL_MOVE_FORMULA_ID}"
+        )
     halt_info = st.session_state.get("room2_halt_check") or {}
     if halt_info and "HALT_CHECK:" not in notes:
         halt_stamp = (

@@ -1056,3 +1056,26 @@ def load_vault_snapshot(path: str | Path) -> tuple[dict | None, str]:
     if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
         return None, "snapshot_invalid"
     return payload, f"snapshot_loaded:{len(payload.get('rows') or [])}"
+
+
+def patch_pattern_row(row_id: Any, fields: dict) -> tuple[bool, str | None]:
+    """
+    Patch selected columns on one forensic_patterns row by id.
+    Only pass fields you intend to change — never send layout/DNA here by accident.
+    """
+    rid = str(row_id or "").strip()
+    if not rid:
+        return False, "missing_row_id"
+    if not isinstance(fields, dict) or not fields:
+        return False, "empty_patch"
+    status, _body, err = supabase_rest(
+        "PATCH",
+        "",
+        params=f"?id=eq.{rid}",
+        json_body=fields,
+        prefer="return=minimal",
+        timeout=20,
+    )
+    if status and 200 <= status < 300:
+        return True, None
+    return False, err or f"HTTP {status}"

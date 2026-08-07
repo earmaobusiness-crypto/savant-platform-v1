@@ -4786,6 +4786,127 @@ def _window4_is_backup_query(text: str) -> bool:
     )
 
 
+def _window4_is_recalculate_query(text: str) -> bool:
+    low = str(text or "").lower().strip()
+    if not low:
+        return False
+    return any(
+        phrase in low
+        for phrase in (
+            "recalculate vault",
+            "recalc vault",
+            "recalculate moves",
+            "recalc moves",
+            "dry run recalculate",
+            "dry-run recalculate",
+            "preview recalculate",
+            "apply recalculate",
+            "recalculate vault apply",
+            "recalc vault apply",
+        )
+    )
+
+
+def _window4_append_vault_recalculate_reply(text: str) -> None:
+    """
+    Lean structural-move pivot: reload bars, recompute start-wick → end-wick.
+    Dry-run by default. Apply only on explicit apply language; backups first.
+    Does not touch layout / strategy / DNA / state.
+    """
+    low = str(text or "").lower()
+    apply = any(
+        phrase in low
+        for phrase in (
+            "apply recalculate",
+            "recalculate vault apply",
+            "recalc vault apply",
+            "apply recalc",
+        )
+    )
+    dry_run = not apply
+
+    backup_note = ""
+    if apply:
+        path, msg = vault_bridge.export_vault_snapshot(note="pre_structural_recalculate")
+        if path is None:
+            body = (
+                f"⚠️ Recalculate aborted — backup failed before any writes.\n{msg}\n"
+                "Cloud vault untouched."
+            )
+            st.session_state.room2_chat_history.append(
+                {
+                    "speaker": "Forensic Expert",
+                    "text": _format_window4_response(body, vault_safe=True),
+                    "vault_safe": True,
+                }
+            )
+            st.session_state.window4_status_line = "⚠️ Recalculate aborted — backup failed."
+            _sync_matrix_chat_to_cloud()
+            return
+        backup_note = f"Backup: `{path.name}`\n"
+
+    st.session_state.window4_status_line = (
+        "🧮 Recalculating structural moves (dry-run)…"
+        if dry_run
+        else "🧮 Applying structural recalculate…"
+    )
+    summary = core_quantum.recalculate_vault_structural_measures(dry_run=dry_run)
+    if not summary.get("ok"):
+        body = f"⚠️ Recalculate failed — {summary.get('error')}"
+    else:
+        mode = "DRY-RUN (no writes)" if dry_run else "APPLIED"
+        lines = [
+            f"🧮 **Vault structural recalculate — {mode}**",
+            backup_note.strip(),
+            f"Formula: `{summary.get('formula_id')}` — {summary.get('formula_label')}",
+            (
+                f"Scanned {summary.get('scanned', 0)} · ok {summary.get('ok_rows', 0)} · "
+                f"changed {summary.get('changed', 0)} · unchanged {summary.get('unchanged', 0)} · "
+                f"written {summary.get('written', 0)} · errors {summary.get('errors', 0)}"
+            ),
+        ]
+        if summary.get("throttle"):
+            lines.append("⛔ Stopped early on Massive throttle — rerun later.")
+        samples = summary.get("samples") or []
+        if samples:
+            lines.append("Sample deltas:")
+            for sample in samples[:8]:
+                lines.append(
+                    f"- #{sample.get('id')} {sample.get('ticker')}: "
+                    f"{sample.get('old_move')}% → {sample.get('new_move')}% "
+                    f"({sample.get('old_entry')}→{sample.get('new_entry')} / "
+                    f"{sample.get('old_exit')}→{sample.get('new_exit')})"
+                )
+        err_samples = summary.get("error_samples") or []
+        if err_samples:
+            lines.append("Errors:")
+            for sample in err_samples[:6]:
+                lines.append(
+                    f"- #{sample.get('id')} {sample.get('ticker')}: {sample.get('error')}"
+                )
+        if dry_run:
+            lines.append(
+                "Say **apply recalculate** to backup then write "
+                "move/entry/exit only (layout/DNA untouched)."
+            )
+        body = "\n".join(line for line in lines if line)
+
+    st.session_state.room2_chat_history.append(
+        {
+            "speaker": "Forensic Expert",
+            "text": _format_window4_response(body, vault_safe=True),
+            "vault_safe": True,
+        }
+    )
+    st.session_state.window4_status_line = (
+        f"🧮 Recalculate {'dry-run' if dry_run else 'apply'} — "
+        f"changed {summary.get('changed', 0)} / written {summary.get('written', 0)}"
+        if summary.get("ok")
+        else "⚠️ Recalculate failed."
+    )
+    _sync_matrix_chat_to_cloud()
+
+
 def _window4_append_vault_backup_reply(text: str) -> None:
     """Snapshot forensic patterns to local vault_backups/ — does not wipe cloud."""
     low = str(text or "").lower()
@@ -4842,6 +4963,8 @@ def _window4_route_message(text: str) -> str:
     clean = str(text or "").strip()
     if _window4_vault_command_only(clean):
         return "vault"
+    if _window4_is_recalculate_query(clean):
+        return "recalculate"
     if _window4_is_backup_query(clean):
         return "backup"
     if _window4_parse_last_n_query(clean) is not None:
@@ -5267,6 +5390,10 @@ def _window4_handle_chat_submit(user_text: str) -> None:
         return
 
     route = _window4_route_message(clean)
+
+    if route == "recalculate":
+        _window4_append_vault_recalculate_reply(clean)
+        return
 
     if route == "backup":
         _window4_append_vault_backup_reply(clean)
