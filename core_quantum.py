@@ -1265,8 +1265,20 @@ def enforce_permanent_library_profit_floor(quality: dict) -> dict:
     Non-negotiable tiered quality gate before permanent library save.
     1m >= 1.0%, 5m >= 3.0%, 15m >= 5.0%.
     When net_margin_pct is present, friction-adjusted margin must clear the floor.
+    Never re-opens a directional/structure reject already marked trashed.
     """
     out = dict(quality or {})
+    prior_trash = str(out.get("trash_reason") or "")
+    prior_hard_reject = prior_trash.startswith(
+        ("DOWN_STRUCTURE_REJECTED", "NET_DIRECTION_REJECTED")
+    ) or (
+        out.get("rally_chronology_ok") is False
+        or (
+            out.get("net_direction_pct") is not None
+            and float(out.get("net_direction_pct") or 0.0) <= 0.0
+            and prior_trash
+        )
+    )
     tf = str(out.get("timeframe_resolution") or "15-Minute")
     floor_pct = float(out.get("floor_pct") or timeframe_margin_floor(tf))
     move_pct = float(out.get("structural_move_pct") or 0.0)
@@ -1283,11 +1295,15 @@ def enforce_permanent_library_profit_floor(quality: dict) -> dict:
     tf_fit = out.get("timeframe_fit") or {}
     if tf_fit and not tf_fit.get("passed", True):
         passed = False
+    if prior_hard_reject:
+        passed = False
     out["floor_pct"] = floor_pct
     out["passed"] = passed
     out["trashed"] = not passed
     if not passed:
-        if tf_fit and not tf_fit.get("passed", True):
+        if prior_hard_reject and prior_trash:
+            out["trash_reason"] = prior_trash
+        elif tf_fit and not tf_fit.get("passed", True):
             out["trash_reason"] = tf_fit.get("message") or "timeframe_window_mismatch"
         elif friction_pct > 0 and net_margin_pct is not None:
             out["trash_reason"] = (

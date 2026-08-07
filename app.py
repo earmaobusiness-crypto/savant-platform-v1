@@ -6504,6 +6504,22 @@ def _advance_room2_processor() -> str:
                 move_pct = quality.get("structural_move_pct", 0.0)
                 net = quality.get("net_margin_pct", move_pct)
                 friction = quality.get("execution_friction_buffer_pct", 0.0)
+                reason = str(quality.get("trash_reason") or "")
+                if reason.startswith("DOWN_STRUCTURE_REJECTED"):
+                    return _halt_room2_processor_with_charts(
+                        fault_text=(
+                            "🗑️ PRE-STORAGE TRASH — Down/selloff structure rejected "
+                            "(high before low). Crystal longs require a chronological rally."
+                        )
+                    )
+                if reason.startswith("NET_DIRECTION_REJECTED"):
+                    net_dir = quality.get("net_direction_pct", 0.0)
+                    return _halt_room2_processor_with_charts(
+                        fault_text=(
+                            f"🗑️ PRE-STORAGE TRASH — Net window direction {float(net_dir):.2f}% "
+                            "(finish not above start). Pattern rejected before vault mint."
+                        )
+                    )
                 return _halt_room2_processor_with_charts(
                     fault_text=(
                         f"🗑️ PRE-STORAGE TRASH — Net margin {net:.2f}% failed "
