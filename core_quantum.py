@@ -1270,15 +1270,12 @@ def enforce_permanent_library_profit_floor(quality: dict) -> dict:
     out = dict(quality or {})
     prior_trash = str(out.get("trash_reason") or "")
     prior_hard_reject = prior_trash.startswith(
-        ("DOWN_STRUCTURE_REJECTED", "NET_DIRECTION_REJECTED")
-    ) or (
-        out.get("rally_chronology_ok") is False
-        or (
-            out.get("net_direction_pct") is not None
-            and float(out.get("net_direction_pct") or 0.0) <= 0.0
-            and prior_trash
+        (
+            "DOWN_STRUCTURE_REJECTED",
+            "NET_DIRECTION_REJECTED",
+            "ENDPOINT_WICK_REJECTED",
         )
-    )
+    ) or (out.get("rally_chronology_ok") is False and bool(prior_trash))
     tf = str(out.get("timeframe_resolution") or "15-Minute")
     floor_pct = float(out.get("floor_pct") or timeframe_margin_floor(tf))
     move_pct = float(out.get("structural_move_pct") or 0.0)
@@ -2080,9 +2077,12 @@ def evaluate_playbook_quality_barrier(
     """
     Operator-first quality gate for crystal long archives:
     1) Window must fit the selected bar size (1m/5m/15m).
-    2) Rally must be chronological (low before high) — not a selloff envelope.
-    3) Net window direction must be positive (start→end up).
-    4) Net margin must clear the tiered floor.
+    2) Structural move = start-bar low wick -> end-bar high wick.
+    3) That endpoint span must be positive (cascading dumps fail).
+    4) Net margin (endpoint move − friction) must clear the tiered floor.
+
+    Close-to-close finish is diagnostic only — a red finish must not veto a
+    large start-wick -> end-wick opportunity the operator marked.
     """
     floor_pct = timeframe_margin_floor(timeframe_resolution)
     end_dt = _parse_session_datetime(end_date, end_time)
@@ -2090,28 +2090,19 @@ def evaluate_playbook_quality_barrier(
     timeframe_fit = validate_operator_timeframe_fit(start_dt, end_dt, timeframe_resolution)
 
     operator_spike = _operator_window_spike_metrics(data_stream, start_dt, end_dt)
-    structural_move_pct = float(operator_spike.get("envelope_move_pct") or 0.0)
-    ignition_price = operator_spike.get("window_low")
-    exit_price = operator_spike.get("window_high")
-    ignition_ts = operator_spike.get("low_ts")
-    exit_anchor_ts = operator_spike.get("high_ts")
+    structural_move_pct = float(
+        operator_spike.get("endpoint_move_pct")
+        or operator_spike.get("envelope_move_pct")
+        or 0.0
+    )
+    ignition_price = operator_spike.get("start_bar_low")
+    exit_price = operator_spike.get("end_bar_high")
+    ignition_ts = operator_spike.get("start_bar_ts") or operator_spike.get("low_ts")
+    exit_anchor_ts = operator_spike.get("end_bar_ts") or operator_spike.get("high_ts")
     raw_exit_price = _price_at_datetime(data_stream, end_dt)
     rally_ok = bool(operator_spike.get("rally_chronology_ok"))
+    # Diagnostic only — not a pass/fail veto.
     net_direction_pct = float(operator_spike.get("net_direction_pct") or 0.0)
-
-    if start_dt is not None and end_dt is not None:
-        start_px = _price_at_datetime(data_stream, start_dt)
-        end_px = raw_exit_price
-        if start_px and end_px and start_px > 0:
-            # Signed only — down windows must NOT flip into fake positive DNA.
-            coord_move = (end_px - start_px) / start_px * 100.0
-            net_direction_pct = float(coord_move)
-            if coord_move > structural_move_pct and coord_move > 0:
-                structural_move_pct = coord_move
-                ignition_price = start_px
-                exit_price = end_px
-                ignition_ts = str(start_dt)
-                exit_anchor_ts = str(end_dt)
 
     lookback_start = _calibrated_lookback_start(
         end_dt,
@@ -2125,11 +2116,9 @@ def evaluate_playbook_quality_barrier(
         timeframe_resolution=timeframe_resolution,
     )
     net_margin_pct = round(structural_move_pct - friction_pct, 4)
-    direction_ok = net_direction_pct > 0
     passed = (
         bool(timeframe_fit.get("passed"))
         and rally_ok
-        and direction_ok
         and net_margin_pct >= floor_pct
     )
     trash_reason = None
@@ -2137,13 +2126,9 @@ def evaluate_playbook_quality_barrier(
         trash_reason = timeframe_fit.get("message")
     elif not rally_ok:
         trash_reason = (
-            "DOWN_STRUCTURE_REJECTED|high_before_or_at_low|"
-            "envelope_is_selloff_not_crystal_long"
-        )
-    elif not direction_ok:
-        trash_reason = (
-            f"NET_DIRECTION_REJECTED|net={net_direction_pct:.4f}%|"
-            "window_finish_not_above_start"
+            f"ENDPOINT_WICK_REJECTED|start_low={operator_spike.get('start_bar_low')}|"
+            f"end_high={operator_spike.get('end_bar_high')}|"
+            "end_wick_not_above_start_wick"
         )
     quality = {
         "passed": passed,
@@ -2163,7 +2148,7 @@ def evaluate_playbook_quality_barrier(
         "exit_anchor_timestamp": exit_anchor_ts,
         "timeframe_resolution": timeframe_resolution,
         "lookback_start": str(lookback_start) if lookback_start else None,
-        "entry_candidate_selected": "operator_window_envelope",
+        "entry_candidate_selected": "start_wick_to_end_wick",
         "operator_window_envelope": True,
         "operator_spike_metrics": operator_spike,
         "timeframe_fit": timeframe_fit,
@@ -6553,20 +6538,28 @@ def _operator_window_spike_metrics(
     end_dt: datetime.datetime | None,
 ) -> dict:
     """
-    Measure the rally envelope inside the operator-drawn window (low -> high).
-    Chronology matters: high-before-low is a selloff structure, not a crystal long.
+    Crystal-long structural measure (slippage / profitability priority):
+    start-bar lowest wick -> end-bar highest wick.
+
+    Mid-window absolute min/max is retained as diagnostics only. Close-to-close
+    finish is diagnostic only and must not veto a valid endpoint-wick rally.
     """
     empty = {
         "envelope_move_pct": 0.0,
+        "endpoint_move_pct": 0.0,
         "peak_giveback_pct": 0.0,
         "window_minutes": 0,
         "window_low": None,
         "window_high": None,
+        "start_bar_low": None,
+        "end_bar_high": None,
         "end_close": None,
         "start_close": None,
         "net_direction_pct": 0.0,
         "low_ts": None,
         "high_ts": None,
+        "start_bar_ts": None,
+        "end_bar_ts": None,
         "rally_chronology_ok": False,
         "trimmed_bars": 0,
     }
@@ -6586,36 +6579,55 @@ def _operator_window_spike_metrics(
         lows = window["Low"].astype(float)
         highs = window["High"].astype(float)
         closes = window["Close"].astype(float)
+        start_bar_ts = window.index[0]
+        end_bar_ts = window.index[-1]
+        start_bar_low = float(lows.iloc[0])
+        end_bar_high = float(highs.iloc[-1])
         low_ts = lows.idxmin()
         high_ts = highs.idxmax()
         window_low = float(lows.min())
         window_high = float(highs.max())
         start_close = float(closes.iloc[0])
         end_close = float(closes.iloc[-1])
-        if window_low <= 0 or window_high <= 0 or start_close <= 0:
+        if start_bar_low <= 0 or end_bar_high <= 0 or start_close <= 0:
             return empty
-        envelope_move_pct = (window_high - window_low) / window_low * 100.0
+        # Primary structural span: operator start wick -> exit wick.
+        endpoint_move_pct = (end_bar_high - start_bar_low) / start_bar_low * 100.0
+        # Diagnostic: full-window envelope (any bar low -> any bar high).
+        envelope_move_pct = (
+            (window_high - window_low) / window_low * 100.0
+            if window_low > 0
+            else 0.0
+        )
         net_direction_pct = (end_close - start_close) / start_close * 100.0
         peak_giveback_pct = (
-            (window_high - end_close) / window_high * 100.0
-            if end_close < window_high
+            (end_bar_high - end_close) / end_bar_high * 100.0
+            if end_close < end_bar_high
             else 0.0
         )
         window_minutes = max(1, int((end_dt - start_dt).total_seconds() // 60))
-        rally_chronology_ok = bool(
-            high_ts is not None and low_ts is not None and high_ts > low_ts
-        )
+        # Endpoint chronology is inherent (start bar before end bar); require a
+        # positive wick span so cascading dumps (end high below start low) fail.
+        rally_chronology_ok = bool(end_bar_high > start_bar_low)
         return {
-            "envelope_move_pct": round(envelope_move_pct, 4),
+            "envelope_move_pct": round(endpoint_move_pct, 4),
+            "endpoint_move_pct": round(endpoint_move_pct, 4),
+            "window_envelope_move_pct": round(envelope_move_pct, 4),
             "peak_giveback_pct": round(peak_giveback_pct, 4),
             "window_minutes": window_minutes,
             "window_low": round(window_low, 6),
             "window_high": round(window_high, 6),
+            "start_bar_low": round(start_bar_low, 6),
+            "end_bar_high": round(end_bar_high, 6),
             "end_close": round(end_close, 6),
             "start_close": round(start_close, 6),
             "net_direction_pct": round(net_direction_pct, 4),
-            "low_ts": str(low_ts),
-            "high_ts": str(high_ts),
+            "low_ts": str(start_bar_ts),
+            "high_ts": str(end_bar_ts),
+            "start_bar_ts": str(start_bar_ts),
+            "end_bar_ts": str(end_bar_ts),
+            "mid_window_low_ts": str(low_ts),
+            "mid_window_high_ts": str(high_ts),
             "rally_chronology_ok": rally_chronology_ok,
             "trimmed_bars": max(0, raw_bars - len(window)),
         }

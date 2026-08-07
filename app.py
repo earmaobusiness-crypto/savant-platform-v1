@@ -6505,14 +6505,18 @@ def _advance_room2_processor() -> str:
                 net = quality.get("net_margin_pct", move_pct)
                 friction = quality.get("execution_friction_buffer_pct", 0.0)
                 reason = str(quality.get("trash_reason") or "")
-                if reason.startswith("DOWN_STRUCTURE_REJECTED"):
+                if reason.startswith("DOWN_STRUCTURE_REJECTED") or reason.startswith(
+                    "ENDPOINT_WICK_REJECTED"
+                ):
                     return _halt_room2_processor_with_charts(
                         fault_text=(
-                            "🗑️ PRE-STORAGE TRASH — Down/selloff structure rejected "
-                            "(high before low). Crystal longs require a chronological rally."
+                            "🗑️ PRE-STORAGE TRASH — Endpoint wick span rejected "
+                            "(end-bar high wick not above start-bar low wick). "
+                            "Crystal longs require start low → exit high."
                         )
                     )
                 if reason.startswith("NET_DIRECTION_REJECTED"):
+                    # Legacy message — close-to-close is no longer a hard veto.
                     net_dir = quality.get("net_direction_pct", 0.0)
                     return _halt_room2_processor_with_charts(
                         fault_text=(
