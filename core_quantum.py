@@ -2062,9 +2062,11 @@ def evaluate_playbook_quality_barrier(
     timeframe_resolution: str,
 ) -> dict:
     """
-    Operator-first quality gate — only two decisions:
+    Operator-first quality gate for crystal long archives:
     1) Window must fit the selected bar size (1m/5m/15m).
-    2) Net move inside the operator window must clear the tiered floor.
+    2) Rally must be chronological (low before high) — not a selloff envelope.
+    3) Net window direction must be positive (start→end up).
+    4) Net margin must clear the tiered floor.
     """
     floor_pct = timeframe_margin_floor(timeframe_resolution)
     end_dt = _parse_session_datetime(end_date, end_time)
@@ -2078,13 +2080,17 @@ def evaluate_playbook_quality_barrier(
     ignition_ts = operator_spike.get("low_ts")
     exit_anchor_ts = operator_spike.get("high_ts")
     raw_exit_price = _price_at_datetime(data_stream, end_dt)
+    rally_ok = bool(operator_spike.get("rally_chronology_ok"))
+    net_direction_pct = float(operator_spike.get("net_direction_pct") or 0.0)
 
     if start_dt is not None and end_dt is not None:
         start_px = _price_at_datetime(data_stream, start_dt)
         end_px = raw_exit_price
         if start_px and end_px and start_px > 0:
-            coord_move = abs((end_px - start_px) / start_px * 100)
-            if coord_move > structural_move_pct:
+            # Signed only — down windows must NOT flip into fake positive DNA.
+            coord_move = (end_px - start_px) / start_px * 100.0
+            net_direction_pct = float(coord_move)
+            if coord_move > structural_move_pct and coord_move > 0:
                 structural_move_pct = coord_move
                 ignition_price = start_px
                 exit_price = end_px
@@ -2103,13 +2109,34 @@ def evaluate_playbook_quality_barrier(
         timeframe_resolution=timeframe_resolution,
     )
     net_margin_pct = round(structural_move_pct - friction_pct, 4)
-    passed = bool(timeframe_fit.get("passed")) and net_margin_pct >= floor_pct
+    direction_ok = net_direction_pct > 0
+    passed = (
+        bool(timeframe_fit.get("passed"))
+        and rally_ok
+        and direction_ok
+        and net_margin_pct >= floor_pct
+    )
+    trash_reason = None
+    if not timeframe_fit.get("passed"):
+        trash_reason = timeframe_fit.get("message")
+    elif not rally_ok:
+        trash_reason = (
+            "DOWN_STRUCTURE_REJECTED|high_before_or_at_low|"
+            "envelope_is_selloff_not_crystal_long"
+        )
+    elif not direction_ok:
+        trash_reason = (
+            f"NET_DIRECTION_REJECTED|net={net_direction_pct:.4f}%|"
+            "window_finish_not_above_start"
+        )
     quality = {
         "passed": passed,
         "trashed": not passed,
         "structural_move_pct": round(structural_move_pct, 4),
         "execution_friction_buffer_pct": round(friction_pct, 4),
         "net_margin_pct": net_margin_pct,
+        "net_direction_pct": round(net_direction_pct, 4),
+        "rally_chronology_ok": rally_ok,
         "floor_pct": floor_pct,
         "anchor_timestamp": str(ignition_ts) if ignition_ts is not None else None,
         "anchor_price": ignition_price,
@@ -2124,11 +2151,7 @@ def evaluate_playbook_quality_barrier(
         "operator_window_envelope": True,
         "operator_spike_metrics": operator_spike,
         "timeframe_fit": timeframe_fit,
-        "trash_reason": (
-            timeframe_fit.get("message")
-            if not timeframe_fit.get("passed")
-            else None
-        ),
+        "trash_reason": trash_reason,
     }
     return enforce_permanent_library_profit_floor(quality)
 
@@ -6515,6 +6538,7 @@ def _operator_window_spike_metrics(
 ) -> dict:
     """
     Measure the rally envelope inside the operator-drawn window (low -> high).
+    Chronology matters: high-before-low is a selloff structure, not a crystal long.
     """
     empty = {
         "envelope_move_pct": 0.0,
@@ -6523,8 +6547,11 @@ def _operator_window_spike_metrics(
         "window_low": None,
         "window_high": None,
         "end_close": None,
+        "start_close": None,
+        "net_direction_pct": 0.0,
         "low_ts": None,
         "high_ts": None,
+        "rally_chronology_ok": False,
         "trimmed_bars": 0,
     }
     frame = _ensure_dataframe(data_stream)
@@ -6542,20 +6569,26 @@ def _operator_window_spike_metrics(
             return empty
         lows = window["Low"].astype(float)
         highs = window["High"].astype(float)
+        closes = window["Close"].astype(float)
         low_ts = lows.idxmin()
         high_ts = highs.idxmax()
         window_low = float(lows.min())
         window_high = float(highs.max())
-        end_close = float(window["Close"].astype(float).iloc[-1])
-        if window_low <= 0 or window_high <= 0:
+        start_close = float(closes.iloc[0])
+        end_close = float(closes.iloc[-1])
+        if window_low <= 0 or window_high <= 0 or start_close <= 0:
             return empty
         envelope_move_pct = (window_high - window_low) / window_low * 100.0
+        net_direction_pct = (end_close - start_close) / start_close * 100.0
         peak_giveback_pct = (
             (window_high - end_close) / window_high * 100.0
             if end_close < window_high
             else 0.0
         )
         window_minutes = max(1, int((end_dt - start_dt).total_seconds() // 60))
+        rally_chronology_ok = bool(
+            high_ts is not None and low_ts is not None and high_ts > low_ts
+        )
         return {
             "envelope_move_pct": round(envelope_move_pct, 4),
             "peak_giveback_pct": round(peak_giveback_pct, 4),
@@ -6563,8 +6596,11 @@ def _operator_window_spike_metrics(
             "window_low": round(window_low, 6),
             "window_high": round(window_high, 6),
             "end_close": round(end_close, 6),
+            "start_close": round(start_close, 6),
+            "net_direction_pct": round(net_direction_pct, 4),
             "low_ts": str(low_ts),
             "high_ts": str(high_ts),
+            "rally_chronology_ok": rally_chronology_ok,
             "trimmed_bars": max(0, raw_bars - len(window)),
         }
     except Exception:
