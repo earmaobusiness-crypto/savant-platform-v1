@@ -402,6 +402,7 @@ def _massive_aggs_request(
     end_date,
     api_key: str,
     api_base: str,
+    timeout_sec: float = 40.0,
 ) -> tuple[dict | None, int, str]:
     """Single REST aggregates pull — date window + Bearer + apiKey (Massive/Polygon compatible)."""
     start_text = _session_date_value(start_date)
@@ -420,7 +421,9 @@ def _massive_aggs_request(
     }
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
-        http_resp = requests.get(url, params=params, headers=headers, timeout=20)
+        http_resp = requests.get(
+            url, params=params, headers=headers, timeout=float(timeout_sec)
+        )
         body_text = http_resp.text[:240]
         if not http_resp.ok:
             try:
@@ -440,6 +443,8 @@ def _massive_aggs_request(
         if isinstance(payload, dict):
             return payload, http_resp.status_code, ""
         return None, http_resp.status_code, body_text
+    except requests.Timeout as exc:
+        return None, 0, f"TIMEOUT|{str(exc)[:100]}"
     except Exception as exc:
         return None, 0, str(exc)[:120]
 
@@ -470,6 +475,24 @@ def _shift_session_date_backward(raw_date, days: int):
         return raw_date
     try:
         shifted = datetime.datetime.strptime(text, "%Y-%m-%d").date() - datetime.timedelta(
+            days=days
+        )
+        if hasattr(raw_date, "strftime"):
+            return shifted
+        return shifted.isoformat()
+    except ValueError:
+        return raw_date
+
+
+def _shift_session_date_forward(raw_date, days: int):
+    """Move a deploy session date forward N calendar days (Massive hang workaround)."""
+    if days <= 0:
+        return raw_date
+    text = _session_date_value(raw_date)
+    if not text:
+        return raw_date
+    try:
+        shifted = datetime.datetime.strptime(text, "%Y-%m-%d").date() + datetime.timedelta(
             days=days
         )
         if hasattr(raw_date, "strftime"):
@@ -531,29 +554,46 @@ def fetch_massive_session_1m_package(
         payload: dict | None = None
         last_status = 0
         last_detail = ""
+        # Massive sometimes hangs on exact single-day ranges (seen: TC 2026-06-30).
+        # Prefer a padded REST window; operator Start/End still fence the trade later.
+        fetch_start = _shift_session_date_backward(start_date, 1)
+        fetch_end = _shift_session_date_forward(end_date, 1)
+        attempt_windows = (
+            (fetch_start, fetch_end, 40.0),
+            (start_date, end_date, 55.0),
+        )
         for api_key in api_keys:
             for api_base in MASSIVE_API_BASES:
-                payload, last_status, last_detail = _massive_aggs_request(
-                    ticker_clean,
-                    start_date=start_date,
-                    end_date=end_date,
-                    api_key=api_key,
-                    api_base=api_base,
-                )
+                for win_start, win_end, timeout_sec in attempt_windows:
+                    payload, last_status, last_detail = _massive_aggs_request(
+                        ticker_clean,
+                        start_date=win_start,
+                        end_date=win_end,
+                        api_key=api_key,
+                        api_base=api_base,
+                        timeout_sec=timeout_sec,
+                    )
+                    if payload is not None and last_status == 200:
+                        st.session_state.r2_market_data_error = None
+                        st.session_state.r2_market_data_key_source = api_base
+                        break
+                    if last_status == 401:
+                        last_detail = "Unknown API Key"
+                        break
+                    if last_status == 429 or (
+                        payload is not None
+                        and str(payload.get("error", "")).lower().find("max requests") >= 0
+                    ):
+                        st.session_state.polygon_calls_remaining = 0
+                        st.session_state.polygon_lockout = True
+                        return None, "THROTTLE"
+                    # Timeout / transport errors — try next window before giving up.
+                    if last_status == 0 and "TIMEOUT" in str(last_detail).upper():
+                        continue
                 if payload is not None and last_status == 200:
-                    st.session_state.r2_market_data_error = None
-                    st.session_state.r2_market_data_key_source = api_base
                     break
                 if last_status == 401:
-                    last_detail = "Unknown API Key"
-                    continue
-                if last_status == 429 or (
-                    payload is not None
-                    and str(payload.get("error", "")).lower().find("max requests") >= 0
-                ):
-                    st.session_state.polygon_calls_remaining = 0
-                    st.session_state.polygon_lockout = True
-                    return None, "THROTTLE"
+                    break
             if payload is not None and last_status == 200:
                 break
 
@@ -569,6 +609,11 @@ def fetch_massive_session_1m_package(
                     "current Massive/Polygon plan — use a prior completed session date."
                 )
                 return None, MASSIVE_PLAN_TIMEFRAME_BLOCKED
+            elif last_status == 0 and "TIMEOUT" in str(last_detail).upper():
+                st.session_state.r2_market_data_error = (
+                    f"MASSIVE_TIMEOUT|{_session_date_value(start_date)}|"
+                    f"{_session_date_value(end_date)}|{last_detail[:60]}"
+                )
             else:
                 st.session_state.r2_market_data_error = (
                     f"MASSIVE_HTTP_{last_status}|{last_detail[:80]}"

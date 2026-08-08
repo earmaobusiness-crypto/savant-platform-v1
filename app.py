@@ -6486,17 +6486,30 @@ def _advance_room2_processor() -> str:
                 )
             if core_quantum.is_pipeline_signal(data_stream, core_quantum.POLYGON_REST_DATA_EMPTY):
                 api_err = str(st.session_state.get("r2_market_data_error") or "").strip()
-                if api_err.startswith("MASSIVE_EMPTY_SESSION"):
+                if api_err.startswith("MASSIVE_TIMEOUT"):
+                    empty_hint = (
+                        f"Massive timed out pulling 1m bars for {ticker} on "
+                        f"{_session_date_label(start_date)}–{_session_date_label(end_date)}. "
+                        "Retry once — not an API-key failure. If it keeps hanging, try the next session day."
+                    )
+                elif api_err.startswith("MASSIVE_EMPTY_SESSION"):
                     empty_hint = (
                         f"No 1m bars returned for {ticker} on "
                         f"{_session_date_label(start_date)}–{_session_date_label(end_date)}. "
                         "Try the last trading day with regular volume."
                     )
+                elif api_err.startswith("MASSIVE_HTTP_401") or api_err.startswith(
+                    "MASSIVE_API_KEY_MISSING"
+                ):
+                    empty_hint = (
+                        f"Massive API key rejected for {ticker}. "
+                        "Check MASSIVE_API_KEY in secrets."
+                    )
                 else:
                     empty_hint = (
                         f"No 1m bars for {ticker} on "
                         f"{_session_date_label(start_date)}–{_session_date_label(end_date)}. "
-                        "Verify Massive API key and session dates."
+                        "Retry, or verify ticker / session dates."
                     )
                 return _halt_room2_processor(
                     fault_text=(
