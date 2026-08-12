@@ -1520,9 +1520,6 @@ def render_room3_trading_center() -> None:
     _inject_room3_css()
     _maybe_roll_trading_session()
 
-    st.markdown("# Room 3 — Execution Terminal")
-    st.caption("Live & paper trading · IBKR integration pending")
-
     _render_mode_slider()
 
     if not st.session_state.room3_demo_seeded:
