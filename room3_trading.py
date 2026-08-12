@@ -1946,15 +1946,7 @@ def _render_all_time_panel() -> None:
         f"Collective P/L = current account − starting bankroll "
         f"(${start:,.2f}). Not today’s P/L."
     )
-
-    expanded = bool(st.session_state.get("room3_chart_expanded"))
-    b1, b2 = st.columns([1, 3])
-    with b1:
-        label = "Compact chart" if expanded else "Expand chart"
-        if st.button(label, key="room3_chart_size_toggle", use_container_width=True):
-            st.session_state.room3_chart_expanded = not expanded
-            st.rerun()
-    _render_equity_trajectory_chart(at, height=360 if expanded else 220)
+    _render_equity_trajectory_chart(at, height=360)
 
 
 def _render_history_trade_detail(trade: dict) -> None:
