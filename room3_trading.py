@@ -696,6 +696,48 @@ def _record_operator_review(trade_id: str, vote: str) -> None:
     st.session_state.room3_decay_alerts = alerts
 
 
+def _undo_operator_review(trade_id: str) -> None:
+    """Move a reviewed trade back to pending — undo an accidental vote."""
+    trade_id = str(trade_id or "").strip()
+    if not trade_id:
+        return
+    reviewed = list(st.session_state.room3_operator_reviews or [])
+    history = list(st.session_state.room3_trade_history or [])
+    match = next((t for t in reviewed if str(t.get("id")) == trade_id), None)
+    if match is None:
+        match = next((t for t in history if str(t.get("id")) == trade_id and t.get("reviewed")), None)
+    if match is None:
+        return
+    restored = dict(match)
+    old_vote = str(restored.pop("operator_vote", "")).strip()
+    restored.pop("reviewed", None)
+    restored.pop("reviewed_at", None)
+    st.session_state.room3_operator_reviews = [
+        t for t in reviewed if str(t.get("id")) != trade_id
+    ]
+    st.session_state.room3_trade_history = [
+        t for t in history if str(t.get("id")) != trade_id
+    ]
+    pending = list(st.session_state.room3_pending_reviews or [])
+    pending.append(restored)
+    st.session_state.room3_pending_reviews = pending
+
+    if old_vote:
+        strat = str(match.get("strategy") or "unknown")
+        fb = dict(st.session_state.room3_strategy_feedback or {})
+        bucket = dict(fb.get(strat) or {"good": 0, "bad": 0})
+        bucket[old_vote] = max(0, int(bucket.get(old_vote) or 0) - 1)
+        fb[strat] = bucket
+        st.session_state.room3_strategy_feedback = fb
+
+    log = list(st.session_state.room3_matrix_sync_log or [])
+    log.append(
+        f"[UNDO] {match.get('ticker')} · {match.get('strategy')} · "
+        f"vote '{old_vote}' reverted — back to pending"
+    )
+    st.session_state.room3_matrix_sync_log = log[-12:]
+
+
 def _fmt_pl_usd(value) -> str:
     v = float(value or 0)
     if v > 0:
@@ -792,28 +834,12 @@ def _render_broker_status_card(mode: str) -> None:
     stats = _session_pl_stats()
     st.markdown(
         f"<div class='{shell_class}'>"
-        f"<div class='room3-kicker'>Room 3 · Trading center</div>"
+        f"<div class='room3-kicker'>Room 3 · Execution terminal</div>"
         f"<div class='room3-title'>{_mode_label(mode)}</div>"
         f"<p class='room3-sub'>IBKR {lane} · <strong>Demo / not connected</strong></p>"
         "</div>",
         unsafe_allow_html=True,
     )
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        st.metric("Account", f"${stats['equity']:,.0f}")
-    with c2:
-        st.metric(
-            "Day P/L",
-            f"${stats['day_pl']:,.2f}",
-            f"{stats['day_pl_pct']:+.2f}%",
-            delta_color="normal",
-        )
-    with c3:
-        st.metric("Open", stats["open_count"])
-    with c4:
-        st.metric("Wins / Losses", f"{stats['wins']} / {stats['losses']}")
-    with c5:
-        st.metric("Win rate", f"{stats['win_rate']:.0f}%" if stats["wins"] + stats["losses"] else "—")
 
 
 def _render_open_positions() -> None:
@@ -888,33 +914,81 @@ def _render_trade_history() -> None:
         return
     _render_dark_table(rows)
 
+    stats = _session_pl_stats()
+    fb = st.session_state.room3_strategy_feedback or {}
+    detail_parts = [
+        f"Win rate **{stats['win_rate']:.0f}%**"
+        if stats["wins"] + stats["losses"]
+        else "Win rate —"
+    ]
+    if fb:
+        for strat, counts in fb.items():
+            detail_parts.append(f"{strat}: ✓{counts.get('good', 0)} ✗{counts.get('bad', 0)}")
+    st.caption(" · ".join(detail_parts))
 
-def _render_session_summary(mode: str) -> None:
-    st.markdown("### Session summary")
+    reviewed_in_log = [
+        r for r in (st.session_state.room3_trade_history or [])
+        if r.get("reviewed")
+    ]
+    if reviewed_in_log:
+        with st.expander("Undo a review (move back to pending)", expanded=False):
+            for r in reviewed_in_log:
+                rid = str(r.get("id"))
+                label = (
+                    f"{r.get('ticker')} · {r.get('strategy')} · "
+                    f"voted {r.get('operator_vote', '?')}"
+                )
+                if st.button(
+                    f"↩ Undo: {label}",
+                    key=f"room3_undo_{rid}",
+                    use_container_width=True,
+                ):
+                    _undo_operator_review(rid)
+                    st.rerun()
+
+
+def _render_live_dashboard() -> None:
+    """Single live-now strip — account, day P/L, open unrealized, day vs account."""
+    st.markdown("### Live dashboard")
+    stats = _session_pl_stats()
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Account", f"${stats['equity']:,.0f}")
+    with c2:
+        st.metric(
+            "Day P/L",
+            _fmt_pl_usd(stats["day_pl"]),
+            delta=f"{stats['day_pl_pct']:+.2f}%",
+            delta_color="normal",
+        )
+    with c3:
+        st.metric(
+            "Open unrealized",
+            _fmt_pl_usd(stats["open_pl"]),
+            delta_color="normal",
+        )
+    with c4:
+        st.metric("Open positions", stats["open_count"])
+    if is_live := (st.session_state.room3_execution_mode == ROOM3_MODE_LIVE):
+        st.metric("Kill switch", "SAFE (no broker)")
+
+
+def _render_session_summary() -> None:
+    """End-of-day style recap — closed P/L, day vs account, wins/losses."""
+    st.markdown("### Today's summary")
     stats = _session_pl_stats()
     c1, c2, c3 = st.columns(3)
     with c1:
         st.metric(
             "Closed P/L",
-            f"${stats['closed_pl']:,.2f}",
-            delta=_fmt_pl_usd(stats["closed_pl"]) if stats["closed_pl"] else None,
+            _fmt_pl_usd(stats["closed_pl"]),
+            delta=f"{stats['day_pl_pct']:+.2f}% of account",
             delta_color="normal",
         )
     with c2:
-        st.metric(
-            "Open unrealized",
-            f"${stats['open_pl']:,.2f}",
-            delta=_fmt_pl_usd(stats["open_pl"]) if stats["open_pl"] else None,
-            delta_color="normal",
-        )
+        st.metric("Wins", stats["wins"])
     with c3:
-        st.metric(
-            "Day vs account",
-            f"{stats['day_pl_pct']:+.2f}%",
-            delta=_fmt_pl_usd(stats["day_pl"]) if stats["day_pl"] else None,
-            delta_color="normal",
-        )
-    st.caption("Day % = (open + closed P/L) ÷ account equity.")
+        st.metric("Losses", stats["losses"])
 
 
 def _render_strategy_health_strip() -> None:
@@ -974,36 +1048,18 @@ def _render_operator_review_panel() -> None:
                 st.rerun()
 
 
-def _render_live_only_panel() -> None:
-    st.markdown("### Live controls")
-    stats = _session_pl_stats()
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric("Buying power (demo)", f"${stats['equity']:,.0f}")
-        st.metric(
-            "Day P/L",
-            f"${stats['day_pl']:,.2f}",
-            delta=f"{stats['day_pl_pct']:+.2f}%",
-            delta_color="normal",
-        )
-    with c2:
-        st.metric("Open positions", stats["open_count"])
-        st.metric("Kill switch", "SAFE (no broker)")
-
-
 def _render_trading_workspace(mode: str) -> None:
     if mode == ROOM3_MODE_PAPER:
         st.markdown("<div class='room3-paper-frame'>", unsafe_allow_html=True)
     _render_demo_toolbar()
     _render_broker_status_card(mode)
-    if mode == ROOM3_MODE_LIVE:
-        _render_live_only_panel()
+    _render_live_dashboard()
     left, right = st.columns([1, 1])
     with left:
         _render_open_positions()
         _render_trade_history()
     with right:
-        _render_session_summary(mode)
+        _render_session_summary()
         _render_operator_review_panel()
     _render_strategy_health_strip()
     if mode == ROOM3_MODE_PAPER:
@@ -1023,11 +1079,8 @@ def render_room3_trading_center() -> None:
     init_room3_session_state()
     _inject_room3_css()
 
-    st.markdown("# ⚡ Room 3: Live / Paper Trading")
-    st.caption(
-        "Trading center shell — compartments built, utilities not hooked. "
-        "Room 1 & Room 2 untouched."
-    )
+    st.markdown("# Room 3 — Execution Terminal")
+    st.caption("Live & paper trading · IBKR integration pending")
 
     _render_mode_slider()
 
