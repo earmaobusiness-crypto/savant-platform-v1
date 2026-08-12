@@ -8,8 +8,10 @@ No IBKR hooks, no vault writes, no Room 1/2 imports until explicitly wired later
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets as py_secrets
 from datetime import datetime, timezone
+from pathlib import Path
 
 import streamlit as st
 
@@ -30,8 +32,28 @@ _SESSION_KEYS = (
 )
 
 
+def _read_local_secrets_toml() -> dict[str, str]:
+    """Fallback when st.secrets is empty (local dev before restart)."""
+    path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
+    if not path.is_file():
+        return {}
+    out: dict[str, str] = {}
+    try:
+        import tomllib
+
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        for key in ("ROOM3_LIVE_PASSCODE", "ROOM3_LIVE_RECOVERY_CODE"):
+            val = data.get(key)
+            if val is not None:
+                out[key] = str(val).strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return out
+
+
 def _room3_secrets() -> dict:
-    """Read Room 3 auth from nested [room3] block or top-level secret keys."""
+    """Read Room 3 auth from secrets.toml, st.secrets, or env."""
+    local = _read_local_secrets_toml()
     try:
         block = st.secrets.get("room3")
         if isinstance(block, dict) and str(block.get("live_passcode") or "").strip():
@@ -44,12 +66,23 @@ def _room3_secrets() -> dict:
     try:
         passcode = st.secrets.get("ROOM3_LIVE_PASSCODE")
         recovery = st.secrets.get("ROOM3_LIVE_RECOVERY_CODE")
-        return {
-            "live_passcode": str(passcode or "").strip(),
-            "recovery_code": str(recovery or "").strip(),
-        }
+        if passcode or recovery:
+            return {
+                "live_passcode": str(passcode or "").strip(),
+                "recovery_code": str(recovery or "").strip(),
+            }
     except Exception:
-        return {}
+        pass
+    env_pass = str(os.environ.get("ROOM3_LIVE_PASSCODE") or "").strip()
+    env_rec = str(os.environ.get("ROOM3_LIVE_RECOVERY_CODE") or "").strip()
+    if env_pass or env_rec:
+        return {"live_passcode": env_pass, "recovery_code": env_rec}
+    if local.get("ROOM3_LIVE_PASSCODE") or local.get("ROOM3_LIVE_RECOVERY_CODE"):
+        return {
+            "live_passcode": str(local.get("ROOM3_LIVE_PASSCODE") or "").strip(),
+            "recovery_code": str(local.get("ROOM3_LIVE_RECOVERY_CODE") or "").strip(),
+        }
+    return {}
 
 
 def _hash_code(raw: str) -> str:
@@ -256,7 +289,9 @@ def _render_live_gate_overlay() -> None:
 
     pass_hash = _configured_passcode_hash()
     if pass_hash is None:
-        st.warning("Add `ROOM3_LIVE_PASSCODE` in `.streamlit/secrets.toml` then restart Streamlit.")
+        st.warning("Passcode missing — add ROOM3_LIVE_PASSCODE to secrets and restart.")
+    else:
+        st.caption("Passcode loaded · enter code to unlock live.")
 
     gate_msg = str(st.session_state.get("room3_gate_message") or "").strip()
     gate_err = bool(st.session_state.get("room3_gate_error"))
@@ -268,15 +303,17 @@ def _render_live_gate_overlay() -> None:
         st.session_state.room3_gate_message = ""
         st.session_state.room3_gate_error = False
 
-    def _process_passcode_attempt(raw_code: str) -> None:
+    def _process_passcode_attempt(raw_code: str) -> bool:
         if pass_hash is None:
-            st.session_state.room3_gate_message = "Passcode not configured — restart after editing secrets."
+            st.session_state.room3_gate_message = (
+                "Passcode not loaded — restart Streamlit after editing secrets."
+            )
             st.session_state.room3_gate_error = True
-            return
+            return False
         if not str(raw_code or "").strip():
             st.session_state.room3_gate_message = "Enter a passcode first."
             st.session_state.room3_gate_error = True
-            return
+            return False
         if _hash_code(raw_code) == pass_hash:
             st.session_state.room3_live_unlocked = True
             st.session_state.room3_execution_mode = ROOM3_MODE_LIVE
@@ -285,17 +322,18 @@ def _render_live_gate_overlay() -> None:
             st.session_state.room3_recovery_stage = ""
             st.session_state.room3_gate_message = ""
             st.session_state.room3_gate_error = False
-            st.rerun()
+            return True
         st.session_state.room3_auth_fail_count = int(st.session_state.room3_auth_fail_count or 0) + 1
         st.session_state.room3_gate_message = "Wrong passcode."
         st.session_state.room3_gate_error = True
         if st.session_state.room3_auth_fail_count >= 3:
             st.session_state.room3_recovery_stage = "offer_email"
+        return False
 
     _, center, _ = st.columns([1, 1.2, 1])
     with center:
         with st.form("room3_live_passcode_form", clear_on_submit=False):
-            code = st.text_input(
+            st.text_input(
                 "Passcode",
                 type="password",
                 placeholder="••••••",
@@ -307,9 +345,11 @@ def _render_live_gate_overlay() -> None:
                 type="primary",
                 use_container_width=True,
             )
-            if submitted:
-                _process_passcode_attempt(code)
-                st.rerun()
+
+    if submitted:
+        entered = str(st.session_state.get("room3_live_passcode_input") or "")
+        _process_passcode_attempt(entered)
+        st.rerun()
 
     _, btn_col, _ = st.columns([1, 1.2, 1])
     with btn_col:
