@@ -138,9 +138,23 @@ def _inject_room3_css() -> None:
         .room3-gate-backdrop {
             border: 1px solid #333;
             border-radius: 16px;
-            padding: 28px 24px;
+            padding: 28px 24px 22px;
             background: #0F0F0F;
             box-shadow: 0 24px 80px rgba(0,0,0,0.55);
+            text-align: center;
+            max-width: 420px;
+            margin: 12px auto 8px auto;
+        }
+        .room3-gate-wrap {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 8px 0 4px;
+        }
+        .room3-gate-actions {
+            max-width: 420px;
+            margin: 0 auto;
         }
         .room3-card {
             border: 1px solid #252525;
@@ -222,78 +236,69 @@ def _render_live_gate_overlay() -> None:
     if not st.session_state.room3_live_gate_open:
         return
 
-    st.markdown("---")
+    st.markdown("<div class='room3-gate-wrap'>", unsafe_allow_html=True)
     st.markdown(
         "<div class='room3-gate-backdrop'>"
-        "<div class='room3-kicker'>Live trading gate</div>"
-        "<div class='room3-title'>Authorize live execution</div>"
-        "<p class='room3-sub'>Paper and live do not share the same lane. "
-        "Enter your passcode to unlock live trading for this session.</p>"
+        "<div class='room3-kicker'>Live gate</div>"
+        "<div class='room3-title'>Enter passcode</div>"
+        "<p class='room3-sub'>Unlock live for this session only.</p>"
         "</div>",
         unsafe_allow_html=True,
     )
 
     pass_hash = _configured_passcode_hash()
     if pass_hash is None:
-        st.warning(
-            "Live passcode is not configured yet. Add `ROOM3_LIVE_PASSCODE` in "
-            ".streamlit/secrets.toml (shell only — no broker connected)."
-        )
+        st.warning("Add `ROOM3_LIVE_PASSCODE` in `.streamlit/secrets.toml`.")
 
-    with st.form("room3_live_passcode_form", clear_on_submit=True):
-        code = st.text_input("Live passcode", type="password", placeholder="••••••")
-        submitted = st.form_submit_button("Unlock live trading", type="primary", use_container_width=True)
+    _, center, _ = st.columns([1, 1.2, 1])
+    with center:
+        with st.form("room3_live_passcode_form", clear_on_submit=True):
+            code = st.text_input("Passcode", type="password", placeholder="••••••", label_visibility="collapsed")
+            submitted = st.form_submit_button("Unlock live trading", type="primary", use_container_width=True)
 
     if submitted:
         if pass_hash is None:
-            st.error("Cannot unlock — passcode not configured in secrets.")
+            st.error("Passcode not configured in secrets.")
         elif _hash_code(code) == pass_hash:
             st.session_state.room3_live_unlocked = True
             st.session_state.room3_execution_mode = ROOM3_MODE_LIVE
             st.session_state.room3_live_gate_open = False
             st.session_state.room3_auth_fail_count = 0
             st.session_state.room3_recovery_stage = ""
-            st.success("Live trading unlocked for this session.")
+            st.success("Live unlocked.")
             st.rerun()
         else:
             st.session_state.room3_auth_fail_count = int(st.session_state.room3_auth_fail_count or 0) + 1
-            st.error("Incorrect passcode.")
+            st.error("Wrong passcode.")
             if st.session_state.room3_auth_fail_count >= 3:
                 st.session_state.room3_recovery_stage = "offer_email"
 
-    if st.button("Cancel — stay on paper", key="room3_gate_cancel", use_container_width=True):
-        st.session_state.room3_live_gate_open = False
-        st.session_state.room3_execution_mode = ROOM3_MODE_PAPER
-        st.rerun()
-
-    st.markdown("---")
-    if st.button("Forgot passcode?", key="room3_forgot_passcode"):
-        st.session_state.room3_recovery_stage = "offer_email"
-        token = py_secrets.token_hex(3).upper()
-        st.session_state.room3_recovery_token = token
-        st.rerun()
+    _, btn_col, _ = st.columns([1, 1.2, 1])
+    with btn_col:
+        if st.button("Cancel — stay on paper", key="room3_gate_cancel", use_container_width=True):
+            st.session_state.room3_live_gate_open = False
+            st.session_state.room3_execution_mode = ROOM3_MODE_PAPER
+            st.rerun()
+        if st.button("Forgot passcode?", key="room3_forgot_passcode", use_container_width=True):
+            st.session_state.room3_recovery_stage = "offer_email"
+            token = py_secrets.token_hex(3).upper()
+            st.session_state.room3_recovery_token = token
+            st.rerun()
 
     stage = str(st.session_state.room3_recovery_stage or "")
     if stage == "offer_email":
-        st.info(
-            f"Step 1 — Recovery notification queued for **{ROOM3_RECOVERY_EMAIL}**. "
-            "(Shell demo: no email is sent yet; wiring comes when broker + auth are hooked up.)"
-        )
-        if st.button("I received the notification", key="room3_recovery_ack"):
+        st.info(f"Notification sent to **{ROOM3_RECOVERY_EMAIL}** (demo — no email yet).")
+        if st.button("I received it", key="room3_recovery_ack", use_container_width=True):
             st.session_state.room3_recovery_stage = "enter_recovery_code"
             st.rerun()
 
     if stage == "enter_recovery_code":
-        st.markdown(
-            f"Step 2 — Enter the recovery code sent to **{ROOM3_RECOVERY_EMAIL}**."
-        )
+        st.caption(f"Enter code from **{ROOM3_RECOVERY_EMAIL}**")
         if st.session_state.room3_recovery_token:
-            st.caption(
-                f"Shell demo token (dev only): `{st.session_state.room3_recovery_token}`"
-            )
+            st.caption(f"Demo code: `{st.session_state.room3_recovery_token}`")
         with st.form("room3_recovery_form", clear_on_submit=True):
-            recovery_input = st.text_input("Recovery code", placeholder="6-digit code")
-            rec_submit = st.form_submit_button("Verify recovery code", use_container_width=True)
+            recovery_input = st.text_input("Recovery code", placeholder="6-digit", label_visibility="collapsed")
+            rec_submit = st.form_submit_button("Verify", use_container_width=True)
         if rec_submit:
             recovery_hash = _configured_recovery_hash()
             token_ok = (
@@ -303,14 +308,13 @@ def _render_live_gate_overlay() -> None:
             secret_ok = recovery_hash and _hash_code(recovery_input) == recovery_hash
             if token_ok or secret_ok:
                 st.session_state.room3_recovery_stage = "reset_passcode"
-                st.success("Recovery verified. Set a new session unlock below.")
+                st.success("Verified — enter passcode again.")
             else:
-                st.error("Recovery code did not match.")
+                st.error("Code did not match.")
 
     if stage == "reset_passcode":
-        st.markdown("Step 3 — Re-enter live passcode from secrets to unlock this session.")
         with st.form("room3_recovery_unlock_form", clear_on_submit=True):
-            code = st.text_input("Live passcode (from secrets)", type="password")
+            code = st.text_input("Passcode", type="password", label_visibility="collapsed")
             rec_unlock = st.form_submit_button("Unlock live trading", use_container_width=True)
         if rec_unlock and pass_hash and _hash_code(code) == pass_hash:
             st.session_state.room3_live_unlocked = True
@@ -318,8 +322,10 @@ def _render_live_gate_overlay() -> None:
             st.session_state.room3_live_gate_open = False
             st.session_state.room3_auth_fail_count = 0
             st.session_state.room3_recovery_stage = ""
-            st.success("Live trading unlocked.")
+            st.success("Live unlocked.")
             st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _render_broker_status_card(mode: str) -> None:
