@@ -13,6 +13,7 @@ from xml.etree import ElementTree
 
 import cloud_offload
 import core_quantum
+import room3_trading
 import self_surgery
 import vault_bridge
 import requests
@@ -41,9 +42,15 @@ if "quantum_terminal_output" not in st.session_state:
 
 ROOM1_LABEL = "🏛️ Room 1: Real-Time Front Desk"
 ROOM2_LABEL = "🔮 Room 2: Forensic Pattern Lab"
+ROOM3_LABEL = "⚡ Room 3: Live / Paper Trading"
 ROOM1_SHORT = "🏛️ R1"
 ROOM2_SHORT = "🔮 R2"
-ROOM_SHORT_MAP = {ROOM1_SHORT: ROOM1_LABEL, ROOM2_SHORT: ROOM2_LABEL}
+ROOM3_SHORT = "⚡ R3"
+ROOM_SHORT_MAP = {
+    ROOM1_SHORT: ROOM1_LABEL,
+    ROOM2_SHORT: ROOM2_LABEL,
+    ROOM3_SHORT: ROOM3_LABEL,
+}
 
 SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
 SECTOR_ETFS = [
@@ -7625,10 +7632,12 @@ def render_terminal_nav() -> str:
                 "text-transform:uppercase;color:#888;margin:4px 0 10px 2px;'>Navigation</div>",
                 unsafe_allow_html=True,
             )
+            hub_rooms = [ROOM1_LABEL, ROOM2_LABEL, ROOM3_LABEL]
+            hub_index = hub_rooms.index(st.session_state.terminal_hub) if st.session_state.terminal_hub in hub_rooms else 0
             room_pick = st.radio(
                 "TERMINAL HUB COMMANDS:",
-                [ROOM1_LABEL, ROOM2_LABEL],
-                index=0 if st.session_state.terminal_hub == ROOM1_LABEL else 1,
+                hub_rooms,
+                index=hub_index,
                 key="terminal_hub_expanded",
             )
             st.session_state.terminal_hub = room_pick
@@ -7640,7 +7649,7 @@ def _render_hub_recovery_strip() -> None:
     """Slim top bar only while menu is hidden — switch rooms without blocking inputs."""
     if not st.session_state.sidebar_collapsed:
         return
-    c1, c2, c3, _ = st.columns([1, 1, 1, 7])
+    c1, c2, c3, c4, _ = st.columns([1, 1, 1, 1, 4])
     with c1:
         if st.button(
             "Room 1",
@@ -7660,6 +7669,15 @@ def _render_hub_recovery_strip() -> None:
             st.session_state.terminal_hub = ROOM2_LABEL
             st.rerun()
     with c3:
+        if st.button(
+            "Room 3",
+            key="hub_recovery_room3",
+            use_container_width=True,
+            type="primary" if st.session_state.terminal_hub == ROOM3_LABEL else "secondary",
+        ):
+            st.session_state.terminal_hub = ROOM3_LABEL
+            st.rerun()
+    with c4:
         if st.button("▶ Menu", key="hub_recovery_expand", use_container_width=True):
             st.session_state.sidebar_collapsed = False
             st.rerun()
@@ -7674,6 +7692,8 @@ _render_hub_recovery_strip()
 
 if terminal_hub == ROOM1_LABEL:
     _render_room1_forensic_front_desk()
-else:
+elif terminal_hub == ROOM2_LABEL:
     render_room2_forensic_lab()
+else:
+    room3_trading.render_room3_trading_center()
 
