@@ -1024,6 +1024,21 @@ def _sync_equity_curve_with_today() -> None:
     st.session_state.room3_equity_curve = rebuilt
     st.session_state.room3_account_equity = today_eq
 
+    # Stamp end-of-day account on each archived session
+    equity_by_date = {
+        str(p.get("date")): float(p.get("equity") or 0)
+        for p in rebuilt
+        if str(p.get("date")) != "Start"
+    }
+    stamped = []
+    for day in list(st.session_state.room3_archive_days or []):
+        row = dict(day)
+        dk = str(row.get("date") or "")
+        if dk in equity_by_date:
+            row["end_equity"] = equity_by_date[dk]
+        stamped.append(row)
+    st.session_state.room3_archive_days = stamped
+
 
 def _all_time_stats() -> dict:
     _sync_equity_curve_with_today()
@@ -1046,6 +1061,14 @@ def _all_time_stats() -> dict:
     today_trades = int(_session_pl_stats().get("trades_today") or 0)
     sessions = len(archive) + (1 if today_trades else 0)
     total_trades = sum(int(d.get("trade_count") or 0) for d in archive) + today_trades
+    session_pls = [
+        float(p.get("day_pl") or 0)
+        for p in curve
+        if str(p.get("date")) != "Start"
+    ]
+    avg_session = (sum(session_pls) / len(session_pls)) if session_pls else 0.0
+    up_sessions = sum(1 for pl in session_pls if pl > 0)
+    session_wr = (up_sessions / len(session_pls) * 100.0) if session_pls else 0.0
     return {
         "start": start,
         "current": current,
@@ -1055,6 +1078,8 @@ def _all_time_stats() -> dict:
         "max_drawdown_pct": max_dd,
         "sessions": sessions,
         "total_trades": total_trades,
+        "avg_session_pl": avg_session,
+        "session_win_rate": session_wr,
         "curve": curve,
     }
 
@@ -1717,7 +1742,7 @@ def _render_session_summary() -> None:
         _render_all_time_panel()
 
 
-def _render_equity_trajectory_chart(at: dict) -> None:
+def _render_equity_trajectory_chart(at: dict, *, height: int = 220) -> None:
     """Dark custom SVG — equity path + session bars + non-obvious callouts."""
     curve = list(at.get("curve") or [])
     if len(curve) < 2:
@@ -1732,7 +1757,6 @@ def _render_equity_trajectory_chart(at: dict) -> None:
     day_pls = [float(p.get("day_pl") or 0) for p in points]
     labels = [str(p.get("date") or "") for p in points]
 
-    # Session-only points (skip Start) for insight math
     sessions = [
         (labels[i], equities[i], day_pls[i])
         for i in range(1, len(points))
@@ -1746,8 +1770,7 @@ def _render_equity_trajectory_chart(at: dict) -> None:
     off_peak_pct = (off_peak / peak * 100.0) if peak else 0.0
     above_start = sum(1 for _, eq, _ in sessions if eq >= start)
 
-    # SVG layout
-    w, h = 640, 220
+    w, h = 640, int(height)
     pad_l, pad_r, pad_t, pad_b = 48, 16, 18, 36
     plot_w = w - pad_l - pad_r
     plot_h = h - pad_t - pad_b
@@ -1763,27 +1786,23 @@ def _render_equity_trajectory_chart(at: dict) -> None:
     def y_at(eq: float) -> float:
         return pad_t + (1.0 - (eq - ymin) / (ymax - ymin)) * plot_h
 
-    # Path
     path_d = " ".join(
         f"{'M' if i == 0 else 'L'}{x_at(i):.1f},{y_at(eq):.1f}"
         for i, eq in enumerate(equities)
     )
-    # Area under curve (muted fill)
     area_d = (
         f"{path_d} L{x_at(len(equities)-1):.1f},{pad_t + plot_h:.1f} "
         f"L{x_at(0):.1f},{pad_t + plot_h:.1f} Z"
     )
 
-    # Start baseline
     y_start = y_at(start)
     y_peak = y_at(peak)
 
-    # Daily P/L micro-bars along bottom strip
     bar_max = max((abs(pl) for pl in day_pls[1:]), default=1.0) or 1.0
     bars = []
     for i in range(1, len(points)):
         pl = day_pls[i]
-        bh = max(3.0, (abs(pl) / bar_max) * 18.0)
+        bh = max(3.0, (abs(pl) / bar_max) * (22.0 if height > 260 else 18.0))
         bx = x_at(i) - 5
         by = pad_t + plot_h + 4
         color = "#5F9E6E" if pl >= 0 else "#B86A6A"
@@ -1793,7 +1812,6 @@ def _render_equity_trajectory_chart(at: dict) -> None:
             f'<title>{escape(labels[i])}: {_fmt_pl_usd(pl)}</title></rect>'
         )
 
-    # Markers
     peak_i = equities.index(max(equities))
     markers = [
         f'<circle cx="{x_at(0):.1f}" cy="{y_at(equities[0]):.1f}" r="3.5" fill="#8FA3B0" />',
@@ -1802,7 +1820,6 @@ def _render_equity_trajectory_chart(at: dict) -> None:
         f'<circle cx="{x_at(peak_i):.1f}" cy="{y_peak:.1f}" r="3.5" fill="#D4B56A" />',
     ]
 
-    # Axis labels (start / end / peak)
     short_labels = []
     for i, lab in enumerate(labels):
         if i == 0 or i == len(labels) - 1 or i == peak_i:
@@ -1812,11 +1829,7 @@ def _render_equity_trajectory_chart(at: dict) -> None:
                 f'fill="#6E7884" font-size="9">{escape(shown)}</text>'
             )
 
-    y_ticks = [
-        (start, "start"),
-        (current, "now"),
-        (peak, "peak"),
-    ]
+    y_ticks = [(start, "start"), (current, "now"), (peak, "peak")]
     y_labels = []
     used_y = []
     for eq, _tag in y_ticks:
@@ -1833,7 +1846,7 @@ def _render_equity_trajectory_chart(at: dict) -> None:
     svg = f"""
     <div class="room3-equity-chart">
       <div class="room3-equity-chart-title">Equity trajectory · session P/L strip</div>
-      <svg viewBox="0 0 {w} {h}" width="100%" height="220" role="img"
+      <svg viewBox="0 0 {w} {h}" width="100%" height="{h}" role="img"
            aria-label="Account equity trajectory">
         <defs>
           <linearGradient id="room3EqFill" x1="0" y1="0" x2="0" y2="1">
@@ -1880,63 +1893,68 @@ def _render_equity_trajectory_chart(at: dict) -> None:
 
 
 def _render_all_time_panel() -> None:
-    """Hidden all-time readout — collective P/L, risk path, session quality."""
+    """Hidden all-time readout — collective P/L vs bankroll, risk, expectancy."""
     at = _all_time_stats()
-    curve = list(at.get("curve") or [])
-    sessions = []
-    for p in curve:
-        if str(p.get("date")) == "Start":
-            continue
-        sessions.append(p)
-    best = max(sessions, key=lambda x: float(x.get("day_pl") or 0)) if sessions else {}
-    worst = min(sessions, key=lambda x: float(x.get("day_pl") or 0)) if sessions else {}
-    best_label = str(best.get("date") or "—")
-    worst_label = str(worst.get("date") or "—")
-
+    start = float(at["start"])
     _render_metric_tiles(
         [
             {
                 "id": "at_pl",
                 "label": "Collective P/L",
                 "value": _fmt_pl_usd(at["all_time_pl"]),
-                "sub": _fmt_pl_pct(at["all_time_pct"]),
+                "sub": f"{_fmt_pl_pct(at['all_time_pct'])} vs ${start:,.0f} start",
                 "detail": (
-                    f"All-time {_fmt_pl_usd(at['all_time_pl'])} · "
-                    f"{_fmt_pl_pct(at['all_time_pct'])}"
+                    f"Net profit since bankroll open · "
+                    f"{_fmt_pl_usd(at['all_time_pl'])} on ${start:,.2f} starting equity "
+                    f"({_fmt_pl_pct(at['all_time_pct'])})"
                 ),
             },
             {
-                "id": "peak",
-                "label": "Peak / Max DD",
-                "value": f"${at['peak']:,.2f}",
-                "sub": f"DD {_fmt_pl_pct(-abs(at['max_drawdown_pct']))}",
+                "id": "dd",
+                "label": "Max drawdown",
+                "value": f"{at['max_drawdown_pct']:.2f}%",
+                "sub": f"peak was ${at['peak']:,.0f}",
                 "detail": (
-                    f"Peak ${at['peak']:,.2f} · max drawdown "
-                    f"{at['max_drawdown_pct']:.2f}%"
+                    f"Worst peak-to-trough drop {at['max_drawdown_pct']:.2f}% · "
+                    f"peak equity ${at['peak']:,.2f}"
                 ),
             },
             {
-                "id": "best",
-                "label": "Best session",
-                "value": _fmt_pl_usd(best.get("day_pl")),
-                "sub": best_label,
-                "detail": f"Best {best_label} · {_fmt_pl_usd(best.get('day_pl'))}",
+                "id": "avg",
+                "label": "Avg session",
+                "value": _fmt_pl_usd(at["avg_session_pl"]),
+                "sub": f"{at['sessions']} sessions",
+                "detail": (
+                    f"Average session P/L {_fmt_pl_usd(at['avg_session_pl'])} · "
+                    f"{at['sessions']} sessions · {at['total_trades']} trades"
+                ),
             },
             {
-                "id": "worst",
-                "label": "Worst session",
-                "value": _fmt_pl_usd(worst.get("day_pl")),
-                "sub": worst_label,
-                "detail": f"Worst {worst_label} · {_fmt_pl_usd(worst.get('day_pl'))}",
+                "id": "swr",
+                "label": "Session win rate",
+                "value": f"{at['session_win_rate']:.0f}%",
+                "sub": f"{at['total_trades']} trades total",
+                "detail": (
+                    f"Green sessions {at['session_win_rate']:.0f}% · "
+                    f"{at['total_trades']} closed trades all-time"
+                ),
             },
         ],
         grid_class="room3-metric-grid-2",
     )
     st.caption(
-        f"{at['sessions']} sessions · {at['total_trades']} trades · "
-        "open when you want the long view"
+        f"Collective P/L = current account − starting bankroll "
+        f"(${start:,.2f}). Not today’s P/L."
     )
-    _render_equity_trajectory_chart(at)
+
+    expanded = bool(st.session_state.get("room3_chart_expanded"))
+    b1, b2 = st.columns([1, 3])
+    with b1:
+        label = "Compact chart" if expanded else "Expand chart"
+        if st.button(label, key="room3_chart_size_toggle", use_container_width=True):
+            st.session_state.room3_chart_expanded = not expanded
+            st.rerun()
+    _render_equity_trajectory_chart(at, height=360 if expanded else 220)
 
 
 def _render_history_trade_detail(trade: dict) -> None:
@@ -1973,6 +1991,9 @@ def _render_session_history() -> None:
         "Past trading days · click a day to expand tickers · click a ticker for full detail · "
         "one panel open at a time"
     )
+    # Ensure end_equity is stamped from curve
+    if st.session_state.get("room3_archive_days"):
+        _sync_equity_curve_with_today()
     days = list(st.session_state.room3_archive_days or [])
     if not days:
         st.caption("No archived sessions — load demo to preview history.")
@@ -1987,10 +2008,12 @@ def _render_session_history() -> None:
         is_day_open = open_day == date_key
         pl_usd = _fmt_pl_usd(day.get("pl_usd"))
         pl_pct = _fmt_pl_pct(day.get("pl_pct"))
+        end_eq = day.get("end_equity")
+        eod = f" · EOD ${float(end_eq):,.2f}" if end_eq is not None else ""
         arrow = "▾" if is_day_open else "▸"
         day_label = (
             f"{arrow} {day.get('display')} · {day.get('trade_count')} trades · "
-            f"{pl_usd} ({pl_pct})"
+            f"{pl_usd} ({pl_pct}){eod}"
         )
         if st.button(
             day_label,
@@ -2007,7 +2030,7 @@ def _render_session_history() -> None:
 
         if is_day_open:
             st.markdown("<div class='room3-history-panel'>", unsafe_allow_html=True)
-            hc1, hc2, hc3, hc4 = st.columns(4)
+            hc1, hc2, hc3, hc4, hc5 = st.columns(5)
             with hc1:
                 st.metric("Day P/L", pl_usd)
             with hc2:
@@ -2017,6 +2040,11 @@ def _render_session_history() -> None:
             with hc4:
                 wr = day.get("win_rate")
                 st.metric("Win rate", f"{wr:.0f}%" if wr is not None else "—")
+            with hc5:
+                if end_eq is not None:
+                    st.metric("Account EOD", f"${float(end_eq):,.2f}")
+                else:
+                    st.metric("Account EOD", "—")
 
             for trade in day.get("trades") or []:
                 tid = str(trade.get("id"))
