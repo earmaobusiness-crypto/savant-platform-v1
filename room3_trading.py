@@ -1173,8 +1173,8 @@ def seed_demo_trading_session() -> None:
     st.session_state.room3_equity_curve = _demo_equity_curve()
     _sync_equity_curve_with_today()
     eq = float(st.session_state.room3_account_equity or ROOM3_DEMO_ACCOUNT_EQUITY)
-    st.session_state.room3_tradable_today = eq
-    st.session_state.room3_tradable_pct_ui = 100.0
+    # Demo default 50% so Account vs Trading today is visually obvious
+    _set_tradable_pct(50.0, eq)
 
 
 def clear_demo_trading_session() -> None:
@@ -1582,6 +1582,18 @@ def _render_live_dashboard(mode: str) -> None:
         _sync_equity_curve_with_today()
     stats = _session_pl_stats()
     equity = float(stats["equity"])
+    # First paint on older sessions: if tradable still equals full account, nudge to 50%
+    # so the new control is obvious (user can hit 100% anytime).
+    if (
+        "room3_tradable_seen" not in st.session_state
+        and equity > 0
+        and abs(float(stats["tradable"]) - equity) < 0.01
+    ):
+        _set_tradable_pct(50.0, equity)
+        st.session_state.room3_tradable_seen = True
+        stats = _session_pl_stats()
+    else:
+        st.session_state.room3_tradable_seen = True
     tradable = float(stats["tradable"])
     pct = float(stats["tradable_pct"])
     day_label = _trading_day_display(_trading_day_key())
@@ -1592,55 +1604,49 @@ def _render_live_dashboard(mode: str) -> None:
         "account moves with fills · pause = flat"
     )
 
-    bar_w = max(0.0, min(100.0, pct))
-    st.markdown(
-        f"""
-        <div class="room3-capital-strip">
-          <div class="room3-capital-grid">
-            <div>
-              <div class="room3-capital-label">Account</div>
-              <div class="room3-capital-value">${equity:,.2f}</div>
-              <div class="room3-capital-sub">Full balance · moves with day P/L</div>
-            </div>
-            <div>
-              <div class="room3-capital-label">Trading today</div>
-              <div class="room3-capital-value deploy">${tradable:,.2f}</div>
-              <div class="room3-capital-sub">{pct:.0f}% deployable · rest sits idle</div>
-            </div>
-          </div>
-          <div class="room3-capital-bar"><span style="width:{bar_w:.1f}%;"></span></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    p1, p2, p3, p4, p5 = st.columns([1, 1, 1, 1, 2])
-    for col, preset in zip((p1, p2, p3, p4), (25, 50, 75, 100)):
-        with col:
-            if st.button(f"{preset}%", key=f"room3_tradable_pct_{preset}", use_container_width=True):
-                _set_tradable_pct(preset, equity)
-                st.rerun()
-    with p5:
-        c_in, c_btn = st.columns([2.2, 1])
-        with c_in:
-            st.number_input(
-                "Custom trading $",
-                min_value=0.0,
-                max_value=float(max(equity, 0.0)),
-                value=float(min(tradable, equity)) if equity else 0.0,
-                step=1000.0,
-                key="room3_tradable_custom_input",
-                label_visibility="collapsed",
-            )
-        with c_btn:
-            if st.button("Set $", key="room3_tradable_set_btn", use_container_width=True):
-                custom = float(st.session_state.get("room3_tradable_custom_input") or 0)
-                custom = max(0.0, min(custom, equity))
-                st.session_state.room3_tradable_today = round(custom, 2)
-                st.session_state.room3_tradable_pct_ui = (
-                    (custom / equity * 100.0) if equity > 0 else 0.0
+    with st.container(border=True):
+        st.markdown("**Capital**")
+        a1, a2 = st.columns(2)
+        with a1:
+            st.metric("Account", f"${equity:,.2f}")
+            st.caption("Full balance · moves with day P/L")
+        with a2:
+            st.metric("Trading today", f"${tradable:,.2f}", delta=f"{pct:.0f}% of account", delta_color="off")
+            st.caption("Only this amount is deployable today")
+        st.progress(min(max(pct / 100.0, 0.0), 1.0))
+        st.caption("Set today's firepower")
+        p1, p2, p3, p4, p5 = st.columns([1, 1, 1, 1, 2])
+        for col, preset in zip((p1, p2, p3, p4), (25, 50, 75, 100)):
+            with col:
+                if st.button(
+                    f"{preset}%",
+                    key=f"room3_tradable_pct_{preset}",
+                    use_container_width=True,
+                    type="primary" if abs(pct - preset) < 0.5 else "secondary",
+                ):
+                    _set_tradable_pct(preset, equity)
+                    st.rerun()
+        with p5:
+            c_in, c_btn = st.columns([2.2, 1])
+            with c_in:
+                st.number_input(
+                    "Custom trading $",
+                    min_value=0.0,
+                    max_value=float(max(equity, 0.0)),
+                    value=float(min(tradable, equity)) if equity else 0.0,
+                    step=1000.0,
+                    key="room3_tradable_custom_input",
+                    label_visibility="collapsed",
                 )
-                st.rerun()
+            with c_btn:
+                if st.button("Set $", key="room3_tradable_set_btn", use_container_width=True):
+                    custom = float(st.session_state.get("room3_tradable_custom_input") or 0)
+                    custom = max(0.0, min(custom, equity))
+                    st.session_state.room3_tradable_today = round(custom, 2)
+                    st.session_state.room3_tradable_pct_ui = (
+                        (custom / equity * 100.0) if equity > 0 else 0.0
+                    )
+                    st.rerun()
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
