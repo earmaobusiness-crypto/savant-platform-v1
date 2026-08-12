@@ -31,10 +31,14 @@ _SESSION_KEYS = (
 
 
 def _room3_secrets() -> dict:
+    """Read Room 3 auth from nested [room3] block or top-level secret keys."""
     try:
-        block = st.secrets.get("room3") or {}
-        if isinstance(block, dict):
-            return block
+        block = st.secrets.get("room3")
+        if isinstance(block, dict) and str(block.get("live_passcode") or "").strip():
+            return {
+                "live_passcode": str(block.get("live_passcode") or "").strip(),
+                "recovery_code": str(block.get("recovery_code") or "").strip(),
+            }
     except Exception:
         pass
     try:
@@ -88,6 +92,10 @@ def init_room3_session_state() -> None:
         st.session_state.room3_trade_history = []
     if "room3_operator_reviews" not in st.session_state:
         st.session_state.room3_operator_reviews = []
+    if "room3_gate_message" not in st.session_state:
+        st.session_state.room3_gate_message = ""
+    if "room3_gate_error" not in st.session_state:
+        st.session_state.room3_gate_error = False
 
 
 def _inject_room3_css() -> None:
@@ -248,30 +256,60 @@ def _render_live_gate_overlay() -> None:
 
     pass_hash = _configured_passcode_hash()
     if pass_hash is None:
-        st.warning("Add `ROOM3_LIVE_PASSCODE` in `.streamlit/secrets.toml`.")
+        st.warning("Add `ROOM3_LIVE_PASSCODE` in `.streamlit/secrets.toml` then restart Streamlit.")
 
-    _, center, _ = st.columns([1, 1.2, 1])
-    with center:
-        with st.form("room3_live_passcode_form", clear_on_submit=True):
-            code = st.text_input("Passcode", type="password", placeholder="••••••", label_visibility="collapsed")
-            submitted = st.form_submit_button("Unlock live trading", type="primary", use_container_width=True)
+    gate_msg = str(st.session_state.get("room3_gate_message") or "").strip()
+    gate_err = bool(st.session_state.get("room3_gate_error"))
+    if gate_msg:
+        if gate_err:
+            st.error(gate_msg)
+        else:
+            st.success(gate_msg)
+        st.session_state.room3_gate_message = ""
+        st.session_state.room3_gate_error = False
 
-    if submitted:
+    def _process_passcode_attempt(raw_code: str) -> None:
         if pass_hash is None:
-            st.error("Passcode not configured in secrets.")
-        elif _hash_code(code) == pass_hash:
+            st.session_state.room3_gate_message = "Passcode not configured — restart after editing secrets."
+            st.session_state.room3_gate_error = True
+            return
+        if not str(raw_code or "").strip():
+            st.session_state.room3_gate_message = "Enter a passcode first."
+            st.session_state.room3_gate_error = True
+            return
+        if _hash_code(raw_code) == pass_hash:
             st.session_state.room3_live_unlocked = True
             st.session_state.room3_execution_mode = ROOM3_MODE_LIVE
             st.session_state.room3_live_gate_open = False
             st.session_state.room3_auth_fail_count = 0
             st.session_state.room3_recovery_stage = ""
-            st.success("Live unlocked.")
+            st.session_state.room3_gate_message = ""
+            st.session_state.room3_gate_error = False
             st.rerun()
-        else:
-            st.session_state.room3_auth_fail_count = int(st.session_state.room3_auth_fail_count or 0) + 1
-            st.error("Wrong passcode.")
-            if st.session_state.room3_auth_fail_count >= 3:
-                st.session_state.room3_recovery_stage = "offer_email"
+        st.session_state.room3_auth_fail_count = int(st.session_state.room3_auth_fail_count or 0) + 1
+        st.session_state.room3_gate_message = "Wrong passcode."
+        st.session_state.room3_gate_error = True
+        if st.session_state.room3_auth_fail_count >= 3:
+            st.session_state.room3_recovery_stage = "offer_email"
+
+    _, center, _ = st.columns([1, 1.2, 1])
+    with center:
+        with st.form("room3_live_passcode_form", clear_on_submit=False):
+            code = st.text_input(
+                "Passcode",
+                type="password",
+                placeholder="••••••",
+                label_visibility="collapsed",
+                key="room3_live_passcode_input",
+            )
+            submitted = st.form_submit_button(
+                "Unlock live trading",
+                type="primary",
+                use_container_width=True,
+            )
+            if submitted:
+                _process_passcode_attempt(code)
+                st.rerun()
 
     _, btn_col, _ = st.columns([1, 1.2, 1])
     with btn_col:
