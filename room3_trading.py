@@ -13,6 +13,7 @@ import secrets as py_secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 ROOM3_MODE_PAPER = "paper"
@@ -20,7 +21,6 @@ ROOM3_MODE_LIVE = "live"
 ROOM3_RECOVERY_EMAIL = "earmaobusiness@gmail.com"
 # Flip to True later — passcode gate + recovery flow (no rebuild needed).
 ROOM3_LIVE_SECURITY_ENABLED = False
-ROOM3_MAX_CONCURRENT_POSITIONS = 10
 ROOM3_DEMO_ACCOUNT_EQUITY = 50000.0
 
 _SESSION_KEYS = (
@@ -192,12 +192,51 @@ def _inject_room3_css() -> None:
             border: 1px solid #2A2A2A;
             border-radius: 14px;
             padding: 18px 20px;
-            background: linear-gradient(180deg, #121212 0%, #0B0B0B 100%);
+            background: linear-gradient(180deg, #161616 0%, #101010 100%);
             margin-bottom: 16px;
+        }
+        .room3-shell-paper {
+            border: 2px solid #C44B4B;
+            box-shadow: 0 0 0 1px #5A2020 inset, 0 0 24px rgba(180, 50, 50, 0.12);
         }
         .room3-shell-live {
             border-color: #5A2020;
             background: linear-gradient(180deg, #1A0F0F 0%, #0B0B0B 100%);
+        }
+        .room3-paper-frame {
+            border: 2px solid #B33A3A;
+            border-radius: 14px;
+            padding: 14px 14px 8px;
+            margin: 0 0 12px 0;
+            box-shadow: inset 0 0 0 1px rgba(180, 60, 60, 0.35);
+        }
+        div[data-testid="stMetric"] {
+            background: #1C1C1C !important;
+            border: 1px solid #333333 !important;
+            border-radius: 10px !important;
+            padding: 10px 14px !important;
+        }
+        div[data-testid="stMetricLabel"] p {
+            color: #9A9A9A !important;
+        }
+        div[data-testid="stMetricValue"] {
+            color: #F0F0F0 !important;
+        }
+        [data-testid="stDataFrame"] {
+            background: #141414 !important;
+            border: 1px solid #2A2A2A !important;
+            border-radius: 10px !important;
+        }
+        [data-testid="stDataFrame"] [data-testid="stDataFrameResizable"] {
+            background: #141414 !important;
+        }
+        [data-testid="stDataFrame"] th {
+            background: #1A1A1A !important;
+            color: #B0B0B0 !important;
+        }
+        [data-testid="stDataFrame"] td {
+            background: #141414 !important;
+            color: #E8E8E8 !important;
         }
         .room3-kicker {
             font-size: 11px;
@@ -251,10 +290,10 @@ def _inject_room3_css() -> None:
             margin: 0 auto;
         }
         .room3-card {
-            border: 1px solid #252525;
+            border: 1px solid #333333;
             border-radius: 12px;
             padding: 14px 16px;
-            background: #111;
+            background: #1A1A1A;
             margin-bottom: 12px;
         }
         .room3-stat-label { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.08em; }
@@ -657,6 +696,72 @@ def _record_operator_review(trade_id: str, vote: str) -> None:
     st.session_state.room3_decay_alerts = alerts
 
 
+def _fmt_pl_usd(value) -> str:
+    v = float(value or 0)
+    if v > 0:
+        return f"+${v:,.2f}"
+    if v < 0:
+        return f"-${abs(v):,.2f}"
+    return "$0.00"
+
+
+def _fmt_pl_pct(value) -> str:
+    v = float(value or 0)
+    if v > 0:
+        return f"+{v:.2f}%"
+    if v < 0:
+        return f"{v:.2f}%"
+    return "0.00%"
+
+
+def _position_dollar_value(row: dict) -> float:
+    qty = float(row.get("qty") or 0)
+    mark = float(row.get("last_price") or row.get("exit_price") or row.get("entry_price") or 0)
+    return round(qty * mark, 2)
+
+
+def _render_dark_table(rows: list[dict]) -> None:
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+    styled = df.style.set_properties(
+        **{
+            "background-color": "#141414",
+            "color": "#E8E8E8",
+            "border-color": "#2A2A2A",
+        }
+    ).set_table_styles(
+        [
+            {
+                "selector": "thead th",
+                "props": [
+                    ("background-color", "#1A1A1A"),
+                    ("color", "#B0B0B0"),
+                    ("border-color", "#2A2A2A"),
+                ],
+            },
+            {
+                "selector": "tbody td",
+                "props": [("border-color", "#252525")],
+            },
+        ]
+    )
+
+    def _pl_color(val):
+        text = str(val)
+        if text.startswith("+"):
+            return "color: #7BC67E; font-weight: 600"
+        if text.startswith("-") or text.startswith("-$"):
+            return "color: #FF6B6B; font-weight: 600"
+        return "color: #E8E8E8"
+
+    pl_cols = [c for c in df.columns if "P/L" in str(c)]
+    for col in pl_cols:
+        styled = styled.map(_pl_color, subset=pd.IndexSlice[:, [col]])
+
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
 def _render_demo_toolbar() -> None:
     c1, c2, c3 = st.columns([1, 1, 2])
     with c1:
@@ -678,15 +783,18 @@ def _render_demo_toolbar() -> None:
 
 def _render_broker_status_card(mode: str) -> None:
     is_live = mode == ROOM3_MODE_LIVE
-    shell_class = "room3-shell room3-shell-live" if is_live else "room3-shell"
+    shell_class = "room3-shell"
+    if is_live:
+        shell_class += " room3-shell-live"
+    else:
+        shell_class += " room3-shell-paper"
     lane = "LIVE" if is_live else "PAPER"
     stats = _session_pl_stats()
     st.markdown(
         f"<div class='{shell_class}'>"
         f"<div class='room3-kicker'>Room 3 · Trading center</div>"
         f"<div class='room3-title'>{_mode_label(mode)}</div>"
-        f"<p class='room3-sub'>IBKR {lane} · <strong>Demo / not connected</strong> · "
-        f"max {ROOM3_MAX_CONCURRENT_POSITIONS} concurrent positions</p>"
+        f"<p class='room3-sub'>IBKR {lane} · <strong>Demo / not connected</strong></p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -694,9 +802,14 @@ def _render_broker_status_card(mode: str) -> None:
     with c1:
         st.metric("Account", f"${stats['equity']:,.0f}")
     with c2:
-        st.metric("Day P/L", f"${stats['day_pl']:,.2f}", f"{stats['day_pl_pct']:+.2f}%")
+        st.metric(
+            "Day P/L",
+            f"${stats['day_pl']:,.2f}",
+            f"{stats['day_pl_pct']:+.2f}%",
+            delta_color="normal",
+        )
     with c3:
-        st.metric("Open", stats["open_count"], help=f"Cap {ROOM3_MAX_CONCURRENT_POSITIONS}")
+        st.metric("Open", stats["open_count"])
     with c4:
         st.metric("Wins / Losses", f"{stats['wins']} / {stats['losses']}")
     with c5:
@@ -717,15 +830,14 @@ def _render_open_positions() -> None:
                 "TF": r.get("timeframe"),
                 "Strategy": r.get("strategy"),
                 "Entry": r.get("entry_time"),
-                "Entry $": r.get("entry_price"),
-                "Last $": r.get("last_price"),
-                "Target $": r.get("target_price"),
-                "P/L $": r.get("pnl_usd"),
-                "P/L %": r.get("pnl_pct"),
-                "Qty": r.get("qty"),
+                "Entry $": f"{float(r.get('entry_price') or 0):.2f}",
+                "Exit $": f"{float(r.get('last_price') or 0):.2f}",
+                "Position $": f"{_position_dollar_value(r):,.2f}",
+                "P/L $": _fmt_pl_usd(r.get("pnl_usd")),
+                "P/L %": _fmt_pl_pct(r.get("pnl_pct")),
             }
         )
-    st.dataframe(display, use_container_width=True, hide_index=True)
+    _render_dark_table(display)
 
 
 def _render_trade_history() -> None:
@@ -741,8 +853,10 @@ def _render_trade_history() -> None:
                 "Strategy": r.get("strategy"),
                 "Entry": r.get("entry_time"),
                 "Exit": r.get("exit_time"),
-                "P/L $": r.get("pnl_usd"),
-                "P/L %": r.get("pnl_pct"),
+                "Entry $": f"{float(r.get('entry_price') or 0):.2f}",
+                "Exit $": f"{float(r.get('exit_price') or 0):.2f}",
+                "P/L $": _fmt_pl_usd(r.get("pnl_usd")),
+                "P/L %": _fmt_pl_pct(r.get("pnl_pct")),
                 "Status": "awaiting review",
             }
         )
@@ -754,32 +868,53 @@ def _render_trade_history() -> None:
                 "Strategy": r.get("strategy"),
                 "Entry": r.get("entry_time"),
                 "Exit": r.get("exit_time"),
-                "P/L $": r.get("pnl_usd"),
-                "P/L %": r.get("pnl_pct"),
+                "Entry $": (
+                    f"{float(r.get('entry_price') or 0):.2f}"
+                    if r.get("entry_price") is not None
+                    else "—"
+                ),
+                "Exit $": (
+                    f"{float(r.get('exit_price') or 0):.2f}"
+                    if r.get("exit_price") is not None
+                    else "—"
+                ),
+                "P/L $": _fmt_pl_usd(r.get("pnl_usd")),
+                "P/L %": _fmt_pl_pct(r.get("pnl_pct")),
                 "Status": f"reviewed · {r.get('operator_vote', '—')}",
             }
         )
     if not rows:
         st.caption("Log empty.")
         return
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    _render_dark_table(rows)
 
 
 def _render_session_summary(mode: str) -> None:
     st.markdown("### Session summary")
     stats = _session_pl_stats()
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     with c1:
-        st.metric("Closed P/L", f"${stats['closed_pl']:,.2f}")
+        st.metric(
+            "Closed P/L",
+            f"${stats['closed_pl']:,.2f}",
+            delta=_fmt_pl_usd(stats["closed_pl"]) if stats["closed_pl"] else None,
+            delta_color="normal",
+        )
     with c2:
-        st.metric("Open unrealized", f"${stats['open_pl']:,.2f}")
+        st.metric(
+            "Open unrealized",
+            f"${stats['open_pl']:,.2f}",
+            delta=_fmt_pl_usd(stats["open_pl"]) if stats["open_pl"] else None,
+            delta_color="normal",
+        )
     with c3:
-        st.metric("Day vs account", f"{stats['day_pl_pct']:+.2f}%")
-    with c4:
-        st.metric("Slots used", f"{stats['open_count']}/{ROOM3_MAX_CONCURRENT_POSITIONS}")
-    st.caption(
-        "Day % = (open + closed P/L) ÷ account equity. Same math for paper and live lanes."
-    )
+        st.metric(
+            "Day vs account",
+            f"{stats['day_pl_pct']:+.2f}%",
+            delta=_fmt_pl_usd(stats["day_pl"]) if stats["day_pl"] else None,
+            delta_color="normal",
+        )
+    st.caption("Day % = (open + closed P/L) ÷ account equity.")
 
 
 def _render_strategy_health_strip() -> None:
@@ -845,13 +980,20 @@ def _render_live_only_panel() -> None:
     c1, c2 = st.columns(2)
     with c1:
         st.metric("Buying power (demo)", f"${stats['equity']:,.0f}")
-        st.metric("Day P/L", f"${stats['day_pl']:,.2f}")
+        st.metric(
+            "Day P/L",
+            f"${stats['day_pl']:,.2f}",
+            delta=f"{stats['day_pl_pct']:+.2f}%",
+            delta_color="normal",
+        )
     with c2:
-        st.metric("Max concurrent", ROOM3_MAX_CONCURRENT_POSITIONS)
+        st.metric("Open positions", stats["open_count"])
         st.metric("Kill switch", "SAFE (no broker)")
 
 
 def _render_trading_workspace(mode: str) -> None:
+    if mode == ROOM3_MODE_PAPER:
+        st.markdown("<div class='room3-paper-frame'>", unsafe_allow_html=True)
     _render_demo_toolbar()
     _render_broker_status_card(mode)
     if mode == ROOM3_MODE_LIVE:
@@ -864,6 +1006,8 @@ def _render_trading_workspace(mode: str) -> None:
         _render_session_summary(mode)
         _render_operator_review_panel()
     _render_strategy_health_strip()
+    if mode == ROOM3_MODE_PAPER:
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _render_paper_workspace() -> None:
