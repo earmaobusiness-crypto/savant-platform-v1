@@ -18,6 +18,8 @@ import streamlit as st
 ROOM3_MODE_PAPER = "paper"
 ROOM3_MODE_LIVE = "live"
 ROOM3_RECOVERY_EMAIL = "earmaobusiness@gmail.com"
+# Flip to True later — passcode gate + recovery flow (no rebuild needed).
+ROOM3_LIVE_SECURITY_ENABLED = False
 
 _SESSION_KEYS = (
     "room3_execution_mode",
@@ -252,6 +254,11 @@ def _mode_label(mode: str) -> str:
 
 
 def _request_live_mode() -> None:
+    if not ROOM3_LIVE_SECURITY_ENABLED:
+        st.session_state.room3_execution_mode = ROOM3_MODE_LIVE
+        st.session_state.room3_live_unlocked = True
+        st.session_state.room3_live_gate_open = False
+        return
     if st.session_state.room3_live_unlocked:
         st.session_state.room3_execution_mode = ROOM3_MODE_LIVE
         st.session_state.room3_live_gate_open = False
@@ -301,9 +308,14 @@ def _render_mode_slider() -> None:
                 "<span class='room3-pill room3-pill-paper'>LIVE PASSCODE OK · PAPER ACTIVE</span>",
                 unsafe_allow_html=True,
             )
-        else:
+        elif ROOM3_LIVE_SECURITY_ENABLED:
             st.markdown(
                 "<span class='room3-pill room3-pill-off'>LIVE LOCKED · PASSCODE REQUIRED</span>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<span class='room3-pill room3-pill-paper'>DEV · LIVE GATE OFF</span>",
                 unsafe_allow_html=True,
             )
 
@@ -574,17 +586,20 @@ def render_room3_trading_center() -> None:
 
     _render_mode_slider()
 
-    if st.session_state.room3_live_gate_open:
+    if ROOM3_LIVE_SECURITY_ENABLED and st.session_state.room3_live_gate_open:
         _render_live_gate_overlay()
         return
 
     mode = str(st.session_state.room3_execution_mode or ROOM3_MODE_PAPER)
-    if mode == ROOM3_MODE_LIVE and st.session_state.room3_live_unlocked:
-        st.success("Live trading unlocked for this session.")
-        _render_live_workspace()
-    else:
-        if mode == ROOM3_MODE_LIVE and not st.session_state.room3_live_unlocked:
+    if mode == ROOM3_MODE_LIVE:
+        if ROOM3_LIVE_SECURITY_ENABLED and not st.session_state.room3_live_unlocked:
             st.session_state.room3_execution_mode = ROOM3_MODE_PAPER
+            _render_paper_workspace()
+        else:
+            if not ROOM3_LIVE_SECURITY_ENABLED:
+                st.caption("Build mode — live passcode disabled. Flip ROOM3_LIVE_SECURITY_ENABLED when ready.")
+            _render_live_workspace()
+    else:
         _render_paper_workspace()
 
     st.markdown("---")
