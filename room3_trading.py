@@ -11,6 +11,7 @@ import hashlib
 import os
 import secrets as py_secrets
 from datetime import datetime, timedelta, timezone
+from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -193,6 +194,8 @@ def init_room3_session_state() -> None:
         st.session_state.room3_history_open_trade_id = None
     if "room3_session_day_key" not in st.session_state:
         st.session_state.room3_session_day_key = ""
+    if "room3_metric_expand_id" not in st.session_state:
+        st.session_state.room3_metric_expand_id = None
 
 
 def _inject_room3_css() -> None:
@@ -225,14 +228,84 @@ def _inject_room3_css() -> None:
             background: #1C1C1C !important;
             border: 1px solid #333333 !important;
             border-radius: 10px !important;
-            padding: 10px 14px !important;
+            padding: 8px 10px !important;
+            overflow: visible !important;
         }
         div[data-testid="stMetricLabel"] p {
             color: #9A9A9A !important;
+            font-size: 11px !important;
         }
         div[data-testid="stMetricValue"] {
             color: #F0F0F0 !important;
+            font-size: 1.05rem !important;
+            overflow: visible !important;
+            white-space: normal !important;
+            word-break: break-word !important;
+            line-height: 1.25 !important;
         }
+        div[data-testid="stMetricDelta"] {
+            overflow: visible !important;
+            white-space: normal !important;
+        }
+        .room3-metric-grid {
+            display: grid;
+            gap: 8px;
+            margin: 4px 0 10px 0;
+        }
+        .room3-metric-grid-2 {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .room3-metric-grid-auto {
+            grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+        }
+        .room3-metric-tile {
+            background: #1C1C1C;
+            border: 1px solid #333;
+            border-radius: 10px;
+            padding: 8px 10px;
+            min-width: 0;
+            cursor: default;
+            transition: border-color 0.15s ease, box-shadow 0.15s ease;
+        }
+        .room3-metric-tile:hover {
+            border-color: #555;
+            box-shadow: 0 0 0 1px rgba(255,255,255,0.04);
+        }
+        .room3-metric-label {
+            font-size: 10px;
+            color: #8A8A8A;
+            text-transform: uppercase;
+            letter-spacing: 0.07em;
+            margin-bottom: 4px;
+        }
+        .room3-metric-value {
+            font-size: 14px;
+            font-weight: 700;
+            color: #F0F0F0;
+            line-height: 1.25;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+        }
+        .room3-metric-value.pos { color: #7BC67E; }
+        .room3-metric-value.neg { color: #FF6B6B; }
+        .room3-metric-sub {
+            font-size: 11px;
+            color: #888;
+            margin-top: 3px;
+            word-break: break-word;
+        }
+        .room3-metric-expand {
+            border: 1px solid #2A2A2A;
+            border-radius: 10px;
+            padding: 10px 12px;
+            margin: 0 0 10px 0;
+            background: #121212;
+            animation: room3SlideIn 0.2s ease-out;
+            font-size: 13px;
+            color: #DDD;
+            line-height: 1.45;
+        }
+        .room3-metric-expand strong { color: #FFF; }
         [data-testid="stDataFrame"] {
             background: #141414 !important;
             border: 1px solid #2A2A2A !important;
@@ -1072,6 +1145,60 @@ def _fmt_pl_pct(value) -> str:
     return "0.00%"
 
 
+def _metric_tone(value_text: str) -> str:
+    text = str(value_text or "").strip()
+    if text.startswith("+"):
+        return "pos"
+    if text.startswith("-") and text not in {"—", "-"}:
+        return "neg"
+    return ""
+
+
+def _render_metric_tiles(
+    items: list[dict],
+    *,
+    grid_class: str = "room3-metric-grid-2",
+    expand_key: str = "summary",
+) -> None:
+    """Compact metric tiles — full values stay visible; click Expand for a clear readout."""
+    cards_html = [f"<div class='room3-metric-grid {grid_class}'>"]
+    for item in items:
+        tone = _metric_tone(item.get("value"))
+        tone_cls = f" {tone}" if tone else ""
+        sub = item.get("sub") or ""
+        tip = escape(str(item.get("detail") or f"{item.get('label')}: {item.get('value')}"))
+        label = escape(str(item.get("label") or ""))
+        value = escape(str(item.get("value") or "—"))
+        sub_safe = escape(str(sub)) if sub else ""
+        sub_html = f"<div class='room3-metric-sub'>{sub_safe}</div>" if sub_safe else ""
+        cards_html.append(
+            f"<div class='room3-metric-tile' title='{tip}'>"
+            f"<div class='room3-metric-label'>{label}</div>"
+            f"<div class='room3-metric-value{tone_cls}'>{value}</div>"
+            f"{sub_html}"
+            "</div>"
+        )
+    cards_html.append("</div>")
+    st.markdown("".join(cards_html), unsafe_allow_html=True)
+
+    open_id = st.session_state.room3_metric_expand_id
+    is_open = open_id == expand_key
+    toggle_label = "Collapse figures" if is_open else "Expand figures"
+    if st.button(toggle_label, key=f"room3_metric_toggle_{expand_key}"):
+        st.session_state.room3_metric_expand_id = None if is_open else expand_key
+        st.rerun()
+    if is_open:
+        lines = []
+        for item in items:
+            detail = escape(str(item.get("detail") or item.get("value") or ""))
+            label = escape(str(item.get("label") or ""))
+            lines.append(f"<div><strong>{label}</strong> — {detail}</div>")
+        st.markdown(
+            f"<div class='room3-metric-expand'>{''.join(lines)}</div>",
+            unsafe_allow_html=True,
+        )
+
+
 def _position_dollar_value(row: dict) -> float:
     qty = float(row.get("qty") or 0)
     mark = float(row.get("last_price") or row.get("exit_price") or row.get("entry_price") or 0)
@@ -1268,25 +1395,53 @@ def _render_live_dashboard(mode: str) -> None:
         f"**{day_label}** · session rolls at 4:00 AM ET · "
         "metrics refresh while the system is active"
     )
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    with c1:
-        st.metric("Account", f"${stats['equity']:,.0f}")
-    with c2:
-        st.metric(
-            "Day P/L",
-            _fmt_pl_usd(stats["day_pl"]),
-            delta=f"{stats['day_pl_pct']:+.2f}%",
-            delta_color="normal",
-        )
-    with c3:
-        st.metric("Open unrealized", _fmt_pl_usd(stats["open_pl"]))
-    with c4:
-        st.metric("Open positions", stats["open_count"])
-    with c5:
-        st.metric("Wins / Losses", f"{stats['wins']} / {stats['losses']}")
-    with c6:
-        win_label = f"{stats['win_rate']:.0f}%" if stats["wins"] + stats["losses"] else "—"
-        st.metric("Win rate", win_label)
+    win_label = f"{stats['win_rate']:.0f}%" if stats["wins"] + stats["losses"] else "—"
+    _render_metric_tiles(
+        [
+            {
+                "id": "acct",
+                "label": "Account",
+                "value": f"${stats['equity']:,.2f}",
+                "detail": f"Account equity ${stats['equity']:,.2f}",
+            },
+            {
+                "id": "day",
+                "label": "Day P/L",
+                "value": _fmt_pl_usd(stats["day_pl"]),
+                "sub": f"{stats['day_pl_pct']:+.2f}%",
+                "detail": (
+                    f"Day P/L {_fmt_pl_usd(stats['day_pl'])} · "
+                    f"{stats['day_pl_pct']:+.2f}% of account"
+                ),
+            },
+            {
+                "id": "unreal",
+                "label": "Open unrealized",
+                "value": _fmt_pl_usd(stats["open_pl"]),
+                "detail": f"Open unrealized {_fmt_pl_usd(stats['open_pl'])}",
+            },
+            {
+                "id": "open",
+                "label": "Open positions",
+                "value": str(stats["open_count"]),
+                "detail": f"{stats['open_count']} open position(s)",
+            },
+            {
+                "id": "wl",
+                "label": "Wins / Losses",
+                "value": f"{stats['wins']} / {stats['losses']}",
+                "detail": f"{stats['wins']} wins · {stats['losses']} losses",
+            },
+            {
+                "id": "wr",
+                "label": "Win rate",
+                "value": win_label,
+                "detail": f"Win rate {win_label}",
+            },
+        ],
+        grid_class="room3-metric-grid-auto",
+        expand_key="live",
+    )
     if mode == ROOM3_MODE_LIVE:
         st.caption("Kill switch: **SAFE** (no broker connected)")
 
@@ -1295,33 +1450,46 @@ def _render_session_summary() -> None:
     """Today's recap — closed vs open vs account, plus session activity."""
     st.markdown("### Today's summary")
     stats = _session_pl_stats()
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric(
-            "Closed P/L",
-            _fmt_pl_usd(stats["closed_pl"]),
-            delta_color="normal",
-        )
-    with c2:
-        st.metric(
-            "Open unrealized",
-            _fmt_pl_usd(stats["open_pl"]),
-            delta_color="normal",
-        )
-    with c3:
-        st.metric(
-            "Day vs account",
-            f"{stats['day_pl_pct']:+.2f}%",
-            delta=_fmt_pl_usd(stats["day_pl"]),
-            delta_color="normal",
-        )
-    with c4:
-        st.metric(
-            "Trades today",
-            stats["trades_today"],
-            delta=f"{stats['awaiting_review']} awaiting review" if stats["awaiting_review"] else None,
-            delta_color="off",
-        )
+    awaiting = (
+        f"{stats['awaiting_review']} awaiting review"
+        if stats["awaiting_review"]
+        else "all reviewed"
+    )
+    _render_metric_tiles(
+        [
+            {
+                "id": "closed",
+                "label": "Closed P/L",
+                "value": _fmt_pl_usd(stats["closed_pl"]),
+                "detail": f"Closed P/L {_fmt_pl_usd(stats['closed_pl'])}",
+            },
+            {
+                "id": "open_u",
+                "label": "Open unrealized",
+                "value": _fmt_pl_usd(stats["open_pl"]),
+                "detail": f"Open unrealized {_fmt_pl_usd(stats['open_pl'])}",
+            },
+            {
+                "id": "day_vs",
+                "label": "Day vs account",
+                "value": f"{stats['day_pl_pct']:+.2f}%",
+                "sub": _fmt_pl_usd(stats["day_pl"]),
+                "detail": (
+                    f"Day vs account {stats['day_pl_pct']:+.2f}% · "
+                    f"total day {_fmt_pl_usd(stats['day_pl'])}"
+                ),
+            },
+            {
+                "id": "trades",
+                "label": "Trades today",
+                "value": str(stats["trades_today"]),
+                "sub": awaiting,
+                "detail": f"{stats['trades_today']} trades today · {awaiting}",
+            },
+        ],
+        grid_class="room3-metric-grid-2",
+        expand_key="summary",
+    )
     st.caption("Day % = (open + closed P/L) ÷ account equity.")
 
 
