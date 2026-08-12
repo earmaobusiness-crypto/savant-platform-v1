@@ -20,6 +20,8 @@ ROOM3_MODE_LIVE = "live"
 ROOM3_RECOVERY_EMAIL = "earmaobusiness@gmail.com"
 # Flip to True later — passcode gate + recovery flow (no rebuild needed).
 ROOM3_LIVE_SECURITY_ENABLED = False
+ROOM3_MAX_CONCURRENT_POSITIONS = 10
+ROOM3_DEMO_ACCOUNT_EQUITY = 50000.0
 
 _SESSION_KEYS = (
     "room3_execution_mode",
@@ -166,6 +168,20 @@ def init_room3_session_state() -> None:
         st.session_state.room3_gate_message = ""
     if "room3_gate_error" not in st.session_state:
         st.session_state.room3_gate_error = False
+    if "room3_demo_active" not in st.session_state:
+        st.session_state.room3_demo_active = False
+    if "room3_demo_seeded" not in st.session_state:
+        st.session_state.room3_demo_seeded = False
+    if "room3_account_equity" not in st.session_state:
+        st.session_state.room3_account_equity = ROOM3_DEMO_ACCOUNT_EQUITY
+    if "room3_pending_reviews" not in st.session_state:
+        st.session_state.room3_pending_reviews = []
+    if "room3_strategy_feedback" not in st.session_state:
+        st.session_state.room3_strategy_feedback = {}
+    if "room3_decay_alerts" not in st.session_state:
+        st.session_state.room3_decay_alerts = []
+    if "room3_matrix_sync_log" not in st.session_state:
+        st.session_state.room3_matrix_sync_log = []
 
 
 def _inject_room3_css() -> None:
@@ -243,6 +259,15 @@ def _inject_room3_css() -> None:
         }
         .room3-stat-label { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.08em; }
         .room3-stat-value { font-size: 20px; font-weight: 700; color: #EEE; }
+        .room3-review-card {
+            border: 1px solid #2A2A2A;
+            border-radius: 10px;
+            padding: 12px 14px;
+            margin-bottom: 10px;
+            background: #101010;
+        }
+        .room3-verdict-good { color: #7BC67E; font-weight: 700; }
+        .room3-verdict-bad { color: #FF6B6B; font-weight: 700; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -441,136 +466,412 @@ def _render_live_gate_overlay() -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def seed_demo_trading_session() -> None:
+    """Mock session — Room 3 RAM only. No vault / IBKR / matrix writes."""
+    st.session_state.room3_demo_active = True
+    st.session_state.room3_demo_seeded = True
+    st.session_state.room3_account_equity = ROOM3_DEMO_ACCOUNT_EQUITY
+    st.session_state.room3_open_positions = [
+        {
+            "id": "open-hypot",
+            "ticker": "HYPOT",
+            "timeframe": "5-Minute",
+            "layout": "Layout 3 — Volatile / Risk-On",
+            "strategy": "3A (5M)",
+            "entry_time": "10:12 AM",
+            "entry_price": 4.85,
+            "last_price": 5.42,
+            "target_price": 5.65,
+            "pnl_usd": 285.0,
+            "pnl_pct": 11.75,
+            "qty": 500,
+        },
+        {
+            "id": "open-vmar",
+            "ticker": "VMAR",
+            "timeframe": "1-Minute",
+            "layout": "Layout 1 — Volatile / Risk-Off",
+            "strategy": "1B (1M)",
+            "entry_time": "10:28 AM",
+            "entry_price": 2.14,
+            "last_price": 2.09,
+            "target_price": 2.35,
+            "pnl_usd": -62.5,
+            "pnl_pct": -2.34,
+            "qty": 1200,
+        },
+    ]
+    st.session_state.room3_pending_reviews = [
+        {
+            "id": "closed-lhai",
+            "ticker": "LHAI",
+            "timeframe": "5-Minute",
+            "layout": "Layout 4 — Neutral / Risk-On",
+            "strategy": "4A (5M)",
+            "entry_time": "09:10 AM",
+            "exit_time": "09:30 AM",
+            "entry_price": 1.53,
+            "exit_price": 1.95,
+            "pnl_usd": 412.0,
+            "pnl_pct": 27.45,
+            "qty": 800,
+            "system_verdict": "good",
+            "system_reason": "Vault envelope +27.45% · layout match 88%",
+        },
+        {
+            "id": "closed-tc",
+            "ticker": "TC",
+            "timeframe": "15-Minute",
+            "layout": "Layout 1 — Volatile / Risk-Off",
+            "strategy": "1C (15M)",
+            "entry_time": "06:20 PM",
+            "exit_time": "06:55 PM",
+            "entry_price": 8.12,
+            "exit_price": 8.45,
+            "pnl_usd": 198.0,
+            "pnl_pct": 4.06,
+            "qty": 600,
+            "system_verdict": "good",
+            "system_reason": "Above 15m floor · chronological rally",
+        },
+        {
+            "id": "closed-veee",
+            "ticker": "VEEE",
+            "timeframe": "1-Minute",
+            "layout": "Layout 2 — Tight / Tight Range",
+            "strategy": "2A (1M)",
+            "entry_time": "11:04 AM",
+            "exit_time": "11:09 AM",
+            "entry_price": 3.88,
+            "exit_price": 3.72,
+            "pnl_usd": -224.0,
+            "pnl_pct": -4.12,
+            "qty": 1400,
+            "system_verdict": "bad",
+            "system_reason": "Finish below start · chop inside window",
+        },
+    ]
+    st.session_state.room3_trade_history = [
+        {
+            "id": "closed-jem",
+            "ticker": "JEM",
+            "timeframe": "5-Minute",
+            "strategy": "1B (5M)",
+            "entry_time": "08:20 AM",
+            "exit_time": "08:45 AM",
+            "pnl_usd": 310.0,
+            "pnl_pct": 18.2,
+            "operator_vote": "good",
+            "reviewed": True,
+        },
+    ]
+    st.session_state.room3_operator_reviews = []
+    st.session_state.room3_strategy_feedback = {}
+    st.session_state.room3_decay_alerts = []
+    st.session_state.room3_matrix_sync_log = [
+        "Demo loaded — matrix hose disconnected (no Supabase writes)."
+    ]
+
+
+def clear_demo_trading_session() -> None:
+    st.session_state.room3_demo_active = False
+    st.session_state.room3_open_positions = []
+    st.session_state.room3_trade_history = []
+    st.session_state.room3_pending_reviews = []
+    st.session_state.room3_operator_reviews = []
+    st.session_state.room3_strategy_feedback = {}
+    st.session_state.room3_decay_alerts = []
+    st.session_state.room3_matrix_sync_log = ["Demo cleared — RAM only."]
+    st.session_state.room3_account_equity = ROOM3_DEMO_ACCOUNT_EQUITY
+
+
+def _session_pl_stats() -> dict:
+    equity = float(st.session_state.room3_account_equity or ROOM3_DEMO_ACCOUNT_EQUITY)
+    open_rows = st.session_state.room3_open_positions or []
+    pending = st.session_state.room3_pending_reviews or []
+    history = st.session_state.room3_trade_history or []
+    open_pl = sum(float(r.get("pnl_usd") or 0) for r in open_rows)
+    closed_pl = sum(float(r.get("pnl_usd") or 0) for r in pending)
+    closed_pl += sum(float(r.get("pnl_usd") or 0) for r in history if r.get("reviewed"))
+    day_pl = open_pl + closed_pl
+    wins = sum(
+        1 for r in list(pending) + list(history)
+        if float(r.get("pnl_usd") or 0) > 0
+    )
+    losses = sum(
+        1 for r in list(pending) + list(history)
+        if float(r.get("pnl_usd") or 0) < 0
+    )
+    decided = wins + losses
+    win_rate = (wins / decided * 100.0) if decided else 0.0
+    return {
+        "equity": equity,
+        "day_pl": day_pl,
+        "day_pl_pct": (day_pl / equity * 100.0) if equity > 0 else 0.0,
+        "open_pl": open_pl,
+        "closed_pl": closed_pl,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "open_count": len(open_rows),
+    }
+
+
+def _record_operator_review(trade_id: str, vote: str) -> None:
+    """RAM-only — logs what would sync to matrix later."""
+    vote_clean = "good" if str(vote).lower().startswith("g") else "bad"
+    pending = list(st.session_state.room3_pending_reviews or [])
+    trade = next((t for t in pending if str(t.get("id")) == str(trade_id)), None)
+    if not trade:
+        return
+    st.session_state.room3_pending_reviews = [t for t in pending if str(t.get("id")) != str(trade_id)]
+    reviewed = dict(trade)
+    reviewed["operator_vote"] = vote_clean
+    reviewed["reviewed"] = True
+    reviewed["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+    st.session_state.room3_operator_reviews = list(st.session_state.room3_operator_reviews or []) + [reviewed]
+    hist = list(st.session_state.room3_trade_history or [])
+    hist.append(reviewed)
+    st.session_state.room3_trade_history = hist
+
+    strat = str(trade.get("strategy") or "unknown")
+    fb = dict(st.session_state.room3_strategy_feedback or {})
+    bucket = dict(fb.get(strat) or {"good": 0, "bad": 0})
+    bucket[vote_clean] = int(bucket.get(vote_clean) or 0) + 1
+    fb[strat] = bucket
+    st.session_state.room3_strategy_feedback = fb
+
+    sync_line = (
+        f"[DRY-RUN] {trade.get('ticker')} · {strat} · operator={vote_clean} · "
+        "matrix sync skipped (hose not connected)"
+    )
+    log = list(st.session_state.room3_matrix_sync_log or [])
+    log.append(sync_line)
+    st.session_state.room3_matrix_sync_log = log[-12:]
+
+    alerts = list(st.session_state.room3_decay_alerts or [])
+    if bucket.get("bad", 0) >= 2:
+        alert = f"Alpha decay watch — {strat} marked bad {bucket['bad']}× today (local only)."
+        if alert not in alerts:
+            alerts.append(alert)
+    st.session_state.room3_decay_alerts = alerts
+
+
+def _render_demo_toolbar() -> None:
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        if st.button("Load demo session", key="room3_load_demo", use_container_width=True):
+            seed_demo_trading_session()
+            st.rerun()
+    with c2:
+        if st.button("Clear demo", key="room3_clear_demo", use_container_width=True):
+            clear_demo_trading_session()
+            st.rerun()
+    with c3:
+        if st.session_state.room3_demo_active:
+            st.caption(
+                "🧪 **Demo mode** — fake fills in RAM. ✓/✗ reviews do **not** write vault/matrix yet."
+            )
+        else:
+            st.caption("Load demo to preview open trades, log, and operator review flow.")
+
+
 def _render_broker_status_card(mode: str) -> None:
     is_live = mode == ROOM3_MODE_LIVE
     shell_class = "room3-shell room3-shell-live" if is_live else "room3-shell"
     lane = "LIVE" if is_live else "PAPER"
+    stats = _session_pl_stats()
     st.markdown(
         f"<div class='{shell_class}'>"
         f"<div class='room3-kicker'>Room 3 · Trading center</div>"
         f"<div class='room3-title'>{_mode_label(mode)}</div>"
-        f"<p class='room3-sub'>IBKR {lane} · <strong>Not connected</strong> "
-        "(shell build — hooks reserved, nothing wired yet)</p>"
+        f"<p class='room3-sub'>IBKR {lane} · <strong>Demo / not connected</strong> · "
+        f"max {ROOM3_MAX_CONCURRENT_POSITIONS} concurrent positions</p>"
         "</div>",
         unsafe_allow_html=True,
     )
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.markdown("<div class='room3-card'>", unsafe_allow_html=True)
-        st.markdown("<div class='room3-stat-label'>Broker</div>", unsafe_allow_html=True)
-        st.markdown("<div class='room3-stat-value'>Offline</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.metric("Account", f"${stats['equity']:,.0f}")
     with c2:
-        st.markdown("<div class='room3-card'>", unsafe_allow_html=True)
-        st.markdown("<div class='room3-stat-label'>Vault bridge</div>", unsafe_allow_html=True)
-        st.markdown("<div class='room3-stat-value'>Standby</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.metric("Day P/L", f"${stats['day_pl']:,.2f}", f"{stats['day_pl_pct']:+.2f}%")
     with c3:
-        st.markdown("<div class='room3-card'>", unsafe_allow_html=True)
-        st.markdown("<div class='room3-stat-label'>Auto execution</div>", unsafe_allow_html=True)
-        st.markdown("<div class='room3-stat-value'>Disabled</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.metric("Open", stats["open_count"], help=f"Cap {ROOM3_MAX_CONCURRENT_POSITIONS}")
     with c4:
-        st.markdown("<div class='room3-card'>", unsafe_allow_html=True)
-        st.markdown("<div class='room3-stat-label'>Open positions</div>", unsafe_allow_html=True)
-        n = len(st.session_state.room3_open_positions or [])
-        st.markdown(f"<div class='room3-stat-value'>{n}</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.metric("Wins / Losses", f"{stats['wins']} / {stats['losses']}")
+    with c5:
+        st.metric("Win rate", f"{stats['win_rate']:.0f}%" if stats["wins"] + stats["losses"] else "—")
 
 
 def _render_open_positions() -> None:
     st.markdown("### Open positions")
     rows = st.session_state.room3_open_positions or []
     if not rows:
-        st.caption("No open trades — execution loop not connected yet.")
+        st.caption("No open trades — demo or IBKR fills will show here.")
         return
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    display = []
+    for r in rows:
+        display.append(
+            {
+                "Ticker": r.get("ticker"),
+                "TF": r.get("timeframe"),
+                "Strategy": r.get("strategy"),
+                "Entry": r.get("entry_time"),
+                "Entry $": r.get("entry_price"),
+                "Last $": r.get("last_price"),
+                "Target $": r.get("target_price"),
+                "P/L $": r.get("pnl_usd"),
+                "P/L %": r.get("pnl_pct"),
+                "Qty": r.get("qty"),
+            }
+        )
+    st.dataframe(display, use_container_width=True, hide_index=True)
 
 
 def _render_trade_history() -> None:
-    st.markdown("### Trade log")
-    rows = st.session_state.room3_trade_history or []
+    st.markdown("### Today's trade log")
+    pending = st.session_state.room3_pending_reviews or []
+    history = st.session_state.room3_trade_history or []
+    rows = []
+    for r in pending:
+        rows.append(
+            {
+                "Ticker": r.get("ticker"),
+                "TF": r.get("timeframe"),
+                "Strategy": r.get("strategy"),
+                "Entry": r.get("entry_time"),
+                "Exit": r.get("exit_time"),
+                "P/L $": r.get("pnl_usd"),
+                "P/L %": r.get("pnl_pct"),
+                "Status": "awaiting review",
+            }
+        )
+    for r in history:
+        rows.append(
+            {
+                "Ticker": r.get("ticker"),
+                "TF": r.get("timeframe"),
+                "Strategy": r.get("strategy"),
+                "Entry": r.get("entry_time"),
+                "Exit": r.get("exit_time"),
+                "P/L $": r.get("pnl_usd"),
+                "P/L %": r.get("pnl_pct"),
+                "Status": f"reviewed · {r.get('operator_vote', '—')}",
+            }
+        )
     if not rows:
-        st.caption("History empty — fills will appear here after IBKR paper is wired.")
+        st.caption("Log empty.")
         return
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
 def _render_session_summary(mode: str) -> None:
     st.markdown("### Session summary")
+    stats = _session_pl_stats()
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("Session P/L", "$0.00")
+        st.metric("Closed P/L", f"${stats['closed_pl']:,.2f}")
     with c2:
-        st.metric("Wins", 0)
+        st.metric("Open unrealized", f"${stats['open_pl']:,.2f}")
     with c3:
-        st.metric("Losses", 0)
+        st.metric("Day vs account", f"{stats['day_pl_pct']:+.2f}%")
     with c4:
-        st.metric("Win rate", "—")
+        st.metric("Slots used", f"{stats['open_count']}/{ROOM3_MAX_CONCURRENT_POSITIONS}")
     st.caption(
-        "Post-trade review + vault reinforcement (good/bad confirms) land here after "
-        "the execution loop is hooked to Room 2’s matrix read path."
+        "Day % = (open + closed P/L) ÷ account equity. Same math for paper and live lanes."
     )
 
 
 def _render_strategy_health_strip() -> None:
-    st.markdown("### Strategy health (vault read — later)")
-    st.info(
-        "Alpha decay, halt flags, and weather-fit warnings will surface here from the "
-        "vault/matrix — read-only. No strategy DNA edits from Room 3."
-    )
+    st.markdown("### Strategy health")
+    alerts = list(st.session_state.room3_decay_alerts or [])
+    fb = st.session_state.room3_strategy_feedback or {}
+    if alerts:
+        for a in alerts:
+            st.warning(a)
+    elif fb:
+        lines = [f"**{k}** — good {v.get('good',0)} · bad {v.get('bad',0)}" for k, v in fb.items()]
+        st.info("Operator feedback today (local): " + " · ".join(lines))
+    else:
+        st.info(
+            "Alpha decay + weather-fit warnings will read vault/matrix. "
+            "Your ✓/✗ votes will feed that path when connected."
+        )
+    sync_log = st.session_state.room3_matrix_sync_log or []
+    if sync_log:
+        with st.expander("Matrix sync log (dry-run)", expanded=False):
+            for line in sync_log[-8:]:
+                st.caption(line)
 
 
 def _render_operator_review_panel() -> None:
     st.markdown("### Operator review")
-    st.caption(
-        "After trades run: system proposes good/bad vs vault DNA; you confirm to reinforce."
-    )
-    reviews = st.session_state.room3_operator_reviews or []
-    if not reviews:
-        st.caption("No closed trades awaiting review.")
+    st.caption("System proposes · you confirm ✓ good or ✗ bad · matrix hook later.")
+    pending = st.session_state.room3_pending_reviews or []
+    if not pending:
+        st.caption("No closed trades waiting for your vote.")
         return
-    st.dataframe(reviews, use_container_width=True, hide_index=True)
+    for trade in pending:
+        tid = str(trade.get("id"))
+        verdict = str(trade.get("system_verdict") or "neutral")
+        verdict_class = "room3-verdict-good" if verdict == "good" else "room3-verdict-bad"
+        st.markdown(
+            f"<div class='room3-review-card'>"
+            f"<strong>{trade.get('ticker')}</strong> · {trade.get('timeframe')} · "
+            f"{trade.get('strategy')}<br>"
+            f"Entry {trade.get('entry_time')} @ {trade.get('entry_price')} → "
+            f"Exit {trade.get('exit_time')} @ {trade.get('exit_price')}<br>"
+            f"P/L <strong>${float(trade.get('pnl_usd') or 0):,.2f}</strong> "
+            f"({float(trade.get('pnl_pct') or 0):+.2f}%)<br>"
+            f"<span class='{verdict_class}'>System: {verdict}</span> — "
+            f"{trade.get('system_reason', '')}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        b1, b2, _ = st.columns([1, 1, 2])
+        with b1:
+            if st.button("✓ Good", key=f"room3_good_{tid}", use_container_width=True):
+                _record_operator_review(tid, "good")
+                st.rerun()
+        with b2:
+            if st.button("✗ Bad", key=f"room3_bad_{tid}", use_container_width=True):
+                _record_operator_review(tid, "bad")
+                st.rerun()
 
 
 def _render_live_only_panel() -> None:
     st.markdown("### Live controls")
-    st.warning(
-        "Live lane extras: capital snapshot, risk caps, and kill switch — placeholders until "
-        "IBKR live gateway is wired."
-    )
+    stats = _session_pl_stats()
     c1, c2 = st.columns(2)
     with c1:
-        st.metric("Buying power", "—")
-        st.metric("Day P/L", "—")
+        st.metric("Buying power (demo)", f"${stats['equity']:,.0f}")
+        st.metric("Day P/L", f"${stats['day_pl']:,.2f}")
     with c2:
-        st.metric("Max position size", "Not set")
-        st.metric("Kill switch", "ARMED (no orders)")
+        st.metric("Max concurrent", ROOM3_MAX_CONCURRENT_POSITIONS)
+        st.metric("Kill switch", "SAFE (no broker)")
+
+
+def _render_trading_workspace(mode: str) -> None:
+    _render_demo_toolbar()
+    _render_broker_status_card(mode)
+    if mode == ROOM3_MODE_LIVE:
+        _render_live_only_panel()
+    left, right = st.columns([1, 1])
+    with left:
+        _render_open_positions()
+        _render_trade_history()
+    with right:
+        _render_session_summary(mode)
+        _render_operator_review_panel()
+    _render_strategy_health_strip()
 
 
 def _render_paper_workspace() -> None:
-    _render_broker_status_card(ROOM3_MODE_PAPER)
-    left, right = st.columns([1, 1])
-    with left:
-        _render_open_positions()
-        _render_trade_history()
-    with right:
-        _render_session_summary(ROOM3_MODE_PAPER)
-        _render_operator_review_panel()
-    _render_strategy_health_strip()
+    _render_trading_workspace(ROOM3_MODE_PAPER)
 
 
 def _render_live_workspace() -> None:
-    _render_broker_status_card(ROOM3_MODE_LIVE)
-    _render_live_only_panel()
-    left, right = st.columns([1, 1])
-    with left:
-        _render_open_positions()
-        _render_trade_history()
-    with right:
-        _render_session_summary(ROOM3_MODE_LIVE)
-        _render_operator_review_panel()
-    _render_strategy_health_strip()
+    _render_trading_workspace(ROOM3_MODE_LIVE)
 
 
 def render_room3_trading_center() -> None:
@@ -585,6 +886,9 @@ def render_room3_trading_center() -> None:
     )
 
     _render_mode_slider()
+
+    if not st.session_state.room3_demo_seeded:
+        seed_demo_trading_session()
 
     if ROOM3_LIVE_SECURITY_ENABLED and st.session_state.room3_live_gate_open:
         _render_live_gate_overlay()
