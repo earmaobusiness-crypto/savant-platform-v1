@@ -216,19 +216,19 @@ def _inject_room3_css() -> None:
             margin-bottom: 16px;
         }
         .room3-shell-paper {
-            border: 2px solid #C44B4B;
-            box-shadow: 0 0 0 1px #5A2020 inset, 0 0 24px rgba(180, 50, 50, 0.12);
+            border: 2px solid #3B6EA5;
+            box-shadow: 0 0 0 1px #1E3A5F inset, 0 0 24px rgba(59, 110, 165, 0.18);
         }
         .room3-shell-live {
-            border-color: #5A2020;
-            background: linear-gradient(180deg, #1A0F0F 0%, #0B0B0B 100%);
+            border-color: #2F5F96;
+            background: linear-gradient(180deg, #0F1620 0%, #0B0B0B 100%);
         }
         .room3-paper-frame {
-            border: 2px solid #B33A3A;
+            border: 2px solid #3B6EA5;
             border-radius: 14px;
             padding: 14px 14px 8px;
             margin: 0 0 12px 0;
-            box-shadow: inset 0 0 0 1px rgba(180, 60, 60, 0.35);
+            box-shadow: inset 0 0 0 1px rgba(59, 110, 165, 0.35);
         }
         div[data-testid="stMetric"] {
             background: #1C1C1C !important;
