@@ -1,8 +1,8 @@
 """
-Room 3 — Live / Paper Trading Center (shell).
+Room 3 — Live / Paper Trading Center.
 
-Built as a standalone house: UI compartments, mode gates, and session state only.
-No IBKR hooks, no vault writes, no Room 1/2 imports until explicitly wired later.
+UI shell + IBKR connection gate. Broker hose wires next (TWS / IB Gateway API).
+No Room 1/2 imports until explicitly connected.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ ROOM3_MODE_LIVE = "live"
 ROOM3_RECOVERY_EMAIL = "earmaobusiness@gmail.com"
 # Flip to True later — passcode gate + recovery flow (no rebuild needed).
 ROOM3_LIVE_SECURITY_ENABLED = False
-ROOM3_DEMO_ACCOUNT_EQUITY = 50000.0
+ROOM3_DEFAULT_EQUITY = 0.0
 ROOM3_SESSION_ROLL_HOUR_ET = 4  # next trading day starts 4:00 AM Eastern
 ET = ZoneInfo("America/New_York")
 
@@ -172,12 +172,16 @@ def init_room3_session_state() -> None:
         st.session_state.room3_gate_message = ""
     if "room3_gate_error" not in st.session_state:
         st.session_state.room3_gate_error = False
-    if "room3_demo_active" not in st.session_state:
-        st.session_state.room3_demo_active = False
-    if "room3_demo_seeded" not in st.session_state:
-        st.session_state.room3_demo_seeded = False
     if "room3_account_equity" not in st.session_state:
-        st.session_state.room3_account_equity = ROOM3_DEMO_ACCOUNT_EQUITY
+        st.session_state.room3_account_equity = ROOM3_DEFAULT_EQUITY
+    if "room3_ibkr_status" not in st.session_state:
+        st.session_state.room3_ibkr_status = "disconnected"  # disconnected | waiting | connected
+    if "room3_ibkr_account" not in st.session_state:
+        st.session_state.room3_ibkr_account = ""
+    if "room3_ibkr_host" not in st.session_state:
+        st.session_state.room3_ibkr_host = "127.0.0.1"
+    if "room3_ibkr_port" not in st.session_state:
+        st.session_state.room3_ibkr_port = 7497  # paper default; live often 7496
     if "room3_pending_reviews" not in st.session_state:
         st.session_state.room3_pending_reviews = []
     if "room3_strategy_feedback" not in st.session_state:
@@ -197,9 +201,9 @@ def init_room3_session_state() -> None:
     if "room3_equity_curve" not in st.session_state:
         st.session_state.room3_equity_curve = []
     if "room3_starting_equity" not in st.session_state:
-        st.session_state.room3_starting_equity = ROOM3_DEMO_ACCOUNT_EQUITY
+        st.session_state.room3_starting_equity = ROOM3_DEFAULT_EQUITY
     if "room3_tradable_today" not in st.session_state:
-        st.session_state.room3_tradable_today = float(ROOM3_DEMO_ACCOUNT_EQUITY)
+        st.session_state.room3_tradable_today = float(ROOM3_DEFAULT_EQUITY)
     if "room3_tradable_pct_ui" not in st.session_state:
         st.session_state.room3_tradable_pct_ui = 100.0
 
@@ -729,228 +733,6 @@ def _trading_day_display(day_key: str) -> str:
         return day_key
 
 
-def _demo_archive_days() -> list[dict]:
-    """Past sessions for history panel demo."""
-    return [
-        {
-            "date": "2026-08-11",
-            "display": "Monday, Aug 11",
-            "pl_usd": 892.40,
-            "pl_pct": 1.78,
-            "trade_count": 4,
-            "wins": 3,
-            "losses": 1,
-            "win_rate": 75.0,
-            "trades": [
-                {
-                    "id": "arch-0811-mrna",
-                    "ticker": "MRNA",
-                    "timeframe": "5-Minute",
-                    "layout": "Layout 3 — Volatile / Risk-On",
-                    "strategy": "3A (5M)",
-                    "entry_time": "09:35 AM",
-                    "exit_time": "10:05 AM",
-                    "entry_price": 28.40,
-                    "exit_price": 30.12,
-                    "pnl_usd": 344.0,
-                    "pnl_pct": 6.06,
-                    "qty": 200,
-                    "operator_vote": "good",
-                },
-                {
-                    "id": "arch-0811-soun",
-                    "ticker": "SOUN",
-                    "timeframe": "1-Minute",
-                    "layout": "Layout 1 — Volatile / Risk-Off",
-                    "strategy": "1B (1M)",
-                    "entry_time": "11:18 AM",
-                    "exit_time": "11:24 AM",
-                    "entry_price": 4.62,
-                    "exit_price": 4.88,
-                    "pnl_usd": 312.0,
-                    "pnl_pct": 5.63,
-                    "qty": 1200,
-                    "operator_vote": "good",
-                },
-                {
-                    "id": "arch-0811-bbig",
-                    "ticker": "BBIG",
-                    "timeframe": "15-Minute",
-                    "layout": "Layout 4 — Neutral / Risk-On",
-                    "strategy": "4C (15M)",
-                    "entry_time": "02:10 PM",
-                    "exit_time": "02:45 PM",
-                    "entry_price": 1.88,
-                    "exit_price": 2.05,
-                    "pnl_usd": 255.0,
-                    "pnl_pct": 9.04,
-                    "qty": 1500,
-                    "operator_vote": "good",
-                },
-                {
-                    "id": "arch-0811-gct",
-                    "ticker": "GCT",
-                    "timeframe": "5-Minute",
-                    "layout": "Layout 2 — Tight / Tight Range",
-                    "strategy": "2A (5M)",
-                    "entry_time": "03:22 PM",
-                    "exit_time": "03:38 PM",
-                    "entry_price": 22.10,
-                    "exit_price": 21.72,
-                    "pnl_usd": -190.4,
-                    "pnl_pct": -1.72,
-                    "qty": 500,
-                    "operator_vote": "bad",
-                },
-            ],
-        },
-        {
-            "date": "2026-08-08",
-            "display": "Friday, Aug 8",
-            "pl_usd": -428.60,
-            "pl_pct": -0.86,
-            "trade_count": 3,
-            "wins": 1,
-            "losses": 2,
-            "win_rate": 33.0,
-            "trades": [
-                {
-                    "id": "arch-0808-lumn",
-                    "ticker": "LUMN",
-                    "timeframe": "5-Minute",
-                    "layout": "Layout 1 — Volatile / Risk-Off",
-                    "strategy": "1C (5M)",
-                    "entry_time": "10:02 AM",
-                    "exit_time": "10:28 AM",
-                    "entry_price": 5.14,
-                    "exit_price": 5.48,
-                    "pnl_usd": 408.0,
-                    "pnl_pct": 6.62,
-                    "qty": 1200,
-                    "operator_vote": "good",
-                },
-                {
-                    "id": "arch-0808-ionq",
-                    "ticker": "IONQ",
-                    "timeframe": "1-Minute",
-                    "layout": "Layout 3 — Volatile / Risk-On",
-                    "strategy": "3B (1M)",
-                    "entry_time": "12:44 PM",
-                    "exit_time": "12:51 PM",
-                    "entry_price": 38.20,
-                    "exit_price": 37.55,
-                    "pnl_usd": -325.0,
-                    "pnl_pct": -1.70,
-                    "qty": 500,
-                    "operator_vote": "bad",
-                },
-                {
-                    "id": "arch-0808-rgti",
-                    "ticker": "RGTI",
-                    "timeframe": "5-Minute",
-                    "layout": "Layout 2 — Tight / Tight Range",
-                    "strategy": "2B (5M)",
-                    "entry_time": "01:55 PM",
-                    "exit_time": "02:18 PM",
-                    "entry_price": 11.88,
-                    "exit_price": 11.42,
-                    "pnl_usd": -305.6,
-                    "pnl_pct": -3.87,
-                    "qty": 800,
-                    "operator_vote": "bad",
-                },
-            ],
-        },
-        {
-            "date": "2026-08-05",
-            "display": "Tuesday, Aug 5",
-            "pl_usd": 1246.80,
-            "pl_pct": 2.49,
-            "trade_count": 5,
-            "wins": 4,
-            "losses": 1,
-            "win_rate": 80.0,
-            "trades": [
-                {
-                    "id": "arch-0805-smci",
-                    "ticker": "SMCI",
-                    "timeframe": "15-Minute",
-                    "layout": "Layout 4 — Neutral / Risk-On",
-                    "strategy": "4A (15M)",
-                    "entry_time": "09:45 AM",
-                    "exit_time": "10:30 AM",
-                    "entry_price": 42.10,
-                    "exit_price": 44.85,
-                    "pnl_usd": 550.0,
-                    "pnl_pct": 6.53,
-                    "qty": 200,
-                    "operator_vote": "good",
-                },
-                {
-                    "id": "arch-0805-arm",
-                    "ticker": "ARM",
-                    "timeframe": "5-Minute",
-                    "layout": "Layout 3 — Volatile / Risk-On",
-                    "strategy": "3A (5M)",
-                    "entry_time": "11:05 AM",
-                    "exit_time": "11:22 AM",
-                    "entry_price": 138.40,
-                    "exit_price": 142.20,
-                    "pnl_usd": 380.0,
-                    "pnl_pct": 2.75,
-                    "qty": 100,
-                    "operator_vote": "good",
-                },
-                {
-                    "id": "arch-0805-pltr",
-                    "ticker": "PLTR",
-                    "timeframe": "1-Minute",
-                    "layout": "Layout 1 — Volatile / Risk-Off",
-                    "strategy": "1A (1M)",
-                    "entry_time": "01:12 PM",
-                    "exit_time": "01:18 PM",
-                    "entry_price": 26.88,
-                    "exit_price": 27.42,
-                    "pnl_usd": 216.0,
-                    "pnl_pct": 2.01,
-                    "qty": 400,
-                    "operator_vote": "good",
-                },
-                {
-                    "id": "arch-0805-coin",
-                    "ticker": "COIN",
-                    "timeframe": "5-Minute",
-                    "layout": "Layout 3 — Volatile / Risk-On",
-                    "strategy": "3C (5M)",
-                    "entry_time": "02:40 PM",
-                    "exit_time": "03:05 PM",
-                    "entry_price": 198.50,
-                    "exit_price": 202.80,
-                    "pnl_usd": 210.0,
-                    "pnl_pct": 2.17,
-                    "qty": 50,
-                    "operator_vote": "good",
-                },
-                {
-                    "id": "arch-0805-mara",
-                    "ticker": "MARA",
-                    "timeframe": "1-Minute",
-                    "layout": "Layout 2 — Tight / Tight Range",
-                    "strategy": "2A (1M)",
-                    "entry_time": "03:48 PM",
-                    "exit_time": "03:54 PM",
-                    "entry_price": 16.22,
-                    "exit_price": 15.98,
-                    "pnl_usd": -109.2,
-                    "pnl_pct": -1.48,
-                    "qty": 450,
-                    "operator_vote": "bad",
-                },
-            ],
-        },
-    ]
-
-
 def _maybe_roll_trading_session() -> None:
     """Reset intraday RAM when the trading day rolls (4 AM ET). Archive not wired yet."""
     key = _trading_day_key()
@@ -961,48 +743,21 @@ def _maybe_roll_trading_session() -> None:
     if prev == key:
         return
     st.session_state.room3_session_day_key = key
-    if st.session_state.room3_demo_active:
-        st.session_state.room3_open_positions = []
-        st.session_state.room3_pending_reviews = []
-        st.session_state.room3_trade_history = []
-        st.session_state.room3_operator_reviews = []
-        st.session_state.room3_strategy_feedback = {}
-        st.session_state.room3_decay_alerts = []
-        log = list(st.session_state.room3_matrix_sync_log or [])
-        log.append(f"Session rolled · new trading day {key} (4 AM ET)")
-        st.session_state.room3_matrix_sync_log = log[-12:]
-
-
-def _demo_equity_curve() -> list[dict]:
-    """Demo all-time equity path ending at current account equity."""
-    start = ROOM3_DEMO_ACCOUNT_EQUITY
-    # Chronological closes — archive days are newest-first in UI; curve needs oldest→newest.
-    archive = sorted(_demo_archive_days(), key=lambda d: str(d.get("date") or ""))
-    points: list[dict] = [{"date": "Start", "equity": start}]
-    running = start
-    for day in archive:
-        running = round(running + float(day.get("pl_usd") or 0), 2)
-        points.append(
-            {
-                "date": str(day.get("date") or ""),
-                "equity": running,
-                "day_pl": float(day.get("pl_usd") or 0),
-            }
-        )
-    today_stats_pl = 0.0  # filled after seed via sync helper
-    points.append(
-        {
-            "date": _trading_day_key(),
-            "equity": running,  # synced once today stats exist
-            "day_pl": today_stats_pl,
-        }
-    )
-    return points
+    # Archive current day later when IBKR hose is live; reset intraday RAM for new session.
+    st.session_state.room3_open_positions = []
+    st.session_state.room3_pending_reviews = []
+    st.session_state.room3_trade_history = []
+    st.session_state.room3_operator_reviews = []
+    st.session_state.room3_strategy_feedback = {}
+    st.session_state.room3_decay_alerts = []
+    log = list(st.session_state.room3_matrix_sync_log or [])
+    log.append(f"Session rolled · new trading day {key} (4 AM ET)")
+    st.session_state.room3_matrix_sync_log = log[-12:]
 
 
 def _sync_equity_curve_with_today() -> None:
     """Keep the equity curve aligned with archive days + live day P/L."""
-    start = float(st.session_state.room3_starting_equity or ROOM3_DEMO_ACCOUNT_EQUITY)
+    start = float(st.session_state.room3_starting_equity or ROOM3_DEFAULT_EQUITY)
     archive = sorted(
         list(st.session_state.room3_archive_days or []),
         key=lambda d: str(d.get("date") or ""),
@@ -1042,7 +797,7 @@ def _sync_equity_curve_with_today() -> None:
 
 def _all_time_stats() -> dict:
     _sync_equity_curve_with_today()
-    start = float(st.session_state.room3_starting_equity or ROOM3_DEMO_ACCOUNT_EQUITY)
+    start = float(st.session_state.room3_starting_equity or ROOM3_DEFAULT_EQUITY)
     curve = list(st.session_state.room3_equity_curve or [])
     current = float(curve[-1]["equity"]) if curve else float(
         st.session_state.room3_account_equity or start
@@ -1085,144 +840,8 @@ def _all_time_stats() -> dict:
 
 
 
-def seed_demo_trading_session() -> None:
-    """Mock session — Room 3 RAM only. No vault / IBKR / matrix writes."""
-    st.session_state.room3_demo_active = True
-    st.session_state.room3_demo_seeded = True
-    st.session_state.room3_account_equity = ROOM3_DEMO_ACCOUNT_EQUITY
-    st.session_state.room3_open_positions = [
-        {
-            "id": "open-hypot",
-            "ticker": "HYPOT",
-            "timeframe": "5-Minute",
-            "layout": "Layout 3 — Volatile / Risk-On",
-            "strategy": "3A (5M)",
-            "entry_time": "10:12 AM",
-            "entry_price": 4.85,
-            "last_price": 5.42,
-            "target_price": 5.65,
-            "pnl_usd": 285.0,
-            "pnl_pct": 11.75,
-            "qty": 500,
-        },
-        {
-            "id": "open-vmar",
-            "ticker": "VMAR",
-            "timeframe": "1-Minute",
-            "layout": "Layout 1 — Volatile / Risk-Off",
-            "strategy": "1B (1M)",
-            "entry_time": "10:28 AM",
-            "entry_price": 2.14,
-            "last_price": 2.09,
-            "target_price": 2.35,
-            "pnl_usd": -62.5,
-            "pnl_pct": -2.34,
-            "qty": 1200,
-        },
-    ]
-    st.session_state.room3_pending_reviews = [
-        {
-            "id": "closed-lhai",
-            "ticker": "LHAI",
-            "timeframe": "5-Minute",
-            "layout": "Layout 4 — Neutral / Risk-On",
-            "strategy": "4A (5M)",
-            "entry_time": "09:10 AM",
-            "exit_time": "09:30 AM",
-            "entry_price": 1.53,
-            "exit_price": 1.95,
-            "pnl_usd": 412.0,
-            "pnl_pct": 27.45,
-            "qty": 800,
-            "system_verdict": "good",
-            "system_reason": "Vault envelope +27.45% · layout match 88%",
-        },
-        {
-            "id": "closed-tc",
-            "ticker": "TC",
-            "timeframe": "15-Minute",
-            "layout": "Layout 1 — Volatile / Risk-Off",
-            "strategy": "1C (15M)",
-            "entry_time": "06:20 PM",
-            "exit_time": "06:55 PM",
-            "entry_price": 8.12,
-            "exit_price": 8.45,
-            "pnl_usd": 198.0,
-            "pnl_pct": 4.06,
-            "qty": 600,
-            "system_verdict": "good",
-            "system_reason": "Above 15m floor · chronological rally",
-        },
-        {
-            "id": "closed-veee",
-            "ticker": "VEEE",
-            "timeframe": "1-Minute",
-            "layout": "Layout 2 — Tight / Tight Range",
-            "strategy": "2A (1M)",
-            "entry_time": "11:04 AM",
-            "exit_time": "11:09 AM",
-            "entry_price": 3.88,
-            "exit_price": 3.72,
-            "pnl_usd": -224.0,
-            "pnl_pct": -4.12,
-            "qty": 1400,
-            "system_verdict": "bad",
-            "system_reason": "Finish below start · chop inside window",
-        },
-    ]
-    st.session_state.room3_trade_history = [
-        {
-            "id": "closed-jem",
-            "ticker": "JEM",
-            "timeframe": "5-Minute",
-            "strategy": "1B (5M)",
-            "entry_time": "08:20 AM",
-            "exit_time": "08:45 AM",
-            "pnl_usd": 310.0,
-            "pnl_pct": 18.2,
-            "operator_vote": "good",
-            "reviewed": True,
-        },
-    ]
-    st.session_state.room3_operator_reviews = []
-    st.session_state.room3_strategy_feedback = {}
-    st.session_state.room3_decay_alerts = []
-    st.session_state.room3_matrix_sync_log = [
-        "Demo loaded — matrix hose disconnected (no Supabase writes)."
-    ]
-    st.session_state.room3_archive_days = _demo_archive_days()
-    st.session_state.room3_session_day_key = _trading_day_key()
-    st.session_state.room3_history_open_day = None
-    st.session_state.room3_history_open_trade_id = None
-    st.session_state.room3_starting_equity = ROOM3_DEMO_ACCOUNT_EQUITY
-    st.session_state.room3_equity_curve = _demo_equity_curve()
-    _sync_equity_curve_with_today()
-    eq = float(st.session_state.room3_account_equity or ROOM3_DEMO_ACCOUNT_EQUITY)
-    # Demo default 50% so Account vs Trading today is visually obvious
-    _set_tradable_pct(50.0, eq)
-
-
-def clear_demo_trading_session() -> None:
-    st.session_state.room3_demo_active = False
-    st.session_state.room3_open_positions = []
-    st.session_state.room3_trade_history = []
-    st.session_state.room3_pending_reviews = []
-    st.session_state.room3_operator_reviews = []
-    st.session_state.room3_strategy_feedback = {}
-    st.session_state.room3_decay_alerts = []
-    st.session_state.room3_matrix_sync_log = ["Demo cleared — RAM only."]
-    st.session_state.room3_account_equity = ROOM3_DEMO_ACCOUNT_EQUITY
-    st.session_state.room3_archive_days = []
-    st.session_state.room3_history_open_day = None
-    st.session_state.room3_history_open_trade_id = None
-    st.session_state.room3_starting_equity = ROOM3_DEMO_ACCOUNT_EQUITY
-    st.session_state.room3_equity_curve = []
-    st.session_state.room3_tradable_today = float(ROOM3_DEMO_ACCOUNT_EQUITY)
-    st.session_state.room3_tradable_pct_ui = 100.0
-
-
 def _session_pl_stats() -> dict:
-    equity = float(st.session_state.room3_account_equity or ROOM3_DEMO_ACCOUNT_EQUITY)
+    equity = float(st.session_state.room3_account_equity or ROOM3_DEFAULT_EQUITY)
     open_rows = st.session_state.room3_open_positions or []
     pending = st.session_state.room3_pending_reviews or []
     history = st.session_state.room3_trade_history or []
@@ -1461,25 +1080,6 @@ def _render_dark_table(rows: list[dict]) -> None:
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
-def _render_demo_toolbar() -> None:
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        if st.button("Load demo session", key="room3_load_demo", use_container_width=True):
-            seed_demo_trading_session()
-            st.rerun()
-    with c2:
-        if st.button("Clear demo", key="room3_clear_demo", use_container_width=True):
-            clear_demo_trading_session()
-            st.rerun()
-    with c3:
-        if st.session_state.room3_demo_active:
-            st.caption(
-                "🧪 **Demo mode** — fake fills in RAM. ✓/✗ reviews do **not** write vault/matrix yet."
-            )
-        else:
-            st.caption("Load demo to preview open trades, log, and operator review flow.")
-
-
 def _render_broker_status_card(mode: str) -> None:
     is_live = mode == ROOM3_MODE_LIVE
     shell_class = "room3-shell"
@@ -1493,7 +1093,7 @@ def _render_broker_status_card(mode: str) -> None:
         f"<div class='{shell_class}'>"
         f"<div class='room3-kicker'>Room 3 · Execution terminal</div>"
         f"<div class='room3-title'>{_mode_label(mode)}</div>"
-        f"<p class='room3-sub'>IBKR {lane} · <strong>Demo / not connected</strong></p>"
+        f"<p class='room3-sub'>IBKR {lane} · <strong>not connected</strong></p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -1503,7 +1103,7 @@ def _render_open_positions() -> None:
     st.markdown("### Open positions")
     rows = st.session_state.room3_open_positions or []
     if not rows:
-        st.caption("No open trades — demo or IBKR fills will show here.")
+        st.caption("No open trades — IBKR fills will show here when connected.")
         return
     display = []
     for r in rows:
@@ -1603,12 +1203,11 @@ def _render_trade_history() -> None:
 def _render_live_dashboard(mode: str) -> None:
     """Live-now strip — account moves with P/L; tradable cap sets today's firepower."""
     # Keep equity curve/account current before reading stats
-    if st.session_state.get("room3_demo_active") or st.session_state.get("room3_equity_curve"):
+    if st.session_state.get("room3_equity_curve") or st.session_state.get("room3_archive_days"):
         _sync_equity_curve_with_today()
     stats = _session_pl_stats()
     equity = float(stats["equity"])
-    # First paint on older sessions: if tradable still equals full account, nudge to 50%
-    # so the new control is obvious (user can hit 100% anytime).
+    # First paint: if tradable still equals full account and equity > 0, nudge to 50%
     if (
         "room3_tradable_seen" not in st.session_state
         and equity > 0
@@ -1988,7 +1587,7 @@ def _render_session_history() -> None:
         _sync_equity_curve_with_today()
     days = list(st.session_state.room3_archive_days or [])
     if not days:
-        st.caption("No archived sessions — load demo to preview history.")
+        st.caption("No archived sessions yet — filled days will land here after trading.")
         return
 
     open_day = st.session_state.room3_history_open_day
@@ -2121,11 +1720,87 @@ def _render_operator_review_panel() -> None:
                 st.rerun()
 
 
+def _ibkr_is_connected() -> bool:
+    return str(st.session_state.get("room3_ibkr_status") or "") == "connected"
+
+
+def _render_ibkr_connection_panel(mode: str) -> None:
+    """Waiting screen → connected. Password stays in TWS/Gateway, not Room 3."""
+    status = str(st.session_state.get("room3_ibkr_status") or "disconnected")
+    lane = "LIVE" if mode == ROOM3_MODE_LIVE else "PAPER"
+    default_port = 7496 if mode == ROOM3_MODE_LIVE else 7497
+    prev_mode = str(st.session_state.get("room3_ibkr_port_mode") or "")
+    if prev_mode != mode:
+        st.session_state.room3_ibkr_port = default_port
+        st.session_state.room3_ibkr_port_mode = mode
+
+    st.markdown("### Interactive Brokers")
+    if status == "connected":
+        acct = st.session_state.room3_ibkr_account or "account linked"
+        st.success(f"Connected · {lane} · {acct}")
+        if st.button("Disconnect", key="room3_ibkr_disconnect"):
+            st.session_state.room3_ibkr_status = "disconnected"
+            st.session_state.room3_ibkr_account = ""
+            st.rerun()
+        return
+
+    st.markdown(
+        f"<div class='room3-shell'>"
+        f"<div class='room3-kicker'>Connection gate</div>"
+        f"<div class='room3-title'>Unlock IBKR {lane}</div>"
+        f"<p class='room3-sub'>"
+        f"Log into <strong>TWS or IB Gateway</strong> with your {lane.lower()} credentials. "
+        f"Room 3 never takes your IBKR password — it only attaches after IBKR is unlocked."
+        f"</p>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.text_input("Host", key="room3_ibkr_host")
+    with c2:
+        st.number_input("Port", min_value=1, max_value=65535, key="room3_ibkr_port", step=1)
+    with c3:
+        st.caption("Paper default **7497** · Live default **7496** (TWS API).")
+
+    if status == "waiting":
+        st.warning(
+            f"Waiting for IBKR {lane}… unlock TWS/Gateway, enable API, then click **Check connection**."
+        )
+    else:
+        st.info(
+            "Steps: open TWS or IB Gateway → log in → File → Global Configuration → API → Settings → "
+            "Enable ActiveX and Socket Clients → note the socket port → return here."
+        )
+
+    b1, b2, _ = st.columns([1, 1, 2])
+    with b1:
+        if st.button("Start waiting", key="room3_ibkr_wait", use_container_width=True):
+            st.session_state.room3_ibkr_status = "waiting"
+            st.rerun()
+    with b2:
+        if st.button("Check connection", key="room3_ibkr_check", type="primary", use_container_width=True):
+            st.session_state.room3_ibkr_status = "waiting"
+            st.session_state.room3_ibkr_last_check = (
+                "API hook not wired yet — next step is ib_insync / Gateway handshake. "
+                f"Target {st.session_state.room3_ibkr_host}:{st.session_state.room3_ibkr_port}."
+            )
+            st.rerun()
+    msg = str(st.session_state.get("room3_ibkr_last_check") or "").strip()
+    if msg:
+        st.caption(msg)
+
+
 def _render_trading_workspace(mode: str) -> None:
     if mode == ROOM3_MODE_PAPER:
         st.markdown("<div class='room3-paper-frame'>", unsafe_allow_html=True)
-    _render_demo_toolbar()
+    _render_ibkr_connection_panel(mode)
     _render_broker_status_card(mode)
+    if not _ibkr_is_connected():
+        st.caption("Trading panels stay empty until IBKR is connected.")
+        if mode == ROOM3_MODE_PAPER:
+            st.markdown("</div>", unsafe_allow_html=True)
+        return
     _render_live_dashboard(mode)
     left, right = st.columns([1, 1])
     with left:
@@ -2149,15 +1824,12 @@ def _render_live_workspace() -> None:
 
 
 def render_room3_trading_center() -> None:
-    """Main Room 3 entry — UI shell only."""
+    """Main Room 3 entry — connection gate + trading shell."""
     init_room3_session_state()
     _inject_room3_css()
     _maybe_roll_trading_session()
 
     _render_mode_slider()
-
-    if not st.session_state.room3_demo_seeded:
-        seed_demo_trading_session()
 
     if ROOM3_LIVE_SECURITY_ENABLED and st.session_state.room3_live_gate_open:
         _render_live_gate_overlay()
@@ -2170,7 +1842,7 @@ def render_room3_trading_center() -> None:
             _render_paper_workspace()
         else:
             if not ROOM3_LIVE_SECURITY_ENABLED:
-                st.caption("Build mode — live passcode disabled. Flip ROOM3_LIVE_SECURITY_ENABLED when ready.")
+                st.caption("App live passcode disabled for now — IBKR login is still required.")
             _render_live_workspace()
     else:
         _render_paper_workspace()
@@ -2178,6 +1850,6 @@ def render_room3_trading_center() -> None:
     st.markdown("---")
     st.caption(
         f"Session · mode={st.session_state.room3_execution_mode} · "
-        f"live_unlocked={bool(st.session_state.room3_live_unlocked)} · "
+        f"ibkr={st.session_state.room3_ibkr_status} · "
         f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
     )
