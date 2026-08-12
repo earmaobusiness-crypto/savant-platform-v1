@@ -1217,22 +1217,38 @@ def _extract_spaced_ticker(text: str) -> str | None:
     return None
 
 
-def _room1_resolve_ticker_quote(symbol: str) -> tuple[bool, float, str]:
-    """Confirm a symbol has a live-ish price. Never treat Yahoo flakes as 'invalid ticker'."""
+def _room1_yf_quote_bundle(symbol: str) -> dict:
+    """Resilient Yahoo quote for Room 1 — info → fast_info → history."""
     clean = str(symbol or "").strip().upper()
+    empty = {
+        "ok": False,
+        "ticker": clean,
+        "price": 0.0,
+        "prev": 0.0,
+        "pct": 0.0,
+        "volume": 0,
+        "high": 0.0,
+        "low": 0.0,
+        "name": clean,
+        "sector": "",
+        "industry": "",
+        "biz_summary": "",
+        "info": {},
+    }
     if not clean:
-        return False, 0.0, ""
-    name = clean
-    price = 0.0
+        return empty
     try:
         ytk = yf.Ticker(clean)
         try:
             info = ytk.info or {}
         except Exception:
             info = {}
-        if info:
-            price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0.0)
-            name = str(info.get("shortName") or info.get("longName") or clean)
+        price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0.0)
+        name = str(info.get("longName") or info.get("shortName") or clean)
+        prev = float(info.get("regularMarketPreviousClose") or 0.0)
+        raw_vol = int(info.get("volume") or info.get("regularMarketVolume") or 0)
+        high = float(info.get("dayHigh") or 0.0)
+        low = float(info.get("dayLow") or 0.0)
         if price <= 0:
             try:
                 fi = ytk.fast_info
@@ -1240,6 +1256,26 @@ def _room1_resolve_ticker_quote(symbol: str) -> tuple[bool, float, str]:
                 if last is None and hasattr(fi, "get"):
                     last = fi.get("lastPrice") or fi.get("last_price")
                 price = float(last or 0.0)
+                if prev <= 0:
+                    prev_close = getattr(fi, "previous_close", None)
+                    if prev_close is None and hasattr(fi, "get"):
+                        prev_close = fi.get("previousClose") or fi.get("previous_close")
+                    prev = float(prev_close or 0.0)
+                if raw_vol <= 0:
+                    vol_fi = getattr(fi, "last_volume", None)
+                    if vol_fi is None and hasattr(fi, "get"):
+                        vol_fi = fi.get("lastVolume") or fi.get("last_volume")
+                    raw_vol = int(vol_fi or 0)
+                if high <= 0:
+                    day_h = getattr(fi, "day_high", None)
+                    if day_h is None and hasattr(fi, "get"):
+                        day_h = fi.get("dayHigh") or fi.get("day_high")
+                    high = float(day_h or 0.0)
+                if low <= 0:
+                    day_l = getattr(fi, "day_low", None)
+                    if day_l is None and hasattr(fi, "get"):
+                        day_l = fi.get("dayLow") or fi.get("day_low")
+                    low = float(day_l or 0.0)
             except Exception:
                 pass
         if price <= 0:
@@ -1247,13 +1283,50 @@ def _room1_resolve_ticker_quote(symbol: str) -> tuple[bool, float, str]:
                 hist = ytk.history(period="5d")
                 if hist is not None and len(hist) and "Close" in hist.columns:
                     price = float(hist["Close"].iloc[-1])
+                    if prev <= 0 and len(hist) >= 2:
+                        prev = float(hist["Close"].iloc[-2])
+                    if high <= 0 and "High" in hist.columns:
+                        high = float(hist["High"].iloc[-1])
+                    if low <= 0 and "Low" in hist.columns:
+                        low = float(hist["Low"].iloc[-1])
+                    if raw_vol <= 0 and "Volume" in hist.columns:
+                        raw_vol = int(hist["Volume"].iloc[-1] or 0)
             except Exception:
                 pass
-        if price > 0:
-            return True, price, name
+        if price <= 0:
+            return empty
+        if prev <= 0:
+            prev = price
+        if high <= 0:
+            high = price
+        if low <= 0:
+            low = price
+        pct = ((price - prev) / prev) * 100.0 if prev else 0.0
+        return {
+            "ok": True,
+            "ticker": clean,
+            "price": price,
+            "prev": prev,
+            "pct": pct,
+            "volume": raw_vol,
+            "high": high,
+            "low": low,
+            "name": name,
+            "sector": str(info.get("sector") or "").strip(),
+            "industry": str(info.get("industry") or "").strip(),
+            "biz_summary": str(info.get("longBusinessSummary") or "").strip(),
+            "info": info,
+        }
     except Exception:
-        pass
-    return False, 0.0, clean
+        return empty
+
+
+def _room1_resolve_ticker_quote(symbol: str) -> tuple[bool, float, str]:
+    """Confirm a symbol has a live-ish price. Never treat Yahoo flakes as 'invalid ticker'."""
+    bundle = _room1_yf_quote_bundle(symbol)
+    if bundle.get("ok"):
+        return True, float(bundle["price"]), str(bundle["name"])
+    return False, 0.0, str(symbol or "").strip().upper()
 
 
 def extract_ticker(text):
@@ -2420,56 +2493,42 @@ def _room1_session_regime_hint(ticker: str, price: float, day_high: float, day_l
 
 def _hydrate_room1_tape_snapshot(ticker: str) -> dict:
     """Room 1 live tape — yfinance (Polygon-free, same as original Room 1)."""
-    clean = str(ticker or "").strip().upper()
-    if not clean:
+    bundle = _room1_yf_quote_bundle(ticker)
+    if not bundle.get("ok"):
         return {}
-    try:
-        info = yf.Ticker(clean).info or {}
-        price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0.0)
-        if not price:
-            return {}
-        prev = float(info.get("regularMarketPreviousClose") or price or 1.0)
-        pct = ((price - prev) / prev) * 100.0 if prev else 0.0
-        raw_vol = int(info.get("volume") or info.get("regularMarketVolume") or 0)
-        high = float(info.get("dayHigh") or price)
-        low = float(info.get("dayLow") or price)
-        vwap_native = (high + low + price) / 3.0 if price else 0.0
-        name = str(info.get("longName") or info.get("shortName") or clean)
-        snap = {
-            "ok": True,
-            "ticker": clean,
-            "price": price,
-            "pct_change": round(pct, 4),
-            "volume": raw_vol,
-            "vwap_native": round(vwap_native, 4),
-            "name": name,
-        }
-        st.session_state.room1_tape_snapshot = snap
-        return snap
-    except Exception:
-        return {}
+    price = float(bundle["price"])
+    high = float(bundle["high"])
+    low = float(bundle["low"])
+    vwap_native = (high + low + price) / 3.0 if price else 0.0
+    snap = {
+        "ok": True,
+        "ticker": bundle["ticker"],
+        "price": price,
+        "pct_change": round(float(bundle["pct"]), 4),
+        "volume": int(bundle["volume"]),
+        "vwap_native": round(vwap_native, 4),
+        "name": str(bundle["name"]),
+    }
+    st.session_state.room1_tape_snapshot = snap
+    return snap
 
 
 def _fetch_tape_metrics(ticker):
     """Fast yfinance read for UI metric cards — skips 12L engine on every rerun."""
     if not ticker:
         return 0.0, 0.0, "N/A", "N/A", "Unknown"
-    try:
-        ticker = ticker.upper()
-        info = yf.Ticker(ticker).info or {}
-        name = info.get("longName", info.get("shortName", ticker))
-        price = float(info.get("currentPrice", info.get("regularMarketPrice", 0.0)) or 0.0)
-        prev = float(info.get("regularMarketPreviousClose", 1.0) or 1.0)
-        pct = ((price - prev) / prev) * 100 if price and prev else 0.0
-        raw_vol = int(info.get("volume", info.get("regularMarketVolume", 0)) or 0)
-        vol = f"{raw_vol:,}" if raw_vol else "N/A"
-        high = float(info.get("dayHigh", price) or price)
-        low = float(info.get("dayLow", price) or price)
-        vwap_val = (high + low + price) / 3 if price else 0.0
-        vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
-        return price, pct, vol, vw_str, name
-    except Exception:
-        return 0.0, 0.0, "N/A", "N/A", ticker.upper()
+    bundle = _room1_yf_quote_bundle(ticker)
+    if not bundle.get("ok"):
+        return 0.0, 0.0, "N/A", "N/A", str(ticker).upper()
+    price = float(bundle["price"])
+    pct = float(bundle["pct"])
+    raw_vol = int(bundle["volume"])
+    vol = f"{raw_vol:,}" if raw_vol else "N/A"
+    high = float(bundle["high"])
+    low = float(bundle["low"])
+    vwap_val = (high + low + price) / 3 if price else 0.0
+    vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
+    return price, pct, vol, vw_str, str(bundle["name"])
 
 
 def get_live_tape_data(ticker):
@@ -2482,45 +2541,64 @@ def get_live_tape_data(ticker):
         st.session_state.room1_sec_filing_cards = []
         st.session_state.room1_big_dog_wire = {}
         return 0.0, 0.0, "N/A", "N/A", "Unknown"
-    try:
-        ticker = ticker.upper()
-        ytk = yf.Ticker(ticker)
-        info = ytk.info or {}
-        name = info.get("longName", info.get("shortName", ticker))
-        price = float(info.get("currentPrice", info.get("regularMarketPrice", 0.0)) or 0.0)
-        prev = float(info.get("regularMarketPreviousClose", 1.0) or 1.0)
-        pct = ((price - prev) / prev) * 100 if price and prev else 0.0
-        raw_vol = int(info.get("volume", info.get("regularMarketVolume", 0)) or 0)
-        vol = f"{raw_vol:,}" if raw_vol else "N/A"
-        high = float(info.get("dayHigh", price) or price)
-        low = float(info.get("dayLow", price) or price)
-        vwap_val = (high + low + price) / 3 if price else 0.0
-        vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
 
+    bundle = _room1_yf_quote_bundle(ticker)
+    if not bundle.get("ok"):
+        return 0.0, 0.0, "N/A", "N/A", str(ticker).upper()
+
+    ticker = str(bundle["ticker"])
+    name = str(bundle["name"])
+    price = float(bundle["price"])
+    pct = float(bundle["pct"])
+    raw_vol = int(bundle["volume"])
+    vol = f"{raw_vol:,}" if raw_vol else "N/A"
+    high = float(bundle["high"])
+    low = float(bundle["low"])
+    vwap_val = (high + low + price) / 3 if price else 0.0
+    vw_str = f"${vwap_val:.2f}" if vwap_val else "N/A"
+
+    # Side channels must not wipe a locked price if one of them flakes.
+    try:
         st.session_state.active_news_wire = _fetch_news_wire(ticker)
-        sector_ctx = _fetch_sector_rotation()
-        corr_ctx = _compute_cross_asset_correlation(ticker)
-        vol_ctx, inst_flag = _compute_volatility_engine(ticker, price, raw_vol, vwap_val)
-        st.session_state.institutional_accumulation_detected = inst_flag
-        sec_ctx = _fetch_sec_filings(ticker)
-        _fetch_big_dog_social_wire(ticker)
-        co_sector = str(info.get("sector") or "").strip()
-        co_industry = str(info.get("industry") or "").strip()
-        biz_summary = str(info.get("longBusinessSummary") or "").strip()
-        session_regime = _room1_session_regime_hint(ticker, price, high, low)
-        _build_data_payload_string(
-            ticker, name, price, pct, vol, vw_str,
-            st.session_state.active_news_wire, sector_ctx, vol_ctx, sec_ctx, corr_ctx,
-            co_sector=co_sector,
-            co_industry=co_industry,
-            biz_summary=biz_summary,
-            session_regime=session_regime,
-            day_high=high,
-            day_low=low,
-        )
-        return price, pct, vol, vw_str, name
     except Exception:
-        return 0.0, 0.0, "N/A", "N/A", ticker
+        st.session_state.active_news_wire = []
+    try:
+        sector_ctx = _fetch_sector_rotation()
+    except Exception:
+        sector_ctx = "SECTOR_FLOW:UNAVAILABLE"
+    try:
+        corr_ctx = _compute_cross_asset_correlation(ticker)
+    except Exception:
+        corr_ctx = "XASSET_CORR:UNAVAILABLE"
+    try:
+        vol_ctx, inst_flag = _compute_volatility_engine(ticker, price, raw_vol, vwap_val)
+    except Exception:
+        vol_ctx, inst_flag = "VOL_ENGINE:UNAVAILABLE", False
+    st.session_state.institutional_accumulation_detected = bool(inst_flag)
+    try:
+        sec_ctx = _fetch_sec_filings(ticker)
+    except Exception:
+        sec_ctx = "SEC:UNAVAILABLE"
+    try:
+        _fetch_big_dog_social_wire(ticker)
+    except Exception:
+        pass
+    try:
+        session_regime = _room1_session_regime_hint(ticker, price, high, low)
+    except Exception:
+        session_regime = "NA"
+
+    _build_data_payload_string(
+        ticker, name, price, pct, vol, vw_str,
+        st.session_state.active_news_wire, sector_ctx, vol_ctx, sec_ctx, corr_ctx,
+        co_sector=str(bundle.get("sector") or ""),
+        co_industry=str(bundle.get("industry") or ""),
+        biz_summary=str(bundle.get("biz_summary") or ""),
+        session_regime=session_regime,
+        day_high=high,
+        day_low=low,
+    )
+    return price, pct, vol, vw_str, name
 
 
 def _build_room1_stock_chat_payload(
@@ -2685,9 +2763,9 @@ def process_chat_submission():
     active_ticker = st.session_state.current_ticker
 
     if not casual and new_ticker and is_room1_fresh_ticker_setup(user_text, new_ticker):
-        get_live_tape_data(new_ticker)
+        tape_price, _, _, _, _ = get_live_tape_data(new_ticker)
         payload = st.session_state.data_payload_string
-        if not payload or "P:0.00" in payload:
+        if tape_price <= 0 or not payload:
             st.session_state.chat_history.append(
                 {
                     "speaker": "Savant",
