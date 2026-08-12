@@ -194,8 +194,10 @@ def init_room3_session_state() -> None:
         st.session_state.room3_history_open_trade_id = None
     if "room3_session_day_key" not in st.session_state:
         st.session_state.room3_session_day_key = ""
-    if "room3_metric_expand_id" not in st.session_state:
-        st.session_state.room3_metric_expand_id = None
+    if "room3_equity_curve" not in st.session_state:
+        st.session_state.room3_equity_curve = []
+    if "room3_starting_equity" not in st.session_state:
+        st.session_state.room3_starting_equity = ROOM3_DEMO_ACCOUNT_EQUITY
 
 
 def _inject_room3_css() -> None:
@@ -883,6 +885,93 @@ def _maybe_roll_trading_session() -> None:
         st.session_state.room3_matrix_sync_log = log[-12:]
 
 
+def _demo_equity_curve() -> list[dict]:
+    """Demo all-time equity path ending at current account equity."""
+    start = ROOM3_DEMO_ACCOUNT_EQUITY
+    # Chronological closes — archive days are newest-first in UI; curve needs oldest→newest.
+    archive = sorted(_demo_archive_days(), key=lambda d: str(d.get("date") or ""))
+    points: list[dict] = [{"date": "Start", "equity": start}]
+    running = start
+    for day in archive:
+        running = round(running + float(day.get("pl_usd") or 0), 2)
+        points.append(
+            {
+                "date": str(day.get("date") or ""),
+                "equity": running,
+                "day_pl": float(day.get("pl_usd") or 0),
+            }
+        )
+    today_stats_pl = 0.0  # filled after seed via sync helper
+    points.append(
+        {
+            "date": _trading_day_key(),
+            "equity": running,  # synced once today stats exist
+            "day_pl": today_stats_pl,
+        }
+    )
+    return points
+
+
+def _sync_equity_curve_with_today() -> None:
+    """Keep the equity curve aligned with archive days + live day P/L."""
+    start = float(st.session_state.room3_starting_equity or ROOM3_DEMO_ACCOUNT_EQUITY)
+    archive = sorted(
+        list(st.session_state.room3_archive_days or []),
+        key=lambda d: str(d.get("date") or ""),
+    )
+    running = start
+    rebuilt: list[dict] = [{"date": "Start", "equity": start}]
+    for day in archive:
+        running = round(running + float(day.get("pl_usd") or 0), 2)
+        rebuilt.append(
+            {
+                "date": str(day.get("date") or ""),
+                "equity": running,
+                "day_pl": float(day.get("pl_usd") or 0),
+            }
+        )
+    day_pl = float(_session_pl_stats().get("day_pl") or 0)
+    today_eq = round(running + day_pl, 2)
+    rebuilt.append({"date": _trading_day_key(), "equity": today_eq, "day_pl": day_pl})
+    st.session_state.room3_equity_curve = rebuilt
+    st.session_state.room3_account_equity = today_eq
+
+
+def _all_time_stats() -> dict:
+    _sync_equity_curve_with_today()
+    start = float(st.session_state.room3_starting_equity or ROOM3_DEMO_ACCOUNT_EQUITY)
+    curve = list(st.session_state.room3_equity_curve or [])
+    current = float(curve[-1]["equity"]) if curve else float(
+        st.session_state.room3_account_equity or start
+    )
+    equities = [float(p.get("equity") or 0) for p in curve] or [start]
+    peak = max(equities)
+    max_dd = 0.0
+    peak_so_far = equities[0]
+    for eq in equities:
+        peak_so_far = max(peak_so_far, eq)
+        dd = (peak_so_far - eq) / peak_so_far * 100.0 if peak_so_far else 0.0
+        max_dd = max(max_dd, dd)
+    all_time_pl = current - start
+    all_time_pct = (all_time_pl / start * 100.0) if start else 0.0
+    archive = list(st.session_state.room3_archive_days or [])
+    today_trades = int(_session_pl_stats().get("trades_today") or 0)
+    sessions = len(archive) + (1 if today_trades else 0)
+    total_trades = sum(int(d.get("trade_count") or 0) for d in archive) + today_trades
+    return {
+        "start": start,
+        "current": current,
+        "all_time_pl": all_time_pl,
+        "all_time_pct": all_time_pct,
+        "peak": peak,
+        "max_drawdown_pct": max_dd,
+        "sessions": sessions,
+        "total_trades": total_trades,
+        "curve": curve,
+    }
+
+
+
 def seed_demo_trading_session() -> None:
     """Mock session — Room 3 RAM only. No vault / IBKR / matrix writes."""
     st.session_state.room3_demo_active = True
@@ -992,6 +1081,9 @@ def seed_demo_trading_session() -> None:
     st.session_state.room3_session_day_key = _trading_day_key()
     st.session_state.room3_history_open_day = None
     st.session_state.room3_history_open_trade_id = None
+    st.session_state.room3_starting_equity = ROOM3_DEMO_ACCOUNT_EQUITY
+    st.session_state.room3_equity_curve = _demo_equity_curve()
+    _sync_equity_curve_with_today()
 
 
 def clear_demo_trading_session() -> None:
@@ -1007,6 +1099,8 @@ def clear_demo_trading_session() -> None:
     st.session_state.room3_archive_days = []
     st.session_state.room3_history_open_day = None
     st.session_state.room3_history_open_trade_id = None
+    st.session_state.room3_starting_equity = ROOM3_DEMO_ACCOUNT_EQUITY
+    st.session_state.room3_equity_curve = []
 
 
 def _session_pl_stats() -> dict:
@@ -1158,9 +1252,8 @@ def _render_metric_tiles(
     items: list[dict],
     *,
     grid_class: str = "room3-metric-grid-2",
-    expand_key: str = "summary",
 ) -> None:
-    """Compact metric tiles — full values stay visible; click Expand for a clear readout."""
+    """Compact metric tiles — full values stay visible (no truncation)."""
     cards_html = [f"<div class='room3-metric-grid {grid_class}'>"]
     for item in items:
         tone = _metric_tone(item.get("value"))
@@ -1180,23 +1273,6 @@ def _render_metric_tiles(
         )
     cards_html.append("</div>")
     st.markdown("".join(cards_html), unsafe_allow_html=True)
-
-    open_id = st.session_state.room3_metric_expand_id
-    is_open = open_id == expand_key
-    toggle_label = "Collapse figures" if is_open else "Expand figures"
-    if st.button(toggle_label, key=f"room3_metric_toggle_{expand_key}"):
-        st.session_state.room3_metric_expand_id = None if is_open else expand_key
-        st.rerun()
-    if is_open:
-        lines = []
-        for item in items:
-            detail = escape(str(item.get("detail") or item.get("value") or ""))
-            label = escape(str(item.get("label") or ""))
-            lines.append(f"<div><strong>{label}</strong> — {detail}</div>")
-        st.markdown(
-            f"<div class='room3-metric-expand'>{''.join(lines)}</div>",
-            unsafe_allow_html=True,
-        )
 
 
 def _position_dollar_value(row: dict) -> float:
@@ -1395,53 +1471,25 @@ def _render_live_dashboard(mode: str) -> None:
         f"**{day_label}** · session rolls at 4:00 AM ET · "
         "metrics refresh while the system is active"
     )
-    win_label = f"{stats['win_rate']:.0f}%" if stats["wins"] + stats["losses"] else "—"
-    _render_metric_tiles(
-        [
-            {
-                "id": "acct",
-                "label": "Account",
-                "value": f"${stats['equity']:,.2f}",
-                "detail": f"Account equity ${stats['equity']:,.2f}",
-            },
-            {
-                "id": "day",
-                "label": "Day P/L",
-                "value": _fmt_pl_usd(stats["day_pl"]),
-                "sub": f"{stats['day_pl_pct']:+.2f}%",
-                "detail": (
-                    f"Day P/L {_fmt_pl_usd(stats['day_pl'])} · "
-                    f"{stats['day_pl_pct']:+.2f}% of account"
-                ),
-            },
-            {
-                "id": "unreal",
-                "label": "Open unrealized",
-                "value": _fmt_pl_usd(stats["open_pl"]),
-                "detail": f"Open unrealized {_fmt_pl_usd(stats['open_pl'])}",
-            },
-            {
-                "id": "open",
-                "label": "Open positions",
-                "value": str(stats["open_count"]),
-                "detail": f"{stats['open_count']} open position(s)",
-            },
-            {
-                "id": "wl",
-                "label": "Wins / Losses",
-                "value": f"{stats['wins']} / {stats['losses']}",
-                "detail": f"{stats['wins']} wins · {stats['losses']} losses",
-            },
-            {
-                "id": "wr",
-                "label": "Win rate",
-                "value": win_label,
-                "detail": f"Win rate {win_label}",
-            },
-        ],
-        grid_class="room3-metric-grid-auto",
-        expand_key="live",
-    )
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    with c1:
+        st.metric("Account", f"${stats['equity']:,.0f}")
+    with c2:
+        st.metric(
+            "Day P/L",
+            _fmt_pl_usd(stats["day_pl"]),
+            delta=f"{stats['day_pl_pct']:+.2f}%",
+            delta_color="normal",
+        )
+    with c3:
+        st.metric("Open unrealized", _fmt_pl_usd(stats["open_pl"]))
+    with c4:
+        st.metric("Open positions", stats["open_count"])
+    with c5:
+        st.metric("Wins / Losses", f"{stats['wins']} / {stats['losses']}")
+    with c6:
+        win_label = f"{stats['win_rate']:.0f}%" if stats["wins"] + stats["losses"] else "—"
+        st.metric("Win rate", win_label)
     if mode == ROOM3_MODE_LIVE:
         st.caption("Kill switch: **SAFE** (no broker connected)")
 
@@ -1488,9 +1536,65 @@ def _render_session_summary() -> None:
             },
         ],
         grid_class="room3-metric-grid-2",
-        expand_key="summary",
     )
     st.caption("Day % = (open + closed P/L) ÷ account equity.")
+    _render_all_time_panel()
+
+
+def _render_all_time_panel() -> None:
+    """Account trajectory since start — scales with capital, demo-backed for now."""
+    st.markdown("### All-time")
+    at = _all_time_stats()
+    _render_metric_tiles(
+        [
+            {
+                "id": "start",
+                "label": "Starting equity",
+                "value": f"${at['start']:,.2f}",
+                "detail": f"Starting equity ${at['start']:,.2f}",
+            },
+            {
+                "id": "now",
+                "label": "Current equity",
+                "value": f"${at['current']:,.2f}",
+                "detail": f"Current equity ${at['current']:,.2f}",
+            },
+            {
+                "id": "at_pl",
+                "label": "All-time P/L",
+                "value": _fmt_pl_usd(at["all_time_pl"]),
+                "sub": _fmt_pl_pct(at["all_time_pct"]),
+                "detail": (
+                    f"All-time {_fmt_pl_usd(at['all_time_pl'])} · "
+                    f"{_fmt_pl_pct(at['all_time_pct'])} from start"
+                ),
+            },
+            {
+                "id": "peak",
+                "label": "Peak / Max DD",
+                "value": f"${at['peak']:,.2f}",
+                "sub": f"DD {_fmt_pl_pct(-abs(at['max_drawdown_pct']))}",
+                "detail": (
+                    f"Peak ${at['peak']:,.2f} · max drawdown "
+                    f"{at['max_drawdown_pct']:.2f}%"
+                ),
+            },
+        ],
+        grid_class="room3-metric-grid-2",
+    )
+    st.caption(
+        f"{at['sessions']} sessions · {at['total_trades']} trades · "
+        "trajectory since account start"
+    )
+    curve = at.get("curve") or []
+    if len(curve) >= 2:
+        df = pd.DataFrame(
+            {
+                "Equity": [float(p.get("equity") or 0) for p in curve],
+            },
+            index=[str(p.get("date") or "") for p in curve],
+        )
+        st.line_chart(df, height=180)
 
 
 def _render_history_trade_detail(trade: dict) -> None:
