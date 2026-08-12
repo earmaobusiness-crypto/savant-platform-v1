@@ -1218,16 +1218,42 @@ def _extract_spaced_ticker(text: str) -> str | None:
 
 
 def _room1_resolve_ticker_quote(symbol: str) -> tuple[bool, float, str]:
+    """Confirm a symbol has a live-ish price. Never treat Yahoo flakes as 'invalid ticker'."""
     clean = str(symbol or "").strip().upper()
     if not clean:
         return False, 0.0, ""
+    name = clean
+    price = 0.0
     try:
-        info = yf.Ticker(clean).info or {}
-        price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0.0)
-        name = str(info.get("shortName") or info.get("longName") or clean)
-        return price > 0, price, name
+        ytk = yf.Ticker(clean)
+        try:
+            info = ytk.info or {}
+        except Exception:
+            info = {}
+        if info:
+            price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0.0)
+            name = str(info.get("shortName") or info.get("longName") or clean)
+        if price <= 0:
+            try:
+                fi = ytk.fast_info
+                last = getattr(fi, "last_price", None)
+                if last is None and hasattr(fi, "get"):
+                    last = fi.get("lastPrice") or fi.get("last_price")
+                price = float(last or 0.0)
+            except Exception:
+                pass
+        if price <= 0:
+            try:
+                hist = ytk.history(period="5d")
+                if hist is not None and len(hist) and "Close" in hist.columns:
+                    price = float(hist["Close"].iloc[-1])
+            except Exception:
+                pass
+        if price > 0:
+            return True, price, name
     except Exception:
-        return False, 0.0, clean
+        pass
+    return False, 0.0, clean
 
 
 def extract_ticker(text):
