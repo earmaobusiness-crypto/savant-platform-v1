@@ -89,20 +89,55 @@ def _hash_code(raw: str) -> str:
     return hashlib.sha256(str(raw or "").strip().encode("utf-8")).hexdigest()
 
 
-def _configured_passcode_hash() -> str | None:
+def _configured_passcode_plain() -> str | None:
     cfg = _room3_secrets()
     plain = str(cfg.get("live_passcode") or "").strip()
-    if not plain:
-        return None
-    return _hash_code(plain)
+    return plain or None
 
 
-def _configured_recovery_hash() -> str | None:
+def _configured_recovery_plain() -> str | None:
     cfg = _room3_secrets()
     plain = str(cfg.get("recovery_code") or "").strip()
-    if not plain:
-        return None
-    return _hash_code(plain)
+    return plain or None
+
+
+def _passcode_matches(entered: str, expected_plain: str | None) -> bool:
+    if not expected_plain:
+        return False
+    return str(entered or "").strip() == str(expected_plain).strip()
+
+
+def _unlock_live_session() -> None:
+    st.session_state.room3_live_unlocked = True
+    st.session_state.room3_execution_mode = ROOM3_MODE_LIVE
+    st.session_state.room3_live_gate_open = False
+    st.session_state.room3_auth_fail_count = 0
+    st.session_state.room3_recovery_stage = ""
+    st.session_state.room3_gate_message = ""
+    st.session_state.room3_gate_error = False
+
+
+def _try_unlock_with_passcode(entered: str) -> bool:
+    expected = _configured_passcode_plain()
+    if not expected:
+        st.session_state.room3_gate_message = (
+            "Passcode not loaded — add ROOM3_LIVE_PASSCODE to secrets and restart."
+        )
+        st.session_state.room3_gate_error = True
+        return False
+    if not str(entered or "").strip():
+        st.session_state.room3_gate_message = "Enter a passcode first."
+        st.session_state.room3_gate_error = True
+        return False
+    if _passcode_matches(entered, expected):
+        _unlock_live_session()
+        return True
+    st.session_state.room3_auth_fail_count = int(st.session_state.room3_auth_fail_count or 0) + 1
+    st.session_state.room3_gate_message = "Wrong passcode."
+    st.session_state.room3_gate_error = True
+    if st.session_state.room3_auth_fail_count >= 3:
+        st.session_state.room3_recovery_stage = "offer_email"
+    return False
 
 
 def init_room3_session_state() -> None:
@@ -287,8 +322,8 @@ def _render_live_gate_overlay() -> None:
         unsafe_allow_html=True,
     )
 
-    pass_hash = _configured_passcode_hash()
-    if pass_hash is None:
+    expected_plain = _configured_passcode_plain()
+    if expected_plain is None:
         st.warning("Passcode missing — add ROOM3_LIVE_PASSCODE to secrets and restart.")
     else:
         st.caption("Passcode loaded · enter code to unlock live.")
@@ -303,52 +338,25 @@ def _render_live_gate_overlay() -> None:
         st.session_state.room3_gate_message = ""
         st.session_state.room3_gate_error = False
 
-    def _process_passcode_attempt(raw_code: str) -> bool:
-        if pass_hash is None:
-            st.session_state.room3_gate_message = (
-                "Passcode not loaded — restart Streamlit after editing secrets."
-            )
-            st.session_state.room3_gate_error = True
-            return False
-        if not str(raw_code or "").strip():
-            st.session_state.room3_gate_message = "Enter a passcode first."
-            st.session_state.room3_gate_error = True
-            return False
-        if _hash_code(raw_code) == pass_hash:
-            st.session_state.room3_live_unlocked = True
-            st.session_state.room3_execution_mode = ROOM3_MODE_LIVE
-            st.session_state.room3_live_gate_open = False
-            st.session_state.room3_auth_fail_count = 0
-            st.session_state.room3_recovery_stage = ""
-            st.session_state.room3_gate_message = ""
-            st.session_state.room3_gate_error = False
-            return True
-        st.session_state.room3_auth_fail_count = int(st.session_state.room3_auth_fail_count or 0) + 1
-        st.session_state.room3_gate_message = "Wrong passcode."
-        st.session_state.room3_gate_error = True
-        if st.session_state.room3_auth_fail_count >= 3:
-            st.session_state.room3_recovery_stage = "offer_email"
-        return False
-
     _, center, _ = st.columns([1, 1.2, 1])
     with center:
-        with st.form("room3_live_passcode_form", clear_on_submit=False):
-            st.text_input(
-                "Passcode",
-                type="password",
-                placeholder="••••••",
-                label_visibility="collapsed",
-                key="room3_live_passcode_input",
-            )
-            submitted = st.form_submit_button(
-                "Unlock live trading",
-                type="primary",
-                use_container_width=True,
-            )
+        entered = st.text_input(
+            "Passcode",
+            type="password",
+            placeholder="••••••",
+            label_visibility="collapsed",
+            key="room3_live_passcode_input",
+        )
+        unlock_clicked = st.button(
+            "Unlock live trading",
+            key="room3_unlock_live_btn",
+            type="primary",
+            use_container_width=True,
+        )
 
-    if submitted:
-        entered = str(st.session_state.get("room3_live_passcode_input") or "")
-        _process_passcode_attempt(entered)
+    if unlock_clicked:
+        code = str(entered or st.session_state.get("room3_live_passcode_input") or "")
+        _try_unlock_with_passcode(code)
         st.rerun()
 
     _, btn_col, _ = st.columns([1, 1.2, 1])
@@ -374,34 +382,49 @@ def _render_live_gate_overlay() -> None:
         st.caption(f"Enter code from **{ROOM3_RECOVERY_EMAIL}**")
         if st.session_state.room3_recovery_token:
             st.caption(f"Demo code: `{st.session_state.room3_recovery_token}`")
-        with st.form("room3_recovery_form", clear_on_submit=True):
-            recovery_input = st.text_input("Recovery code", placeholder="6-digit", label_visibility="collapsed")
-            rec_submit = st.form_submit_button("Verify", use_container_width=True)
-        if rec_submit:
-            recovery_hash = _configured_recovery_hash()
+        recovery_input = st.text_input(
+            "Recovery code",
+            placeholder="6-digit",
+            label_visibility="collapsed",
+            key="room3_recovery_code_input",
+        )
+        if st.button("Verify", key="room3_recovery_verify_btn", use_container_width=True):
             token_ok = (
                 recovery_input.strip().upper()
                 == str(st.session_state.room3_recovery_token or "").strip().upper()
             )
-            secret_ok = recovery_hash and _hash_code(recovery_input) == recovery_hash
+            recovery_plain = _configured_recovery_plain()
+            secret_ok = recovery_plain and recovery_input.strip() == recovery_plain
             if token_ok or secret_ok:
                 st.session_state.room3_recovery_stage = "reset_passcode"
-                st.success("Verified — enter passcode again.")
+                st.session_state.room3_gate_message = "Verified — enter passcode again."
+                st.session_state.room3_gate_error = False
             else:
-                st.error("Code did not match.")
+                st.session_state.room3_gate_message = "Recovery code did not match."
+                st.session_state.room3_gate_error = True
+            st.rerun()
 
     if stage == "reset_passcode":
-        with st.form("room3_recovery_unlock_form", clear_on_submit=True):
-            code = st.text_input("Passcode", type="password", label_visibility="collapsed")
-            rec_unlock = st.form_submit_button("Unlock live trading", use_container_width=True)
-        if rec_unlock and pass_hash and _hash_code(code) == pass_hash:
-            st.session_state.room3_live_unlocked = True
-            st.session_state.room3_execution_mode = ROOM3_MODE_LIVE
-            st.session_state.room3_live_gate_open = False
-            st.session_state.room3_auth_fail_count = 0
-            st.session_state.room3_recovery_stage = ""
-            st.success("Live unlocked.")
-            st.rerun()
+        st.text_input(
+            "Passcode",
+            type="password",
+            label_visibility="collapsed",
+            key="room3_recovery_passcode_input",
+        )
+        if st.button(
+            "Unlock live trading",
+            key="room3_recovery_unlock_btn",
+            use_container_width=True,
+            type="primary",
+        ):
+            entered = str(st.session_state.get("room3_recovery_passcode_input") or "")
+            if _passcode_matches(entered, expected_plain):
+                _unlock_live_session()
+                st.rerun()
+            else:
+                st.session_state.room3_gate_message = "Wrong passcode."
+                st.session_state.room3_gate_error = True
+                st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -557,6 +580,7 @@ def render_room3_trading_center() -> None:
 
     mode = str(st.session_state.room3_execution_mode or ROOM3_MODE_PAPER)
     if mode == ROOM3_MODE_LIVE and st.session_state.room3_live_unlocked:
+        st.success("Live trading unlocked for this session.")
         _render_live_workspace()
     else:
         if mode == ROOM3_MODE_LIVE and not st.session_state.room3_live_unlocked:
