@@ -198,6 +198,10 @@ def init_room3_session_state() -> None:
         st.session_state.room3_equity_curve = []
     if "room3_starting_equity" not in st.session_state:
         st.session_state.room3_starting_equity = ROOM3_DEMO_ACCOUNT_EQUITY
+    if "room3_tradable_today" not in st.session_state:
+        st.session_state.room3_tradable_today = float(ROOM3_DEMO_ACCOUNT_EQUITY)
+    if "room3_tradable_pct_ui" not in st.session_state:
+        st.session_state.room3_tradable_pct_ui = 100.0
 
 
 def _inject_room3_css() -> None:
@@ -344,6 +348,54 @@ def _inject_room3_css() -> None:
         .room3-equity-insight .hi { color: #7BC67E; }
         .room3-equity-insight .lo { color: #E07A7A; }
         .room3-equity-insight .mid { color: #9BB0C2; }
+        .room3-capital-strip {
+            border: 1px solid #2C3036;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #1A1D22 0%, #14171B 55%, #171A1F 100%);
+            padding: 14px 16px 12px;
+            margin: 8px 0 12px 0;
+        }
+        .room3-capital-grid {
+            display: grid;
+            grid-template-columns: 1.1fr 1fr;
+            gap: 14px;
+            align-items: end;
+        }
+        .room3-capital-label {
+            font-size: 10px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: #7A8490;
+            margin-bottom: 4px;
+        }
+        .room3-capital-value {
+            font-size: 22px;
+            font-weight: 700;
+            color: #E8EEF4;
+            line-height: 1.15;
+            word-break: break-word;
+        }
+        .room3-capital-value.deploy {
+            color: #B7C9D8;
+        }
+        .room3-capital-sub {
+            font-size: 11px;
+            color: #7E8894;
+            margin-top: 3px;
+        }
+        .room3-capital-bar {
+            margin-top: 12px;
+            height: 6px;
+            border-radius: 999px;
+            background: #252A31;
+            overflow: hidden;
+        }
+        .room3-capital-bar > span {
+            display: block;
+            height: 100%;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #6E8494 0%, #A8BCCB 100%);
+        }
         [data-testid="stDataFrame"] {
             background: #141414 !important;
             border: 1px solid #2A2A2A !important;
@@ -1120,6 +1172,9 @@ def seed_demo_trading_session() -> None:
     st.session_state.room3_starting_equity = ROOM3_DEMO_ACCOUNT_EQUITY
     st.session_state.room3_equity_curve = _demo_equity_curve()
     _sync_equity_curve_with_today()
+    eq = float(st.session_state.room3_account_equity or ROOM3_DEMO_ACCOUNT_EQUITY)
+    st.session_state.room3_tradable_today = eq
+    st.session_state.room3_tradable_pct_ui = 100.0
 
 
 def clear_demo_trading_session() -> None:
@@ -1137,6 +1192,8 @@ def clear_demo_trading_session() -> None:
     st.session_state.room3_history_open_trade_id = None
     st.session_state.room3_starting_equity = ROOM3_DEMO_ACCOUNT_EQUITY
     st.session_state.room3_equity_curve = []
+    st.session_state.room3_tradable_today = float(ROOM3_DEMO_ACCOUNT_EQUITY)
+    st.session_state.room3_tradable_pct_ui = 100.0
 
 
 def _session_pl_stats() -> dict:
@@ -1160,8 +1217,11 @@ def _session_pl_stats() -> dict:
     win_rate = (wins / decided * 100.0) if decided else 0.0
     trades_today = len(pending) + len(history)
     awaiting_review = len(pending)
+    tradable = _clamp_tradable(equity)
     return {
         "equity": equity,
+        "tradable": tradable,
+        "tradable_pct": (tradable / equity * 100.0) if equity > 0 else 0.0,
         "day_pl": day_pl,
         "day_pl_pct": (day_pl / equity * 100.0) if equity > 0 else 0.0,
         "open_pl": open_pl,
@@ -1173,6 +1233,23 @@ def _session_pl_stats() -> dict:
         "trades_today": trades_today,
         "awaiting_review": awaiting_review,
     }
+
+
+def _clamp_tradable(equity: float | None = None) -> float:
+    eq = float(equity if equity is not None else (st.session_state.room3_account_equity or 0))
+    raw = float(st.session_state.get("room3_tradable_today") or 0)
+    if eq <= 0:
+        st.session_state.room3_tradable_today = 0.0
+        return 0.0
+    clamped = max(0.0, min(raw, eq))
+    st.session_state.room3_tradable_today = clamped
+    return clamped
+
+
+def _set_tradable_pct(pct: float, equity: float) -> None:
+    pct = max(0.0, min(100.0, float(pct)))
+    st.session_state.room3_tradable_pct_ui = pct
+    st.session_state.room3_tradable_today = round(equity * (pct / 100.0), 2)
 
 
 def _record_operator_review(trade_id: str, vote: str) -> None:
@@ -1499,31 +1576,87 @@ def _render_trade_history() -> None:
 
 
 def _render_live_dashboard(mode: str) -> None:
-    """Live-now strip — updates during the session; rolls at 4 AM ET."""
-    st.markdown("### Live dashboard")
+    """Live-now strip — account moves with P/L; tradable cap sets today's firepower."""
+    # Keep equity curve/account current before reading stats
+    if st.session_state.get("room3_demo_active") or st.session_state.get("room3_equity_curve"):
+        _sync_equity_curve_with_today()
     stats = _session_pl_stats()
+    equity = float(stats["equity"])
+    tradable = float(stats["tradable"])
+    pct = float(stats["tradable_pct"])
     day_label = _trading_day_display(_trading_day_key())
+
+    st.markdown("### Live dashboard")
     st.caption(
         f"**{day_label}** · session rolls at 4:00 AM ET · "
-        "metrics refresh while the system is active"
+        "account moves with fills · pause = flat"
     )
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+    bar_w = max(0.0, min(100.0, pct))
+    st.markdown(
+        f"""
+        <div class="room3-capital-strip">
+          <div class="room3-capital-grid">
+            <div>
+              <div class="room3-capital-label">Account</div>
+              <div class="room3-capital-value">${equity:,.2f}</div>
+              <div class="room3-capital-sub">Full balance · moves with day P/L</div>
+            </div>
+            <div>
+              <div class="room3-capital-label">Trading today</div>
+              <div class="room3-capital-value deploy">${tradable:,.2f}</div>
+              <div class="room3-capital-sub">{pct:.0f}% deployable · rest sits idle</div>
+            </div>
+          </div>
+          <div class="room3-capital-bar"><span style="width:{bar_w:.1f}%;"></span></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    p1, p2, p3, p4, p5 = st.columns([1, 1, 1, 1, 2])
+    for col, preset in zip((p1, p2, p3, p4), (25, 50, 75, 100)):
+        with col:
+            if st.button(f"{preset}%", key=f"room3_tradable_pct_{preset}", use_container_width=True):
+                _set_tradable_pct(preset, equity)
+                st.rerun()
+    with p5:
+        c_in, c_btn = st.columns([2.2, 1])
+        with c_in:
+            st.number_input(
+                "Custom trading $",
+                min_value=0.0,
+                max_value=float(max(equity, 0.0)),
+                value=float(min(tradable, equity)) if equity else 0.0,
+                step=1000.0,
+                key="room3_tradable_custom_input",
+                label_visibility="collapsed",
+            )
+        with c_btn:
+            if st.button("Set $", key="room3_tradable_set_btn", use_container_width=True):
+                custom = float(st.session_state.get("room3_tradable_custom_input") or 0)
+                custom = max(0.0, min(custom, equity))
+                st.session_state.room3_tradable_today = round(custom, 2)
+                st.session_state.room3_tradable_pct_ui = (
+                    (custom / equity * 100.0) if equity > 0 else 0.0
+                )
+                st.rerun()
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.metric("Account", f"${stats['equity']:,.0f}")
-    with c2:
         st.metric(
             "Day P/L",
             _fmt_pl_usd(stats["day_pl"]),
             delta=f"{stats['day_pl_pct']:+.2f}%",
             delta_color="normal",
         )
-    with c3:
+    with c2:
         st.metric("Open unrealized", _fmt_pl_usd(stats["open_pl"]))
-    with c4:
+    with c3:
         st.metric("Open positions", stats["open_count"])
-    with c5:
+    with c4:
         st.metric("Wins / Losses", f"{stats['wins']} / {stats['losses']}")
-    with c6:
+    with c5:
         win_label = f"{stats['win_rate']:.0f}%" if stats["wins"] + stats["losses"] else "—"
         st.metric("Win rate", win_label)
     if mode == ROOM3_MODE_LIVE:
@@ -1574,7 +1707,8 @@ def _render_session_summary() -> None:
         grid_class="room3-metric-grid-2",
     )
     st.caption("Day % = (open + closed P/L) ÷ account equity.")
-    _render_all_time_panel()
+    with st.expander("All-time performance", expanded=False):
+        _render_all_time_panel()
 
 
 def _render_equity_trajectory_chart(at: dict) -> None:
@@ -1740,31 +1874,29 @@ def _render_equity_trajectory_chart(at: dict) -> None:
 
 
 def _render_all_time_panel() -> None:
-    """Account trajectory since start — scales with capital, demo-backed for now."""
-    st.markdown("### All-time")
+    """Hidden all-time readout — collective P/L, risk path, session quality."""
     at = _all_time_stats()
+    curve = list(at.get("curve") or [])
+    sessions = []
+    for p in curve:
+        if str(p.get("date")) == "Start":
+            continue
+        sessions.append(p)
+    best = max(sessions, key=lambda x: float(x.get("day_pl") or 0)) if sessions else {}
+    worst = min(sessions, key=lambda x: float(x.get("day_pl") or 0)) if sessions else {}
+    best_label = str(best.get("date") or "—")
+    worst_label = str(worst.get("date") or "—")
+
     _render_metric_tiles(
         [
             {
-                "id": "start",
-                "label": "Starting equity",
-                "value": f"${at['start']:,.2f}",
-                "detail": f"Starting equity ${at['start']:,.2f}",
-            },
-            {
-                "id": "now",
-                "label": "Current equity",
-                "value": f"${at['current']:,.2f}",
-                "detail": f"Current equity ${at['current']:,.2f}",
-            },
-            {
                 "id": "at_pl",
-                "label": "All-time P/L",
+                "label": "Collective P/L",
                 "value": _fmt_pl_usd(at["all_time_pl"]),
                 "sub": _fmt_pl_pct(at["all_time_pct"]),
                 "detail": (
                     f"All-time {_fmt_pl_usd(at['all_time_pl'])} · "
-                    f"{_fmt_pl_pct(at['all_time_pct'])} from start"
+                    f"{_fmt_pl_pct(at['all_time_pct'])}"
                 ),
             },
             {
@@ -1777,12 +1909,26 @@ def _render_all_time_panel() -> None:
                     f"{at['max_drawdown_pct']:.2f}%"
                 ),
             },
+            {
+                "id": "best",
+                "label": "Best session",
+                "value": _fmt_pl_usd(best.get("day_pl")),
+                "sub": best_label,
+                "detail": f"Best {best_label} · {_fmt_pl_usd(best.get('day_pl'))}",
+            },
+            {
+                "id": "worst",
+                "label": "Worst session",
+                "value": _fmt_pl_usd(worst.get("day_pl")),
+                "sub": worst_label,
+                "detail": f"Worst {worst_label} · {_fmt_pl_usd(worst.get('day_pl'))}",
+            },
         ],
         grid_class="room3-metric-grid-2",
     )
     st.caption(
         f"{at['sessions']} sessions · {at['total_trades']} trades · "
-        "trajectory since account start"
+        "open when you want the long view"
     )
     _render_equity_trajectory_chart(at)
 
