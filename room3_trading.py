@@ -308,6 +308,42 @@ def _inject_room3_css() -> None:
             line-height: 1.45;
         }
         .room3-metric-expand strong { color: #FFF; }
+        .room3-equity-chart {
+            border: 1px solid #2C3036;
+            border-radius: 12px;
+            background: linear-gradient(180deg, #1A1D22 0%, #14171B 100%);
+            padding: 12px 12px 8px;
+            margin: 8px 0 6px 0;
+        }
+        .room3-equity-chart-title {
+            font-size: 10px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: #7A8490;
+            margin-bottom: 8px;
+        }
+        .room3-equity-insights {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+            margin: 4px 0 8px 0;
+        }
+        .room3-equity-insight {
+            border: 1px solid #2A2E34;
+            border-radius: 8px;
+            background: #16191E;
+            padding: 7px 9px;
+            font-size: 11px;
+            color: #A8B0BA;
+            line-height: 1.35;
+        }
+        .room3-equity-insight strong {
+            color: #D6DCE4;
+            font-weight: 650;
+        }
+        .room3-equity-insight .hi { color: #7BC67E; }
+        .room3-equity-insight .lo { color: #E07A7A; }
+        .room3-equity-insight .mid { color: #9BB0C2; }
         [data-testid="stDataFrame"] {
             background: #141414 !important;
             border: 1px solid #2A2A2A !important;
@@ -1541,6 +1577,168 @@ def _render_session_summary() -> None:
     _render_all_time_panel()
 
 
+def _render_equity_trajectory_chart(at: dict) -> None:
+    """Dark custom SVG — equity path + session bars + non-obvious callouts."""
+    curve = list(at.get("curve") or [])
+    if len(curve) < 2:
+        st.caption("Trajectory builds as sessions close.")
+        return
+
+    start = float(at.get("start") or curve[0].get("equity") or 0)
+    peak = float(at.get("peak") or start)
+    current = float(at.get("current") or curve[-1].get("equity") or start)
+    points = curve
+    equities = [float(p.get("equity") or 0) for p in points]
+    day_pls = [float(p.get("day_pl") or 0) for p in points]
+    labels = [str(p.get("date") or "") for p in points]
+
+    # Session-only points (skip Start) for insight math
+    sessions = [
+        (labels[i], equities[i], day_pls[i])
+        for i in range(1, len(points))
+    ]
+    best = max(sessions, key=lambda x: x[2]) if sessions else ("—", 0.0, 0.0)
+    worst = min(sessions, key=lambda x: x[2]) if sessions else ("—", 0.0, 0.0)
+    green_days = sum(1 for _, _, pl in sessions if pl > 0)
+    red_days = sum(1 for _, _, pl in sessions if pl < 0)
+    avg_day = (sum(pl for _, _, pl in sessions) / len(sessions)) if sessions else 0.0
+    off_peak = peak - current
+    off_peak_pct = (off_peak / peak * 100.0) if peak else 0.0
+    above_start = sum(1 for _, eq, _ in sessions if eq >= start)
+
+    # SVG layout
+    w, h = 640, 220
+    pad_l, pad_r, pad_t, pad_b = 48, 16, 18, 36
+    plot_w = w - pad_l - pad_r
+    plot_h = h - pad_t - pad_b
+    ymin = min(equities + [start]) * 0.995
+    ymax = max(equities + [peak, start]) * 1.005
+    if ymax <= ymin:
+        ymax = ymin + 1.0
+
+    def x_at(i: int) -> float:
+        n = max(len(equities) - 1, 1)
+        return pad_l + (i / n) * plot_w
+
+    def y_at(eq: float) -> float:
+        return pad_t + (1.0 - (eq - ymin) / (ymax - ymin)) * plot_h
+
+    # Path
+    path_d = " ".join(
+        f"{'M' if i == 0 else 'L'}{x_at(i):.1f},{y_at(eq):.1f}"
+        for i, eq in enumerate(equities)
+    )
+    # Area under curve (muted fill)
+    area_d = (
+        f"{path_d} L{x_at(len(equities)-1):.1f},{pad_t + plot_h:.1f} "
+        f"L{x_at(0):.1f},{pad_t + plot_h:.1f} Z"
+    )
+
+    # Start baseline
+    y_start = y_at(start)
+    y_peak = y_at(peak)
+
+    # Daily P/L micro-bars along bottom strip
+    bar_max = max((abs(pl) for pl in day_pls[1:]), default=1.0) or 1.0
+    bars = []
+    for i in range(1, len(points)):
+        pl = day_pls[i]
+        bh = max(3.0, (abs(pl) / bar_max) * 18.0)
+        bx = x_at(i) - 5
+        by = pad_t + plot_h + 4
+        color = "#5F9E6E" if pl >= 0 else "#B86A6A"
+        bars.append(
+            f'<rect x="{bx:.1f}" y="{by:.1f}" width="10" height="{bh:.1f}" '
+            f'rx="2" fill="{color}" opacity="0.85">'
+            f'<title>{escape(labels[i])}: {_fmt_pl_usd(pl)}</title></rect>'
+        )
+
+    # Markers
+    peak_i = equities.index(max(equities))
+    markers = [
+        f'<circle cx="{x_at(0):.1f}" cy="{y_at(equities[0]):.1f}" r="3.5" fill="#8FA3B0" />',
+        f'<circle cx="{x_at(len(equities)-1):.1f}" cy="{y_at(equities[-1]):.1f}" r="4" '
+        f'fill="#C5D0DA" stroke="#1A1D22" stroke-width="1.5" />',
+        f'<circle cx="{x_at(peak_i):.1f}" cy="{y_peak:.1f}" r="3.5" fill="#D4B56A" />',
+    ]
+
+    # Axis labels (start / end / peak)
+    short_labels = []
+    for i, lab in enumerate(labels):
+        if i == 0 or i == len(labels) - 1 or i == peak_i:
+            shown = "Start" if lab == "Start" else lab[-5:] if len(lab) >= 5 else lab
+            short_labels.append(
+                f'<text x="{x_at(i):.1f}" y="{h - 6}" text-anchor="middle" '
+                f'fill="#6E7884" font-size="9">{escape(shown)}</text>'
+            )
+
+    y_ticks = [
+        (start, "start"),
+        (current, "now"),
+        (peak, "peak"),
+    ]
+    y_labels = []
+    used_y = []
+    for eq, _tag in y_ticks:
+        yy = y_at(eq)
+        if any(abs(yy - uy) < 12 for uy in used_y):
+            continue
+        used_y.append(yy)
+        label_txt = f"${eq/1000:.1f}k" if eq >= 1000 else f"${eq:,.0f}"
+        y_labels.append(
+            f'<text x="4" y="{yy + 3:.1f}" fill="#6E7884" font-size="9">'
+            f"{escape(label_txt)}</text>"
+        )
+
+    svg = f"""
+    <div class="room3-equity-chart">
+      <div class="room3-equity-chart-title">Equity trajectory · session P/L strip</div>
+      <svg viewBox="0 0 {w} {h}" width="100%" height="220" role="img"
+           aria-label="Account equity trajectory">
+        <defs>
+          <linearGradient id="room3EqFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#6E8494" stop-opacity="0.28"/>
+            <stop offset="100%" stop-color="#6E8494" stop-opacity="0.02"/>
+          </linearGradient>
+        </defs>
+        <line x1="{pad_l}" y1="{y_start:.1f}" x2="{w - pad_r}" y2="{y_start:.1f}"
+              stroke="#3A424C" stroke-width="1" stroke-dasharray="4 4"/>
+        <line x1="{pad_l}" y1="{y_peak:.1f}" x2="{w - pad_r}" y2="{y_peak:.1f}"
+              stroke="#5A5240" stroke-width="1" stroke-dasharray="3 5"/>
+        <path d="{area_d}" fill="url(#room3EqFill)"/>
+        <path d="{path_d}" fill="none" stroke="#9BB0C2" stroke-width="2.25"
+              stroke-linecap="round" stroke-linejoin="round"/>
+        {''.join(bars)}
+        {''.join(markers)}
+        {''.join(short_labels)}
+        {''.join(y_labels)}
+      </svg>
+      <div class="room3-equity-insights">
+        <div class="room3-equity-insight">
+          <strong>Best session</strong><br>
+          <span class="hi">{escape(str(best[0]))}</span> · {_fmt_pl_usd(best[2])}
+        </div>
+        <div class="room3-equity-insight">
+          <strong>Worst session</strong><br>
+          <span class="lo">{escape(str(worst[0]))}</span> · {_fmt_pl_usd(worst[2])}
+        </div>
+        <div class="room3-equity-insight">
+          <strong>Off peak</strong><br>
+          <span class="mid">{_fmt_pl_usd(-off_peak) if off_peak else "$0.00"}</span>
+          · {off_peak_pct:.2f}% under high
+        </div>
+        <div class="room3-equity-insight">
+          <strong>Session mix</strong><br>
+          <span class="hi">{green_days} up</span> /
+          <span class="lo">{red_days} down</span>
+          · avg {_fmt_pl_usd(avg_day)} · {above_start}/{len(sessions)} above start
+        </div>
+      </div>
+    </div>
+    """
+    st.markdown(svg, unsafe_allow_html=True)
+
+
 def _render_all_time_panel() -> None:
     """Account trajectory since start — scales with capital, demo-backed for now."""
     st.markdown("### All-time")
@@ -1586,15 +1784,7 @@ def _render_all_time_panel() -> None:
         f"{at['sessions']} sessions · {at['total_trades']} trades · "
         "trajectory since account start"
     )
-    curve = at.get("curve") or []
-    if len(curve) >= 2:
-        df = pd.DataFrame(
-            {
-                "Equity": [float(p.get("equity") or 0) for p in curve],
-            },
-            index=[str(p.get("date") or "") for p in curve],
-        )
-        st.line_chart(df, height=180)
+    _render_equity_trajectory_chart(at)
 
 
 def _render_history_trade_detail(trade: dict) -> None:
