@@ -661,7 +661,7 @@ def _render_live_gate_overlay() -> None:
 
     stage = str(st.session_state.room3_recovery_stage or "")
     if stage == "offer_email":
-        st.info(f"Notification sent to **{ROOM3_RECOVERY_EMAIL}** (demo — no email yet).")
+        st.info(f"Recovery notice queued for **{ROOM3_RECOVERY_EMAIL}** (email send not wired yet).")
         if st.button("I received it", key="room3_recovery_ack", use_container_width=True):
             st.session_state.room3_recovery_stage = "enter_recovery_code"
             st.rerun()
@@ -669,7 +669,7 @@ def _render_live_gate_overlay() -> None:
     if stage == "enter_recovery_code":
         st.caption(f"Enter code from **{ROOM3_RECOVERY_EMAIL}**")
         if st.session_state.room3_recovery_token:
-            st.caption(f"Demo code: `{st.session_state.room3_recovery_token}`")
+            st.caption(f"Temporary code: `{st.session_state.room3_recovery_token}`")
         recovery_input = st.text_input(
             "Recovery code",
             placeholder="6-digit",
@@ -1088,12 +1088,19 @@ def _render_broker_status_card(mode: str) -> None:
     else:
         shell_class += " room3-shell-paper"
     lane = "LIVE" if is_live else "PAPER"
-    stats = _session_pl_stats()
+    status = str(st.session_state.get("room3_ibkr_status") or "disconnected")
+    if status == "connected":
+        link = st.session_state.room3_ibkr_account or "linked"
+        status_line = f"IBKR {lane} · <strong>connected</strong> · {escape(str(link))}"
+    elif status == "waiting":
+        status_line = f"IBKR {lane} · <strong>waiting for unlock</strong>"
+    else:
+        status_line = f"IBKR {lane} · <strong>not connected</strong>"
     st.markdown(
         f"<div class='{shell_class}'>"
         f"<div class='room3-kicker'>Room 3 · Execution terminal</div>"
         f"<div class='room3-title'>{_mode_label(mode)}</div>"
-        f"<p class='room3-sub'>IBKR {lane} · <strong>not connected</strong></p>"
+        f"<p class='room3-sub'>{status_line}</p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -1207,17 +1214,6 @@ def _render_live_dashboard(mode: str) -> None:
         _sync_equity_curve_with_today()
     stats = _session_pl_stats()
     equity = float(stats["equity"])
-    # First paint: if tradable still equals full account and equity > 0, nudge to 50%
-    if (
-        "room3_tradable_seen" not in st.session_state
-        and equity > 0
-        and abs(float(stats["tradable"]) - equity) < 0.01
-    ):
-        _set_tradable_pct(50.0, equity)
-        st.session_state.room3_tradable_seen = True
-        stats = _session_pl_stats()
-    else:
-        st.session_state.room3_tradable_seen = True
     tradable = float(stats["tradable"])
     pct = float(stats["tradable_pct"])
     day_label = _trading_day_display(_trading_day_key())
