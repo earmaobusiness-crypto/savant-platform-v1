@@ -7,9 +7,15 @@ Never log secrets. Room 1 / Room 2 untouched.
 
 from __future__ import annotations
 
+import json
 import os
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
@@ -243,14 +249,20 @@ def probe_alpaca_connection(paper: bool = True) -> dict[str, Any]:
         client = _trading_client(paper=paper)
         account = client.get_account()
         equity = float(getattr(account, "equity", 0) or 0)
+        last_equity = float(getattr(account, "last_equity", 0) or 0)
         cash = float(getattr(account, "cash", 0) or 0)
         buying_power = float(getattr(account, "buying_power", 0) or 0)
         status = str(getattr(account, "status", "") or "")
         account_number = str(getattr(account, "account_number", "") or "")
+        day_pl = equity - last_equity if last_equity > 0 else 0.0
+        day_pl_pct = (day_pl / last_equity * 100.0) if last_equity > 0 else 0.0
         return {
             "ok": True,
             "paper": paper,
             "equity": equity,
+            "last_equity": last_equity,
+            "day_pl": day_pl,
+            "day_pl_pct": day_pl_pct,
             "cash": cash,
             "buying_power": buying_power,
             "status": status,
@@ -293,6 +305,150 @@ def fetch_open_positions(paper: bool = True) -> list[dict[str, Any]]:
         return rows
     except Exception:
         return []
+
+
+def fetch_broker_day_pl(paper: bool = True) -> dict[str, Any]:
+    """Day P/L from Alpaca account equity vs prior close (broker truth)."""
+    probe = probe_alpaca_connection(paper=paper)
+    if probe.get("ok"):
+        return {
+            "ok": True,
+            "day_pl": float(probe.get("day_pl") or 0),
+            "day_pl_pct": float(probe.get("day_pl_pct") or 0),
+            "start": float(probe.get("last_equity") or 0),
+            "end": float(probe.get("equity") or 0),
+        }
+    try:
+        from alpaca.trading.requests import GetPortfolioHistoryRequest
+
+        client = _trading_client(paper=paper)
+        hist = client.get_portfolio_history(
+            GetPortfolioHistoryRequest(period="1D", timeframe="5Min")
+        )
+        equities = list(getattr(hist, "equity", None) or [])
+        if len(equities) >= 2:
+            start = float(equities[0] or 0)
+            end = float(equities[-1] or 0)
+            pl = end - start
+            pct = (pl / start * 100.0) if start else 0.0
+            return {"ok": True, "day_pl": pl, "day_pl_pct": pct, "start": start, "end": end}
+        return {"ok": False, "day_pl": 0.0, "day_pl_pct": 0.0, "error": "no history"}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "day_pl": 0.0,
+            "day_pl_pct": 0.0,
+            "error": str(exc).strip() or type(exc).__name__,
+        }
+
+
+def _fetch_fill_activities_raw(paper: bool = True) -> list[dict[str, Any]]:
+    """alpaca-py 0.44 has no activities helper — hit REST directly."""
+    creds = load_alpaca_credentials(paper=paper)
+    if not creds["key"] or not creds["secret"]:
+        return []
+    base = (creds["endpoint"] or PAPER_BASE_URL).rstrip("/")
+    et = ZoneInfo("America/New_York")
+    today = datetime.now(et).date().isoformat()
+    qs = urllib.parse.urlencode({"activity_types": "FILL", "date": today, "page_size": 100})
+    url = f"{base}/v2/account/activities?{qs}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "APCA-API-KEY-ID": creds["key"],
+            "APCA-API-SECRET-KEY": creds["secret"],
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        return payload if isinstance(payload, list) else []
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, OSError):
+        return []
+
+
+def fetch_closed_trades_today(paper: bool = True) -> list[dict[str, Any]]:
+    """
+    Rebuild today's closed round-trips from Alpaca FILL activities (ET day).
+    Open legs stay out — those belong in open positions.
+    """
+    acts = _fetch_fill_activities_raw(paper=paper)
+    if not acts:
+        return []
+
+    et = ZoneInfo("America/New_York")
+    today = datetime.now(et).date()
+    lots: dict[str, list[dict[str, Any]]] = {}
+    closed: list[dict[str, Any]] = []
+
+    ordered = sorted(
+        acts,
+        key=lambda a: str(a.get("transaction_time") or a.get("timestamp") or ""),
+    )
+    for a in ordered:
+        try:
+            raw_ts = a.get("transaction_time") or a.get("timestamp")
+            if not raw_ts:
+                continue
+            ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).astimezone(et)
+            if ts.date() != today:
+                continue
+            sym = str(a.get("symbol") or "").upper()
+            side = str(a.get("side") or "").lower()
+            qty = abs(float(a.get("qty") or 0))
+            px = float(a.get("price") or 0)
+            if not sym or qty <= 0 or px <= 0:
+                continue
+            oid = str(a.get("id") or a.get("order_id") or f"{sym}-{ts.isoformat()}")
+            book = lots.setdefault(sym, [])
+            if side in ("buy", "b"):
+                book.append({"qty": qty, "px": px, "ts": ts.strftime("%H:%M:%S")})
+                continue
+            if side not in ("sell", "s"):
+                continue
+            remain = qty
+            entry_px_acc = 0.0
+            entry_qty_acc = 0.0
+            entry_time = "—"
+            while remain > 1e-9 and book:
+                lot = book[0]
+                take = min(remain, float(lot["qty"]))
+                entry_px_acc += take * float(lot["px"])
+                entry_qty_acc += take
+                if entry_time == "—":
+                    entry_time = str(lot.get("ts") or "—")
+                lot["qty"] = float(lot["qty"]) - take
+                remain -= take
+                if float(lot["qty"]) <= 1e-9:
+                    book.pop(0)
+            if entry_qty_acc <= 0:
+                continue
+            avg_entry = entry_px_acc / entry_qty_acc
+            pnl = (px - avg_entry) * entry_qty_acc
+            pnl_pct = ((px - avg_entry) / avg_entry * 100.0) if avg_entry else 0.0
+            closed.append(
+                {
+                    "id": f"alpaca-fill-{oid}",
+                    "ticker": sym,
+                    "timeframe": "—",
+                    "strategy": "Alpaca",
+                    "entry_time": entry_time,
+                    "exit_time": ts.strftime("%H:%M:%S"),
+                    "entry_price": round(avg_entry, 4),
+                    "exit_price": round(px, 4),
+                    "pnl_usd": round(pnl, 2),
+                    "pnl_pct": round(pnl_pct, 3),
+                    "qty": entry_qty_acc,
+                    "reviewed": True,
+                    "status": "closed · alpaca",
+                    "broker_source": True,
+                }
+            )
+        except Exception:
+            continue
+    return closed
 
 
 def place_market_order(

@@ -251,8 +251,12 @@ def init_room3_session_state() -> None:
         st.session_state.room3_watch_book = room3_watcher.empty_book()
     if "room3_filter_universe" not in st.session_state:
         st.session_state.room3_filter_universe = []
-    if "room3_positions_pinned_empty" not in st.session_state:
-        st.session_state.room3_positions_pinned_empty = False
+    if "room3_broker_day_pl" not in st.session_state:
+        st.session_state.room3_broker_day_pl = None
+    if "room3_broker_day_pl_pct" not in st.session_state:
+        st.session_state.room3_broker_day_pl_pct = None
+    # Drop legacy local-only clear flag if an old session still carries it
+    st.session_state.pop("room3_positions_pinned_empty", None)
 
 
 def _inject_room3_css() -> None:
@@ -919,6 +923,8 @@ def _maybe_roll_trading_session() -> None:
     st.session_state.room3_operator_reviews = []
     st.session_state.room3_strategy_feedback = {}
     st.session_state.room3_decay_alerts = []
+    st.session_state.room3_broker_day_pl = None
+    st.session_state.room3_broker_day_pl_pct = None
     # Eyes: drop unused TF maps that scanned all day with no trade
     st.session_state.room3_watch_book = room3_watcher.purge_untouched_maps(
         st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
@@ -1026,8 +1032,21 @@ def _session_pl_stats() -> dict:
     history = st.session_state.room3_trade_history or []
     open_pl = sum(float(r.get("pnl_usd") or 0) for r in open_rows)
     closed_pl = sum(float(r.get("pnl_usd") or 0) for r in pending)
-    closed_pl += sum(float(r.get("pnl_usd") or 0) for r in history if r.get("reviewed"))
-    day_pl = open_pl + closed_pl
+    # Closed trades stay in the day — don't require operator review to count
+    closed_pl += sum(float(r.get("pnl_usd") or 0) for r in history)
+    local_day_pl = open_pl + closed_pl
+    broker_day = st.session_state.get("room3_broker_day_pl")
+    broker_pct = st.session_state.get("room3_broker_day_pl_pct")
+    if broker_day is not None:
+        day_pl = float(broker_day)
+        day_pl_pct = (
+            float(broker_pct)
+            if broker_pct is not None
+            else ((day_pl / equity * 100.0) if equity > 0 else 0.0)
+        )
+    else:
+        day_pl = local_day_pl
+        day_pl_pct = (day_pl / equity * 100.0) if equity > 0 else 0.0
     wins = sum(
         1 for r in list(pending) + list(history)
         if float(r.get("pnl_usd") or 0) > 0
@@ -1046,7 +1065,7 @@ def _session_pl_stats() -> dict:
         "tradable": tradable,
         "tradable_pct": (tradable / equity * 100.0) if equity > 0 else 0.0,
         "day_pl": day_pl,
-        "day_pl_pct": (day_pl / equity * 100.0) if equity > 0 else 0.0,
+        "day_pl_pct": day_pl_pct,
         "open_pl": open_pl,
         "closed_pl": closed_pl,
         "wins": wins,
@@ -1393,53 +1412,29 @@ def _render_broker_status_card(mode: str) -> None:
 
 def _render_open_positions() -> None:
     st.markdown("### Open positions")
-    if st.session_state.get("room3_positions_pinned_empty"):
-        st.session_state.room3_open_positions = []
-
     rows = st.session_state.room3_open_positions or []
-    b1, b2, b3 = st.columns([1, 1, 1])
-    with b1:
-        if st.button("Resync from broker", key="room3_pos_resync", use_container_width=True):
-            st.session_state.room3_positions_pinned_empty = False
-            if str(st.session_state.get("room3_broker") or "") == "alpaca":
-                mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
-                synced = _sync_alpaca_account_into_session(paper=(mode != ROOM3_MODE_LIVE))
-                if synced.get("ok"):
-                    st.success("Positions synced from Alpaca.")
-                else:
-                    st.error(synced.get("error") or "Sync failed — use Clear stuck rows.")
-            st.rerun()
-    with b2:
-        if st.button(
-            "Clear stuck rows",
-            key="room3_pos_clear_stuck",
-            type="primary",
-            use_container_width=True,
-            help="Wipe local open-position table if Alpaca is already flat.",
-        ):
-            st.session_state.room3_open_positions = []
-            st.session_state.room3_positions_pinned_empty = True
-            st.rerun()
-    with b3:
-        if st.button("Clear AAPL only", key="room3_pos_clear_aapl", use_container_width=True):
-            kept = [
-                r
-                for r in (st.session_state.room3_open_positions or [])
-                if str(r.get("ticker") or "").upper() != "AAPL"
-            ]
-            st.session_state.room3_open_positions = kept
-            if not kept:
-                st.session_state.room3_positions_pinned_empty = True
+    if str(st.session_state.get("room3_broker") or "") == "alpaca":
+        if st.button("Refresh from Alpaca", key="room3_pos_resync", use_container_width=True):
+            mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
+            synced = _sync_alpaca_account_into_session(paper=(mode != ROOM3_MODE_LIVE))
+            if synced.get("ok"):
+                n = len(st.session_state.get("room3_open_positions") or [])
+                closed_n = sum(
+                    1
+                    for r in (st.session_state.get("room3_trade_history") or [])
+                    if r.get("broker_source")
+                )
+                st.success(
+                    f"Alpaca truth · {n} open · {closed_n} closed today in trade log"
+                )
+            else:
+                st.error(synced.get("error") or "Sync failed")
             st.rerun()
 
     rows = st.session_state.room3_open_positions or []
     if not rows:
         name = _active_broker_name()
-        pinned = st.session_state.get("room3_positions_pinned_empty")
-        st.caption(
-            f"No open trades — {name} positions show here when connected."
-            + (" (cleared / pinned empty)" if pinned else "")
-        )
+        st.caption(f"Flat — no open positions at {name}. Closed trades stay in Today's trade log.")
         return
     display = []
     for r in rows:
@@ -1458,8 +1453,8 @@ def _render_open_positions() -> None:
         )
     _render_dark_table(display)
     st.caption(
-        "If Alpaca is flat but a row is stuck, use **Clear stuck rows** or **Clear AAPL only**. "
-        "That only clears the Room 3 screen — it does not place orders."
+        "Open list mirrors Alpaca only. Closing a trade in Alpaca removes it here and "
+        "adds it to Today's trade log / summary — clearing the UI does not erase that it happened."
     )
 
 
@@ -1484,6 +1479,12 @@ def _render_trade_history() -> None:
             }
         )
     for r in history:
+        if r.get("broker_source"):
+            status = str(r.get("status") or "closed · alpaca")
+        elif r.get("reviewed"):
+            status = f"reviewed · {r.get('operator_vote', '—')}"
+        else:
+            status = str(r.get("status") or "closed")
         rows.append(
             {
                 "Ticker": r.get("ticker"),
@@ -1503,7 +1504,7 @@ def _render_trade_history() -> None:
                 ),
                 "P/L $": _fmt_pl_usd(r.get("pnl_usd")),
                 "P/L %": _fmt_pl_pct(r.get("pnl_pct")),
-                "Status": f"reviewed · {r.get('operator_vote', '—')}",
+                "Status": status,
             }
         )
     if not rows:
@@ -2159,33 +2160,26 @@ def _render_alpaca_connection_panel(mode: str) -> None:
     with b2:
         if st.button("Check connection", key="room3_alpaca_check", type="primary", use_container_width=True):
             st.session_state.room3_alpaca_status = "waiting"
-            result = room3_alpaca.probe_alpaca_connection(paper=True)
+            result = _sync_alpaca_account_into_session(paper=True)
             if result.get("ok"):
                 equity = float(result.get("equity") or 0)
                 cash = float(result.get("cash") or 0)
                 buying_power = float(result.get("buying_power") or 0)
                 st.session_state.room3_alpaca_status = "connected"
-                st.session_state.room3_alpaca_account = (
-                    f"{result.get('account_number') or 'paper'} · "
-                    f"${equity:,.2f}"
-                )
-                # Genuine account pull — broker is truth
-                st.session_state.room3_broker_equity = equity
-                st.session_state.room3_account_equity = equity
-                st.session_state.room3_broker_truth = True
-                st.session_state.room3_last_broker_sync = datetime.now(ET).strftime(
-                    "%H:%M:%S ET"
-                )
                 prev_start = float(st.session_state.get("room3_starting_equity") or 0)
                 if prev_start <= 0:
                     st.session_state.room3_starting_equity = equity
                 st.session_state.room3_tradable_today = round(equity * 0.5, 2)
-                st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(
-                    paper=True
+                open_n = len(st.session_state.get("room3_open_positions") or [])
+                closed_n = sum(
+                    1
+                    for r in (st.session_state.get("room3_trade_history") or [])
+                    if r.get("broker_source")
                 )
                 st.session_state.room3_alpaca_last_check = (
                     f"Handshake OK · equity ${equity:,.2f} · cash ${cash:,.2f} · "
-                    f"buying power ${buying_power:,.2f} · status {result.get('status')}"
+                    f"buying power ${buying_power:,.2f} · {open_n} open · "
+                    f"{closed_n} closed today · status {result.get('status')}"
                 )
             else:
                 st.session_state.room3_alpaca_status = "waiting"
@@ -2362,8 +2356,21 @@ Close **IB Gateway** first if it’s logged into the same account.
             st.caption(msg)
 
 
+def _merge_broker_closed_trades(closed: list) -> None:
+    """Upsert Alpaca closed fills into today's trade log; keep non-broker local rows."""
+    hist = list(st.session_state.get("room3_trade_history") or [])
+    by_id = {str(r.get("id") or ""): i for i, r in enumerate(hist) if r.get("id")}
+    for row in closed or []:
+        rid = str(row.get("id") or "")
+        if rid and rid in by_id:
+            hist[by_id[rid]] = {**hist[by_id[rid]], **row}
+            continue
+        hist.insert(0, dict(row))
+    st.session_state.room3_trade_history = hist[:200]
+
+
 def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
-    """Broker truth — equity + positions from Alpaca into Room 3 session state."""
+    """Broker truth — equity, open positions, closed fills, day P/L from Alpaca."""
     result = room3_alpaca.probe_alpaca_connection(paper=paper)
     if not result.get("ok"):
         st.session_state.room3_broker_truth = False
@@ -2375,13 +2382,15 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     st.session_state.room3_alpaca_account = (
         f"{result.get('account_number') or 'paper'} · ${equity:,.2f}"
     )
-    fetched = room3_alpaca.fetch_open_positions(paper=paper) or []
-    # Honor operator clear — don't let heartbeat put stuck rows back
-    if st.session_state.get("room3_positions_pinned_empty"):
-        st.session_state.room3_open_positions = []
-    else:
-        st.session_state.room3_open_positions = fetched
+    # Open = still open at broker. Flat account ⇒ empty open table.
+    st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(paper=paper) or []
+    # Closed today stays in the log even after the position is gone.
+    closed = room3_alpaca.fetch_closed_trades_today(paper=paper) or []
+    _merge_broker_closed_trades(closed)
+    st.session_state.room3_broker_day_pl = float(result.get("day_pl") or 0)
+    st.session_state.room3_broker_day_pl_pct = float(result.get("day_pl_pct") or 0)
     st.session_state.room3_last_broker_sync = datetime.now(ET).strftime("%H:%M:%S ET")
+    st.session_state.pop("room3_positions_pinned_empty", None)
     return result
 
 
