@@ -2714,6 +2714,18 @@ def render_room3_trading_center() -> None:
             st.error(issue)
         st.caption("Start with `./run_room3.sh` so the project `.venv` is always used.")
 
+    host = room3_engine.hosting_label()
+    if room3_engine.is_cloud_host():
+        st.caption(
+            f"Host · **{host}** — Mac is not running this process. "
+            "Room 1 cloud offload (Compute/HF/Supabase) still applies when those secrets are set."
+        )
+    else:
+        st.caption(
+            f"Host · **{host}** — for less heat, open the Streamlit Cloud URL instead of localhost "
+            "(and stop local Streamlit). Room 1 heavy work still offloads via CLOUD_COMPUTE_URL when set."
+        )
+
     _render_broker_presence_chip()
     _render_mode_slider()
 

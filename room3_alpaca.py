@@ -16,38 +16,78 @@ PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 LIVE_BASE_URL = "https://api.alpaca.markets"
 
 
-def _read_local_secrets_toml() -> dict[str, str]:
-    path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
-    if not path.is_file():
-        return {}
+def _parse_alpaca_kv_from_text(text: str) -> dict[str, str]:
+    """Line fallback if tomllib fails — only ALPACA_* keys, never logs values."""
+    wanted = {
+        "ALPACA_API_KEY",
+        "ALPACA_SECRET_KEY",
+        "ALPACA_PAPER_API_KEY",
+        "ALPACA_PAPER_SECRET_KEY",
+        "ALPACA_ENDPOINT",
+    }
     out: dict[str, str] = {}
-    try:
-        import tomllib
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        if key not in wanted:
+            continue
+        out[key] = val.strip().strip('"').strip("'")
+    return out
 
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-        for key in (
-            "ALPACA_API_KEY",
-            "ALPACA_SECRET_KEY",
-            "ALPACA_PAPER_API_KEY",
-            "ALPACA_PAPER_SECRET_KEY",
-            "ALPACA_ENDPOINT",
-        ):
-            val = data.get(key)
-            if val is not None:
-                out[key] = str(val).strip().strip('"').strip("'")
-        block = data.get("alpaca")
-        if isinstance(block, dict):
-            for key, dest in (
-                ("api_key", "ALPACA_API_KEY"),
-                ("secret_key", "ALPACA_SECRET_KEY"),
-                ("paper_api_key", "ALPACA_PAPER_API_KEY"),
-                ("paper_secret_key", "ALPACA_PAPER_SECRET_KEY"),
-                ("endpoint", "ALPACA_ENDPOINT"),
+
+def _secrets_toml_candidates() -> list[Path]:
+    here = Path(__file__).resolve().parent
+    return [
+        here / ".streamlit" / "secrets.toml",
+        Path.cwd() / ".streamlit" / "secrets.toml",
+    ]
+
+
+def _read_local_secrets_toml() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for path in _secrets_toml_candidates():
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        try:
+            import tomllib
+
+            data = tomllib.loads(text)
+            for key in (
+                "ALPACA_API_KEY",
+                "ALPACA_SECRET_KEY",
+                "ALPACA_PAPER_API_KEY",
+                "ALPACA_PAPER_SECRET_KEY",
+                "ALPACA_ENDPOINT",
             ):
-                if block.get(key) is not None and dest not in out:
-                    out[dest] = str(block.get(key)).strip().strip('"').strip("'")
-    except Exception:
-        pass
+                val = data.get(key)
+                if val is not None and key not in out:
+                    out[key] = str(val).strip().strip('"').strip("'")
+            block = data.get("alpaca")
+            if isinstance(block, dict):
+                for key, dest in (
+                    ("api_key", "ALPACA_API_KEY"),
+                    ("secret_key", "ALPACA_SECRET_KEY"),
+                    ("paper_api_key", "ALPACA_PAPER_API_KEY"),
+                    ("paper_secret_key", "ALPACA_PAPER_SECRET_KEY"),
+                    ("endpoint", "ALPACA_ENDPOINT"),
+                ):
+                    if block.get(key) is not None and dest not in out:
+                        out[dest] = str(block.get(key)).strip().strip('"').strip("'")
+        except Exception:
+            pass
+        # Always merge line fallback so empty tomllib / odd TOML still works
+        for key, val in _parse_alpaca_kv_from_text(text).items():
+            if val and not out.get(key):
+                out[key] = val
+        if out.get("ALPACA_API_KEY") and out.get("ALPACA_SECRET_KEY"):
+            break
     return out
 
 

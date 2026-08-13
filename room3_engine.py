@@ -9,6 +9,7 @@ You supervise. The engine fires. No manual ticket desk.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -25,6 +26,26 @@ SESSION_CLOSED = "closed"
 
 # Hard fence: live Alpaca/IBKR orders stay off until you deliberately enable.
 LIVE_ORDERS_ENABLED = False
+
+
+def is_cloud_host() -> bool:
+    """True on Streamlit Community Cloud (and similar) — Mac stays cooler when you use this URL."""
+    if str(os.environ.get("STREAMLIT_RUNTIME_ENVIRONMENT") or "").lower() == "cloud":
+        return True
+    if str(os.environ.get("STREAMLIT_SHARING_MODE") or "").strip():
+        return True
+    try:
+        from pathlib import Path
+
+        if Path("/mount/src").exists():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def hosting_label() -> str:
+    return "Cloud host" if is_cloud_host() else "Local Mac"
 
 
 def detect_session_window(now: datetime | None = None) -> str:
