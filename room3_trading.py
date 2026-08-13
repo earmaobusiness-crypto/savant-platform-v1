@@ -251,6 +251,8 @@ def init_room3_session_state() -> None:
         st.session_state.room3_watch_book = room3_watcher.empty_book()
     if "room3_filter_universe" not in st.session_state:
         st.session_state.room3_filter_universe = []
+    if "room3_positions_pinned_empty" not in st.session_state:
+        st.session_state.room3_positions_pinned_empty = False
 
 
 def _inject_room3_css() -> None:
@@ -1391,37 +1393,53 @@ def _render_broker_status_card(mode: str) -> None:
 
 def _render_open_positions() -> None:
     st.markdown("### Open positions")
+    if st.session_state.get("room3_positions_pinned_empty"):
+        st.session_state.room3_open_positions = []
+
     rows = st.session_state.room3_open_positions or []
-    b1, b2, _ = st.columns([1, 1, 2])
+    b1, b2, b3 = st.columns([1, 1, 1])
     with b1:
         if st.button("Resync from broker", key="room3_pos_resync", use_container_width=True):
+            st.session_state.room3_positions_pinned_empty = False
             if str(st.session_state.get("room3_broker") or "") == "alpaca":
                 mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
                 synced = _sync_alpaca_account_into_session(paper=(mode != ROOM3_MODE_LIVE))
                 if synced.get("ok"):
-                    # Explicit empty clear — broker flat means UI flat
-                    st.session_state.room3_open_positions = list(
-                        room3_alpaca.fetch_open_positions(paper=(mode != ROOM3_MODE_LIVE))
-                        or []
-                    )
                     st.success("Positions synced from Alpaca.")
                 else:
-                    st.error(synced.get("error") or "Sync failed")
+                    st.error(synced.get("error") or "Sync failed — use Clear stuck rows.")
             st.rerun()
     with b2:
-        if rows and st.button(
+        if st.button(
             "Clear stuck rows",
             key="room3_pos_clear_stuck",
+            type="primary",
             use_container_width=True,
             help="Wipe local open-position table if Alpaca is already flat.",
         ):
             st.session_state.room3_open_positions = []
+            st.session_state.room3_positions_pinned_empty = True
+            st.rerun()
+    with b3:
+        if st.button("Clear AAPL only", key="room3_pos_clear_aapl", use_container_width=True):
+            kept = [
+                r
+                for r in (st.session_state.room3_open_positions or [])
+                if str(r.get("ticker") or "").upper() != "AAPL"
+            ]
+            st.session_state.room3_open_positions = kept
+            if not kept:
+                st.session_state.room3_positions_pinned_empty = True
             st.rerun()
 
     rows = st.session_state.room3_open_positions or []
     if not rows:
         name = _active_broker_name()
-        st.caption(f"No open trades — {name} positions show here when connected.")
+        pinned = st.session_state.get("room3_positions_pinned_empty")
+        st.caption(
+            f"No open trades — {name} positions show here when connected."
+            + (" (cleared / pinned empty)" if pinned else "")
+        )
         return
     display = []
     for r in rows:
@@ -1440,7 +1458,7 @@ def _render_open_positions() -> None:
         )
     _render_dark_table(display)
     st.caption(
-        "If Alpaca is flat but a row is stuck, use **Clear stuck rows**. "
+        "If Alpaca is flat but a row is stuck, use **Clear stuck rows** or **Clear AAPL only**. "
         "That only clears the Room 3 screen — it does not place orders."
     )
 
@@ -2357,7 +2375,12 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     st.session_state.room3_alpaca_account = (
         f"{result.get('account_number') or 'paper'} · ${equity:,.2f}"
     )
-    st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(paper=paper) or []
+    fetched = room3_alpaca.fetch_open_positions(paper=paper) or []
+    # Honor operator clear — don't let heartbeat put stuck rows back
+    if st.session_state.get("room3_positions_pinned_empty"):
+        st.session_state.room3_open_positions = []
+    else:
+        st.session_state.room3_open_positions = fetched
     st.session_state.room3_last_broker_sync = datetime.now(ET).strftime("%H:%M:%S ET")
     return result
 
