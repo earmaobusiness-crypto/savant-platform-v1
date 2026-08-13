@@ -1392,6 +1392,33 @@ def _render_broker_status_card(mode: str) -> None:
 def _render_open_positions() -> None:
     st.markdown("### Open positions")
     rows = st.session_state.room3_open_positions or []
+    b1, b2, _ = st.columns([1, 1, 2])
+    with b1:
+        if st.button("Resync from broker", key="room3_pos_resync", use_container_width=True):
+            if str(st.session_state.get("room3_broker") or "") == "alpaca":
+                mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
+                synced = _sync_alpaca_account_into_session(paper=(mode != ROOM3_MODE_LIVE))
+                if synced.get("ok"):
+                    # Explicit empty clear — broker flat means UI flat
+                    st.session_state.room3_open_positions = list(
+                        room3_alpaca.fetch_open_positions(paper=(mode != ROOM3_MODE_LIVE))
+                        or []
+                    )
+                    st.success("Positions synced from Alpaca.")
+                else:
+                    st.error(synced.get("error") or "Sync failed")
+            st.rerun()
+    with b2:
+        if rows and st.button(
+            "Clear stuck rows",
+            key="room3_pos_clear_stuck",
+            use_container_width=True,
+            help="Wipe local open-position table if Alpaca is already flat.",
+        ):
+            st.session_state.room3_open_positions = []
+            st.rerun()
+
+    rows = st.session_state.room3_open_positions or []
     if not rows:
         name = _active_broker_name()
         st.caption(f"No open trades — {name} positions show here when connected.")
@@ -1412,6 +1439,10 @@ def _render_open_positions() -> None:
             }
         )
     _render_dark_table(display)
+    st.caption(
+        "If Alpaca is flat but a row is stuck, use **Clear stuck rows**. "
+        "That only clears the Room 3 screen — it does not place orders."
+    )
 
 
 def _render_trade_history() -> None:
@@ -2326,7 +2357,7 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     st.session_state.room3_alpaca_account = (
         f"{result.get('account_number') or 'paper'} · ${equity:,.2f}"
     )
-    st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(paper=paper)
+    st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(paper=paper) or []
     st.session_state.room3_last_broker_sync = datetime.now(ET).strftime("%H:%M:%S ET")
     return result
 
