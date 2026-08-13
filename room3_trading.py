@@ -1,8 +1,8 @@
 """
 Room 3 — Live / Paper Trading Center.
 
-UI shell + IBKR connection gate. Broker hose wires next (TWS / IB Gateway API).
-No Room 1/2 imports until explicitly connected.
+Auto path: session filters → matrix signal → gated Alpaca entry/exit.
+Operator supervises capital, kill/pause, ✓/✗. No manual order ticket.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import pandas as pd
 import streamlit as st
 
 import room3_alpaca
+import room3_engine
 import room3_ibkr
 
 ROOM3_MODE_PAPER = "paper"
@@ -225,6 +226,26 @@ def init_room3_session_state() -> None:
         st.session_state.room3_tradable_today = float(ROOM3_DEFAULT_EQUITY)
     if "room3_tradable_pct_ui" not in st.session_state:
         st.session_state.room3_tradable_pct_ui = 100.0
+    if "room3_engine_armed" not in st.session_state:
+        st.session_state.room3_engine_armed = False
+    if "room3_kill_flat" not in st.session_state:
+        st.session_state.room3_kill_flat = False
+    if "room3_pause_entries" not in st.session_state:
+        st.session_state.room3_pause_entries = False
+    if "room3_allowed_sessions" not in st.session_state:
+        st.session_state.room3_allowed_sessions = [
+            room3_engine.SESSION_PRE,
+            room3_engine.SESSION_RTH,
+            room3_engine.SESSION_POST,
+        ]
+    if "room3_broker_equity" not in st.session_state:
+        st.session_state.room3_broker_equity = 0.0
+    if "room3_last_broker_sync" not in st.session_state:
+        st.session_state.room3_last_broker_sync = ""
+    if "room3_auto_event_log" not in st.session_state:
+        st.session_state.room3_auto_event_log = []
+    if "room3_broker_truth" not in st.session_state:
+        st.session_state.room3_broker_truth = False
 
 
 def _inject_room3_css() -> None:
@@ -916,6 +937,11 @@ def _sync_equity_curve_with_today() -> None:
         )
     day_pl = float(_session_pl_stats().get("day_pl") or 0)
     today_eq = round(running + day_pl, 2)
+    # Broker is truth when connected — don't invent equity from local P/L only.
+    if st.session_state.get("room3_broker_truth"):
+        broker_eq = float(st.session_state.get("room3_broker_equity") or 0)
+        if broker_eq > 0:
+            today_eq = broker_eq
     rebuilt.append({"date": _trading_day_key(), "equity": today_eq, "day_pl": day_pl})
     st.session_state.room3_equity_curve = rebuilt
     st.session_state.room3_account_equity = today_eq
@@ -1545,11 +1571,18 @@ def _render_live_dashboard(mode: str) -> None:
         win_label = f"{stats['win_rate']:.0f}%" if stats["wins"] + stats["losses"] else "—"
         st.metric("Win rate", win_label)
     if mode == ROOM3_MODE_LIVE:
-        if _broker_is_connected():
-            st.caption(
-                f"Kill switch: **ARMED** · {_active_broker_name()} connected "
-                "(live lane still idle until you fund live)"
-            )
+        st.caption(
+            "Live lane: orders hard-disabled · paper auto path is the working hose"
+        )
+    else:
+        if st.session_state.get("room3_kill_flat"):
+            st.caption("Kill switch: **FLAT** — all auto orders blocked")
+        elif st.session_state.get("room3_pause_entries"):
+            st.caption("Entries **paused** · exits still allowed when gates pass")
+        elif st.session_state.get("room3_engine_armed") and _broker_is_connected():
+            st.caption("Kill switch: **SAFE** · engine **ARMED** · waiting for matrix signals")
+        elif _broker_is_connected():
+            st.caption("Kill switch: **SAFE** · engine **DISARMED** — arm to allow auto orders")
         else:
             st.caption("Kill switch: **SAFE** (no broker connected)")
 
@@ -1926,6 +1959,11 @@ def _render_session_history() -> None:
 
 def _render_strategy_health_strip() -> None:
     st.markdown("### Strategy health")
+    hs = room3_engine.matrix_handshake(st.session_state)
+    st.caption(
+        f"Matrix handshake · layouts {hs['layout_count']} · patterns {hs['pattern_count']} · "
+        f"deploys {hs['deploy_count']} · weather {hs['weather']}"
+    )
     alerts = list(st.session_state.room3_decay_alerts or [])
     fb = st.session_state.room3_strategy_feedback or {}
     if alerts:
@@ -1936,19 +1974,19 @@ def _render_strategy_health_strip() -> None:
         st.info("Operator feedback today (local): " + " · ".join(lines))
     else:
         st.info(
-            "Alpha decay + weather-fit warnings will read vault/matrix. "
-            "Your ✓/✗ votes will feed that path when connected."
+            "When filters scan and matrix signals fire, decay / weather-fit warnings land here. "
+            "Your ✓/✗ votes feed that loop."
         )
     sync_log = st.session_state.room3_matrix_sync_log or []
     if sync_log:
-        with st.expander("Matrix sync log (dry-run)", expanded=False):
+        with st.expander("Matrix sync log", expanded=False):
             for line in sync_log[-8:]:
                 st.caption(line)
 
 
 def _render_operator_review_panel() -> None:
     st.markdown("### Operator review")
-    st.caption("System proposes · you confirm ✓ good or ✗ bad · matrix hook later.")
+    st.caption("System proposes · you confirm ✓ good or ✗ bad · feeds matrix learning.")
     pending = st.session_state.room3_pending_reviews or []
     if not pending:
         st.caption("No closed trades waiting for your vote.")
@@ -2004,6 +2042,8 @@ def _render_alpaca_connection_panel(mode: str) -> None:
             st.session_state.room3_alpaca_status = "disconnected"
             st.session_state.room3_alpaca_account = ""
             st.session_state.room3_alpaca_last_check = "Disconnected."
+            st.session_state.room3_broker_truth = False
+            st.session_state.room3_broker_equity = 0.0
             st.rerun()
         return
 
@@ -2070,8 +2110,13 @@ def _render_alpaca_connection_panel(mode: str) -> None:
                     f"{result.get('account_number') or 'paper'} · "
                     f"${equity:,.2f}"
                 )
-                # Genuine account pull — not a demo stub
+                # Genuine account pull — broker is truth
+                st.session_state.room3_broker_equity = equity
                 st.session_state.room3_account_equity = equity
+                st.session_state.room3_broker_truth = True
+                st.session_state.room3_last_broker_sync = datetime.now(ET).strftime(
+                    "%H:%M:%S ET"
+                )
                 prev_start = float(st.session_state.get("room3_starting_equity") or 0)
                 if prev_start <= 0:
                     st.session_state.room3_starting_equity = equity
@@ -2259,16 +2304,77 @@ Close **IB Gateway** first if it’s logged into the same account.
 
 
 def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
-    """Pull live equity + positions from Alpaca into Room 3 session state."""
+    """Broker truth — equity + positions from Alpaca into Room 3 session state."""
     result = room3_alpaca.probe_alpaca_connection(paper=paper)
     if not result.get("ok"):
+        st.session_state.room3_broker_truth = False
         return result
     equity = float(result.get("equity") or 0)
+    st.session_state.room3_broker_equity = equity
     st.session_state.room3_account_equity = equity
+    st.session_state.room3_broker_truth = True
     st.session_state.room3_alpaca_account = (
         f"{result.get('account_number') or 'paper'} · ${equity:,.2f}"
     )
     st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(paper=paper)
+    st.session_state.room3_last_broker_sync = datetime.now(ET).strftime("%H:%M:%S ET")
+    return result
+
+
+def _current_gates(intent: str = "entry", order_notional: float = 0.0) -> dict:
+    mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
+    return room3_engine.evaluate_execution_gates(
+        mode=mode,
+        broker=str(st.session_state.get("room3_broker") or "alpaca"),
+        broker_connected=_broker_is_connected(),
+        engine_armed=bool(st.session_state.get("room3_engine_armed")),
+        kill_flat=bool(st.session_state.get("room3_kill_flat")),
+        pause_entries=bool(st.session_state.get("room3_pause_entries")),
+        intent=intent,
+        session_window=room3_engine.detect_session_window(),
+        allowed_sessions=list(st.session_state.get("room3_allowed_sessions") or []),
+        tradable_today=float(st.session_state.get("room3_tradable_today") or 0),
+        deployed=room3_engine.deployed_notional(st.session_state.get("room3_open_positions")),
+        order_notional=float(order_notional or 0),
+        live_orders_enabled=room3_engine.LIVE_ORDERS_ENABLED,
+    )
+
+
+def execute_matrix_signal(signal: dict) -> dict:
+    """Public auto path — matrix/filters call this; UI never sends tickets."""
+    init_room3_session_state()
+    intent = str(signal.get("intent") or "entry").lower()
+    notional = float(signal.get("notional") or 0)
+    if notional <= 0:
+        try:
+            notional = abs(float(signal.get("qty") or 0)) * abs(
+                float(signal.get("ref_price") or signal.get("entry_price") or 0)
+            )
+        except (TypeError, ValueError):
+            notional = 0.0
+    gates = _current_gates(intent=intent, order_notional=notional)
+    mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
+    paper = mode != ROOM3_MODE_LIVE
+    result = room3_engine.execute_matrix_signal(signal, paper=paper, gates=gates)
+    log = list(st.session_state.get("room3_auto_event_log") or [])
+    log.insert(
+        0,
+        {
+            "ts": datetime.now(ET).strftime("%H:%M:%S"),
+            "ok": bool(result.get("ok")),
+            "blocked": bool(result.get("blocked")),
+            "intent": intent,
+            "symbol": str(signal.get("symbol") or signal.get("ticker") or ""),
+            "detail": (
+                result.get("error")
+                or f"{result.get('status')} · {result.get('side')} {result.get('qty')}"
+            ),
+        },
+    )
+    st.session_state.room3_auto_event_log = log[:40]
+    if result.get("ok"):
+        _log_alpaca_order_fill(result)
+        _sync_alpaca_account_into_session(paper=paper)
     return result
 
 
@@ -2283,8 +2389,8 @@ def _log_alpaca_order_fill(result: dict) -> None:
     row = {
         "id": f"alpaca-ord-{result.get('order_id') or now}",
         "ticker": ticker,
-        "timeframe": "MKT",
-        "strategy": f"Alpaca {side.upper()}",
+        "strategy": str(result.get("strategy") or f"Alpaca {side.upper()}"),
+        "timeframe": str(result.get("timeframe") or "MKT"),
         "entry_time": now,
         "entry_price": entry_px,
         "last_price": entry_px,
@@ -2309,64 +2415,148 @@ def _log_alpaca_order_fill(result: dict) -> None:
     st.session_state.room3_trade_history = history[:200]
 
 
-def _render_paper_order_ticket(mode: str) -> None:
-    """Simple Alpaca paper market ticket — real hose, not a fake fill."""
-    st.markdown("### Paper order ticket")
-    if mode != ROOM3_MODE_PAPER:
-        st.caption("Order ticket is paper-only while live sits idle.")
-        return
-    if str(st.session_state.get("room3_broker") or "") != "alpaca":
-        st.caption("Switch broker to Alpaca to send paper orders.")
-        return
-    if not _broker_is_connected():
-        st.caption("Connect Alpaca first.")
-        return
+def _render_execution_posture(mode: str) -> None:
+    """Auto matrix path — filters/session → signal → Alpaca entry/exit. You supervise."""
+    lane = "PAPER" if mode == ROOM3_MODE_PAPER else "LIVE"
+    broker = _active_broker_name()
+    window = room3_engine.detect_session_window()
+    hs = room3_engine.matrix_handshake(st.session_state)
+    gates = _current_gates("entry")
+    armed = bool(st.session_state.get("room3_engine_armed"))
+    flat = bool(st.session_state.get("room3_kill_flat"))
+    paused = bool(st.session_state.get("room3_pause_entries"))
 
-    c1, c2, c3 = st.columns([1.2, 1, 1])
+    st.markdown(
+        f"<div class='room3-shell'>"
+        f"<div class='room3-kicker'>Execution posture · auto path</div>"
+        f"<div class='room3-title'>Detect → Alpaca → hold → exit</div>"
+        f"<p class='room3-sub'>"
+        f"Matrix strategies + session filters fire entries/exits through "
+        f"<strong>{broker} {lane}</strong>. You set capital, filters, kill/pause — "
+        f"you do not send tickets. "
+        f"Now: <strong>{room3_engine.session_label(window)}</strong>."
+        f"</p>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("#### Supervisor controls")
+    c1, c2, c3 = st.columns(3)
     with c1:
-        ticker = st.text_input("Ticker", value="AAPL", key="room3_order_ticker")
+        st.session_state.room3_engine_armed = st.toggle(
+            "Arm auto engine",
+            value=armed,
+            key="room3_toggle_engine_armed",
+            help="Off = no auto orders. On = matrix signals may hit Alpaca when gates pass.",
+        )
     with c2:
-        side = st.selectbox("Side", options=["buy", "sell"], key="room3_order_side")
+        st.session_state.room3_pause_entries = st.toggle(
+            "Pause new entries",
+            value=paused,
+            key="room3_toggle_pause_entries",
+            help="Blocks new entries; exits can still fire.",
+        )
     with c3:
-        qty = st.number_input(
-            "Shares",
-            min_value=1.0,
-            value=1.0,
-            step=1.0,
-            key="room3_order_qty",
+        st.session_state.room3_kill_flat = st.toggle(
+            "Kill switch FLAT",
+            value=flat,
+            key="room3_toggle_kill_flat",
+            help="Blocks all auto orders (entries and exits).",
         )
 
-    b1, b2, _ = st.columns([1, 1, 2])
-    with b1:
-        send = st.button("Send market order", type="primary", key="room3_order_send", use_container_width=True)
-    with b2:
-        if st.button("Refresh account", key="room3_order_refresh", use_container_width=True):
+    st.markdown("#### Session filters (when engine may trade)")
+    allowed = set(st.session_state.get("room3_allowed_sessions") or [])
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        pre_on = st.checkbox(
+            "Pre-market",
+            value=room3_engine.SESSION_PRE in allowed,
+            key="room3_filter_pre",
+        )
+    with f2:
+        rth_on = st.checkbox(
+            "Market hours",
+            value=room3_engine.SESSION_RTH in allowed,
+            key="room3_filter_rth",
+        )
+    with f3:
+        post_on = st.checkbox(
+            "Post-market",
+            value=room3_engine.SESSION_POST in allowed,
+            key="room3_filter_post",
+        )
+    next_allowed = []
+    if pre_on:
+        next_allowed.append(room3_engine.SESSION_PRE)
+    if rth_on:
+        next_allowed.append(room3_engine.SESSION_RTH)
+    if post_on:
+        next_allowed.append(room3_engine.SESSION_POST)
+    st.session_state.room3_allowed_sessions = next_allowed
+
+    if gates.get("ok"):
+        st.success("Gates open — entry signals can reach Alpaca.")
+    else:
+        st.warning("Gates closed — " + "; ".join(gates.get("reasons") or []))
+
+    mh1, mh2, mh3, mh4 = st.columns(4)
+    with mh1:
+        st.metric("Matrix layouts", hs["layout_count"])
+    with mh2:
+        st.metric("Active patterns", hs["pattern_count"])
+    with mh3:
+        st.metric("Deploys seen", hs["deploy_count"])
+    with mh4:
+        st.metric("Weather", hs["weather"] if hs["weather"] != "—" else "—")
+    if not hs["ready"]:
+        st.caption("Matrix handshake quiet — open Room 2 so layouts/patterns hydrate into session.")
+    else:
+        st.caption("Matrix handshake live from session RAM (Room 2).")
+
+    if mode == ROOM3_MODE_LIVE and not room3_engine.LIVE_ORDERS_ENABLED:
+        st.info("Live orders are hard-disabled. Auto path is paper-only until you enable live.")
+
+    if str(st.session_state.get("room3_broker") or "") == "alpaca" and mode == ROOM3_MODE_PAPER:
+        if st.button("Refresh account from Alpaca", key="room3_alpaca_refresh_acct"):
             synced = _sync_alpaca_account_into_session(paper=True)
             if synced.get("ok"):
-                st.success(f"Refreshed · equity ${float(synced.get('equity') or 0):,.2f}")
+                st.success(
+                    f"Broker truth · equity ${float(synced.get('equity') or 0):,.2f}"
+                )
             else:
                 st.error(synced.get("error") or "Refresh failed")
             st.rerun()
 
-    if send:
-        result = room3_alpaca.place_market_order(
-            ticker,
-            side,
-            qty,
-            paper=True,
-        )
-        if result.get("ok"):
-            _log_alpaca_order_fill(result)
-            _sync_alpaca_account_into_session(paper=True)
-            fill = result.get("filled_avg_price")
-            fill_txt = f" @ ${float(fill):.2f}" if fill not in (None, "") else ""
-            st.success(
-                f"Order accepted · {str(side).upper()} {qty:g} {str(ticker).upper()}"
-                f"{fill_txt} · status {result.get('status')}"
-            )
-            st.rerun()
-        else:
-            st.error(result.get("error") or "Order failed")
+    events = list(st.session_state.get("room3_auto_event_log") or [])
+    if events:
+        with st.expander("Auto execution log", expanded=False):
+            for ev in events[:12]:
+                mark = "OK" if ev.get("ok") else ("BLOCKED" if ev.get("blocked") else "FAIL")
+                st.caption(
+                    f"{ev.get('ts')} · {mark} · {ev.get('intent')} "
+                    f"{ev.get('symbol')} — {ev.get('detail')}"
+                )
+
+
+@st.fragment(run_every=timedelta(seconds=30))
+def _room3_heartbeat_fragment() -> None:
+    """Unattended pulse — broker truth sync while Room 3 is open."""
+    if not _broker_is_connected():
+        st.caption("Heartbeat idle · broker disconnected")
+        return
+    mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
+    if str(st.session_state.get("room3_broker") or "") == "alpaca":
+        paper = mode != ROOM3_MODE_LIVE
+        _sync_alpaca_account_into_session(paper=paper)
+    window = room3_engine.detect_session_window()
+    gates = _current_gates("entry")
+    sync_t = st.session_state.get("room3_last_broker_sync") or "—"
+    st.caption(
+        f"Heartbeat · {datetime.now(ET).strftime('%H:%M:%S ET')} · "
+        f"{room3_engine.session_label(window)} · "
+        f"broker sync {sync_t} · "
+        f"gates={'OPEN' if gates.get('ok') else 'CLOSED'}"
+    )
 
 
 def _render_trading_workspace(mode: str) -> None:
@@ -2385,7 +2575,8 @@ def _render_trading_workspace(mode: str) -> None:
             st.markdown("</div>", unsafe_allow_html=True)
         return
     _render_live_dashboard(mode)
-    _render_paper_order_ticket(mode)
+    _render_execution_posture(mode)
+    _room3_heartbeat_fragment()
     left, right = st.columns([1, 1])
     with left:
         _render_open_positions()
@@ -2412,6 +2603,12 @@ def render_room3_trading_center() -> None:
     init_room3_session_state()
     _inject_room3_css()
     _maybe_roll_trading_session()
+
+    health = room3_engine.runtime_health()
+    if not health.get("ok"):
+        for issue in health.get("issues") or []:
+            st.error(issue)
+        st.caption("Start with `./run_room3.sh` so the project `.venv` is always used.")
 
     _render_broker_presence_chip()
     _render_mode_slider()

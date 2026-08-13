@@ -19,7 +19,11 @@ import vault_bridge
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from groq import Groq
+
+try:
+    from groq import Groq
+except ModuleNotFoundError:  # wrong interpreter / incomplete env — don't kill Room 3
+    Groq = None  # type: ignore[misc, assignment]
 
 if "layout_master_matrix_index" not in st.session_state:
     st.session_state.layout_master_matrix_index = []
@@ -2640,6 +2644,8 @@ def _groq_should_fallback(err: str) -> bool:
 
 
 def run_groq(messages):
+    if Groq is None:
+        return "Security Core Offline. Install `groq` in this Python env (`.venv`), then restart Streamlit."
     if "GROQ_API_KEY" not in st.secrets:
         return "Security Core Offline. Add GROQ_API_KEY to `.streamlit/secrets.toml`."
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
