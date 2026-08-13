@@ -2026,19 +2026,27 @@ def _render_alpaca_connection_panel(mode: str) -> None:
         unsafe_allow_html=True,
     )
 
-    with st.expander("secrets.toml keys (paper)", expanded=True):
+    creds = room3_alpaca.load_alpaca_credentials(paper=True)
+    keys_ready = bool(creds["key"] and creds["secret"])
+    with st.expander("secrets.toml keys (paper)", expanded=not keys_ready):
         st.code(
             'ALPACA_API_KEY = "PK..."\n'
             'ALPACA_SECRET_KEY = "..."\n'
             'ALPACA_ENDPOINT = "https://paper-api.alpaca.markets"',
             language="toml",
         )
+        st.caption("File path: `.streamlit/secrets.toml` in the TradingApprentice folder.")
 
-    creds = room3_alpaca.load_alpaca_credentials(paper=True)
-    if creds["key"] and creds["secret"]:
-        st.caption(f"Keys loaded · endpoint `{creds['endpoint']}` · key starts with `{creds['key'][:4]}…`")
+    if keys_ready:
+        st.caption(
+            f"Keys loaded · endpoint `{creds['endpoint']}` · "
+            f"key starts with `{creds['key'][:4]}…`"
+        )
     else:
-        st.error("No Alpaca keys loaded yet — add them to secrets.toml and restart the app.")
+        st.error(
+            "No Alpaca keys loaded yet — save `.streamlit/secrets.toml`, "
+            "fully stop Streamlit (Ctrl+C), start it again, then refresh this page."
+        )
 
     if status == "waiting":
         st.warning("Waiting for Alpaca… click **Check connection**.")

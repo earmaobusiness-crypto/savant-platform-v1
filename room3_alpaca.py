@@ -51,69 +51,116 @@ def _read_local_secrets_toml() -> dict[str, str]:
     return out
 
 
-def load_alpaca_credentials(paper: bool = True) -> dict[str, str]:
-    """Load key/secret/endpoint from st.secrets, env, or local secrets.toml."""
-    local = _read_local_secrets_toml()
-    key = ""
-    secret = ""
-    endpoint = ""
+def _first_nonempty(*values: object) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip().strip('"').strip("'")
+        if text:
+            return text
+    return ""
 
+
+def _read_streamlit_secret(name: str) -> str:
+    """Best-effort read of one Streamlit secret without raising."""
     try:
         import streamlit as st
 
-        block = st.secrets.get("alpaca")
-        if isinstance(block, dict):
-            if paper:
-                key = str(block.get("paper_api_key") or block.get("api_key") or "").strip()
-                secret = str(block.get("paper_secret_key") or block.get("secret_key") or "").strip()
-            else:
-                key = str(block.get("api_key") or "").strip()
-                secret = str(block.get("secret_key") or "").strip()
-            endpoint = str(block.get("endpoint") or "").strip()
-        if not key:
-            key = str(
-                st.secrets.get("ALPACA_PAPER_API_KEY" if paper else "ALPACA_API_KEY")
-                or st.secrets.get("ALPACA_API_KEY")
-                or ""
-            ).strip()
-        if not secret:
-            secret = str(
-                st.secrets.get("ALPACA_PAPER_SECRET_KEY" if paper else "ALPACA_SECRET_KEY")
-                or st.secrets.get("ALPACA_SECRET_KEY")
-                or ""
-            ).strip()
-        if not endpoint:
-            endpoint = str(st.secrets.get("ALPACA_ENDPOINT") or "").strip()
+        try:
+            val = st.secrets.get(name)  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                val = st.secrets[name]
+            except Exception:
+                return ""
+        return _first_nonempty(val)
     except Exception:
-        pass
+        return ""
 
-    if not key:
-        key = (
-            os.environ.get("ALPACA_PAPER_API_KEY" if paper else "ALPACA_API_KEY")
-            or os.environ.get("ALPACA_API_KEY")
-            or local.get("ALPACA_PAPER_API_KEY" if paper else "ALPACA_API_KEY")
-            or local.get("ALPACA_API_KEY")
-            or ""
-        ).strip()
-    if not secret:
-        secret = (
-            os.environ.get("ALPACA_PAPER_SECRET_KEY" if paper else "ALPACA_SECRET_KEY")
-            or os.environ.get("ALPACA_SECRET_KEY")
-            or local.get("ALPACA_PAPER_SECRET_KEY" if paper else "ALPACA_SECRET_KEY")
-            or local.get("ALPACA_SECRET_KEY")
-            or ""
-        ).strip()
-    if not endpoint:
-        endpoint = (
-            os.environ.get("ALPACA_ENDPOINT")
-            or local.get("ALPACA_ENDPOINT")
-            or (PAPER_BASE_URL if paper else LIVE_BASE_URL)
-        ).strip()
+
+def _read_streamlit_alpaca_block(paper: bool) -> dict[str, str]:
+    try:
+        import streamlit as st
+
+        try:
+            block = st.secrets.get("alpaca")  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                block = st.secrets["alpaca"]
+            except Exception:
+                block = None
+        if not isinstance(block, dict):
+            return {}
+        if paper:
+            key = _first_nonempty(block.get("paper_api_key"), block.get("api_key"))
+            secret = _first_nonempty(block.get("paper_secret_key"), block.get("secret_key"))
+        else:
+            key = _first_nonempty(block.get("api_key"))
+            secret = _first_nonempty(block.get("secret_key"))
+        endpoint = _first_nonempty(block.get("endpoint"))
+        return {"key": key, "secret": secret, "endpoint": endpoint}
+    except Exception:
+        return {}
+
+
+def load_alpaca_credentials(paper: bool = True) -> dict[str, str]:
+    """Load key/secret/endpoint from local secrets.toml, env, or st.secrets.
+
+    Local file is checked first so Room 3 still works if Streamlit was started
+    before keys were pasted (and for processes that don't reload st.secrets).
+    """
+    local = _read_local_secrets_toml()
+    block = _read_streamlit_alpaca_block(paper=paper)
+
+    if paper:
+        key = _first_nonempty(
+            local.get("ALPACA_PAPER_API_KEY"),
+            local.get("ALPACA_API_KEY"),
+            os.environ.get("ALPACA_PAPER_API_KEY"),
+            os.environ.get("ALPACA_API_KEY"),
+            block.get("key"),
+            _read_streamlit_secret("ALPACA_PAPER_API_KEY"),
+            _read_streamlit_secret("ALPACA_API_KEY"),
+        )
+        secret = _first_nonempty(
+            local.get("ALPACA_PAPER_SECRET_KEY"),
+            local.get("ALPACA_SECRET_KEY"),
+            os.environ.get("ALPACA_PAPER_SECRET_KEY"),
+            os.environ.get("ALPACA_SECRET_KEY"),
+            block.get("secret"),
+            _read_streamlit_secret("ALPACA_PAPER_SECRET_KEY"),
+            _read_streamlit_secret("ALPACA_SECRET_KEY"),
+        )
+    else:
+        key = _first_nonempty(
+            local.get("ALPACA_API_KEY"),
+            os.environ.get("ALPACA_API_KEY"),
+            block.get("key"),
+            _read_streamlit_secret("ALPACA_API_KEY"),
+        )
+        secret = _first_nonempty(
+            local.get("ALPACA_SECRET_KEY"),
+            os.environ.get("ALPACA_SECRET_KEY"),
+            block.get("secret"),
+            _read_streamlit_secret("ALPACA_SECRET_KEY"),
+        )
+
+    endpoint = _first_nonempty(
+        local.get("ALPACA_ENDPOINT"),
+        os.environ.get("ALPACA_ENDPOINT"),
+        block.get("endpoint"),
+        _read_streamlit_secret("ALPACA_ENDPOINT"),
+        PAPER_BASE_URL if paper else LIVE_BASE_URL,
+    )
 
     if paper and "paper-api" not in endpoint and endpoint.endswith("api.alpaca.markets"):
         endpoint = PAPER_BASE_URL
 
-    return {"key": key, "secret": secret, "endpoint": endpoint or (PAPER_BASE_URL if paper else LIVE_BASE_URL)}
+    return {
+        "key": key,
+        "secret": secret,
+        "endpoint": endpoint or (PAPER_BASE_URL if paper else LIVE_BASE_URL),
+    }
 
 
 def _trading_client(paper: bool = True):
