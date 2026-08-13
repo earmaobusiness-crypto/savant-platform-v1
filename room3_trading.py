@@ -18,6 +18,9 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
+import room3_alpaca
+import room3_ibkr
+
 ROOM3_MODE_PAPER = "paper"
 ROOM3_MODE_LIVE = "live"
 ROOM3_RECOVERY_EMAIL = "earmaobusiness@gmail.com"
@@ -181,7 +184,23 @@ def init_room3_session_state() -> None:
     if "room3_ibkr_host" not in st.session_state:
         st.session_state.room3_ibkr_host = "127.0.0.1"
     if "room3_ibkr_port" not in st.session_state:
-        st.session_state.room3_ibkr_port = 7497  # paper default; live often 7496
+        st.session_state.room3_ibkr_port = room3_ibkr.GATEWAY_PAPER_PORT
+    if "room3_ibkr_platform" not in st.session_state:
+        st.session_state.room3_ibkr_platform = room3_ibkr.PLATFORM_GATEWAY
+    if "room3_ibkr_client_id" not in st.session_state:
+        st.session_state.room3_ibkr_client_id = room3_ibkr.DEFAULT_CLIENT_ID
+    if "room3_ibkr_last_check" not in st.session_state:
+        st.session_state.room3_ibkr_last_check = ""
+    if "room3_ibkr_port_mode" not in st.session_state:
+        st.session_state.room3_ibkr_port_mode = ""
+    if "room3_alpaca_status" not in st.session_state:
+        st.session_state.room3_alpaca_status = "disconnected"
+    if "room3_alpaca_account" not in st.session_state:
+        st.session_state.room3_alpaca_account = ""
+    if "room3_alpaca_last_check" not in st.session_state:
+        st.session_state.room3_alpaca_last_check = ""
+    if "room3_broker" not in st.session_state:
+        st.session_state.room3_broker = "alpaca"  # alpaca | ibkr
     if "room3_pending_reviews" not in st.session_state:
         st.session_state.room3_pending_reviews = []
     if "room3_strategy_feedback" not in st.session_state:
@@ -220,14 +239,22 @@ def _inject_room3_css() -> None:
             margin-bottom: 16px;
         }
         .room3-shell-paper {
-            border: 2px solid #3B6EA5;
-            box-shadow: 0 0 0 1px #1E3A5F inset, 0 0 24px rgba(59, 110, 165, 0.18);
+            border: 2px solid #C44B4B;
+            box-shadow: 0 0 0 1px #5A2020 inset, 0 0 24px rgba(180, 50, 50, 0.12);
         }
         .room3-shell-live {
-            border-color: #2F5F96;
+            border: 2px solid #3B6EA5;
+            box-shadow: 0 0 0 1px #1E3A5F inset, 0 0 24px rgba(59, 110, 165, 0.18);
             background: linear-gradient(180deg, #0F1620 0%, #0B0B0B 100%);
         }
         .room3-paper-frame {
+            border: 2px solid #B33A3A;
+            border-radius: 14px;
+            padding: 14px 14px 8px;
+            margin: 0 0 12px 0;
+            box-shadow: inset 0 0 0 1px rgba(180, 60, 60, 0.35);
+        }
+        .room3-live-frame {
             border: 2px solid #3B6EA5;
             border-radius: 14px;
             padding: 14px 14px 8px;
@@ -519,6 +546,120 @@ def _inject_room3_css() -> None:
             from { opacity: 0; transform: translateY(-6px); }
             to { opacity: 1; transform: translateY(0); }
         }
+        .room3-broker-badge-row {
+            display: flex;
+            justify-content: flex-end;
+            margin: 0 0 10px 0;
+        }
+        .room3-broker-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 7px 12px 7px 8px;
+            border-radius: 999px;
+            border: 1px solid #333;
+            background: linear-gradient(135deg, #1A1A1A 0%, #121212 100%);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+            animation: room3BadgeIn 0.45s ease-out;
+            max-width: 100%;
+        }
+        .room3-broker-badge--on {
+            border-color: #3A5A3A;
+            box-shadow: 0 0 0 1px rgba(80, 140, 90, 0.18), 0 8px 24px rgba(0,0,0,0.35);
+        }
+        .room3-broker-badge--alpaca.room3-broker-badge--on {
+            border-color: #8A6A18;
+            background: linear-gradient(135deg, #1C1810 0%, #12100C 100%);
+            box-shadow: 0 0 0 1px rgba(212, 168, 55, 0.2), 0 8px 24px rgba(0,0,0,0.35);
+        }
+        .room3-broker-badge--ibkr.room3-broker-badge--on {
+            border-color: #6A2020;
+            background: linear-gradient(135deg, #1C1010 0%, #120C0C 100%);
+            box-shadow: 0 0 0 1px rgba(180, 60, 60, 0.22), 0 8px 24px rgba(0,0,0,0.35);
+        }
+        .room3-broker-badge--off {
+            border-color: #2E2E2E;
+            opacity: 0.92;
+        }
+        .room3-broker-badge-mark {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            overflow: hidden;
+        }
+        .room3-broker-badge--alpaca .room3-broker-badge-mark {
+            background: #F2C94C;
+        }
+        .room3-broker-badge--ibkr .room3-broker-badge-mark {
+            background: #C8102E;
+        }
+        .room3-broker-badge--none .room3-broker-badge-mark {
+            background: #2A2A2A;
+            border: 1px solid #3A3A3A;
+        }
+        .room3-broker-badge-mark svg {
+            width: 18px;
+            height: 18px;
+            display: block;
+        }
+        .room3-broker-badge-copy {
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+            min-width: 0;
+            line-height: 1.15;
+        }
+        .room3-broker-badge-name {
+            font-size: 12px;
+            font-weight: 700;
+            color: #F0F0F0;
+            letter-spacing: 0.02em;
+        }
+        .room3-broker-badge-state {
+            font-size: 10px;
+            color: #8A8A8A;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .room3-broker-badge--on .room3-broker-badge-state {
+            color: #8FCB92;
+        }
+        .room3-broker-badge--alpaca.room3-broker-badge--on .room3-broker-badge-state {
+            color: #E0C56A;
+        }
+        .room3-broker-badge--ibkr.room3-broker-badge--on .room3-broker-badge-state {
+            color: #E08A8A;
+        }
+        .room3-broker-badge-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #555;
+            flex-shrink: 0;
+            margin-left: 2px;
+        }
+        .room3-broker-badge--on .room3-broker-badge-dot {
+            background: #6BCF70;
+            box-shadow: 0 0 0 0 rgba(107, 207, 112, 0.55);
+            animation: room3Pulse 1.8s ease-out infinite;
+        }
+        .room3-broker-badge--wait .room3-broker-badge-dot {
+            background: #C9A227;
+            animation: room3Pulse 1.2s ease-out infinite;
+        }
+        @keyframes room3BadgeIn {
+            from { opacity: 0; transform: translateY(-8px) scale(0.96); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes room3Pulse {
+            0% { box-shadow: 0 0 0 0 rgba(107, 207, 112, 0.45); }
+            70% { box-shadow: 0 0 0 8px rgba(107, 207, 112, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(107, 207, 112, 0); }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -661,7 +802,7 @@ def _render_live_gate_overlay() -> None:
 
     stage = str(st.session_state.room3_recovery_stage or "")
     if stage == "offer_email":
-        st.info(f"Recovery notice queued for **{ROOM3_RECOVERY_EMAIL}** (email send not wired yet).")
+        st.info(f"Notification sent to **{ROOM3_RECOVERY_EMAIL}** (demo — no email yet).")
         if st.button("I received it", key="room3_recovery_ack", use_container_width=True):
             st.session_state.room3_recovery_stage = "enter_recovery_code"
             st.rerun()
@@ -669,7 +810,7 @@ def _render_live_gate_overlay() -> None:
     if stage == "enter_recovery_code":
         st.caption(f"Enter code from **{ROOM3_RECOVERY_EMAIL}**")
         if st.session_state.room3_recovery_token:
-            st.caption(f"Temporary code: `{st.session_state.room3_recovery_token}`")
+            st.caption(f"Demo code: `{st.session_state.room3_recovery_token}`")
         recovery_input = st.text_input(
             "Recovery code",
             placeholder="6-digit",
@@ -1080,6 +1221,121 @@ def _render_dark_table(rows: list[dict]) -> None:
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
+def _active_broker_name() -> str:
+    broker = str(st.session_state.get("room3_broker") or "alpaca")
+    return "Interactive Brokers" if broker == "ibkr" else "Alpaca"
+
+
+def _broker_mark_svg(broker: str) -> str:
+    """Tiny inline marks — stylized, not official trademark assets."""
+    if broker == "ibkr":
+        return (
+            '<svg viewBox="0 0 24 24" aria-hidden="true">'
+            '<text x="12" y="16" text-anchor="middle" '
+            'font-size="11" font-weight="800" fill="#FFFFFF" '
+            'font-family="Arial, Helvetica, sans-serif">IB</text>'
+            "</svg>"
+        )
+    if broker == "alpaca":
+        return (
+            '<svg viewBox="0 0 24 24" aria-hidden="true">'
+            '<ellipse cx="12" cy="14" rx="7" ry="6" fill="#1A1208"/>'
+            '<circle cx="9.2" cy="12.5" r="1.1" fill="#F2C94C"/>'
+            '<circle cx="14.8" cy="12.5" r="1.1" fill="#F2C94C"/>'
+            '<path d="M8 7.5 C9 4.5 11 3.5 12 3.5 C13 3.5 15 4.5 16 7.5" '
+            'fill="none" stroke="#1A1208" stroke-width="2.2" '
+            'stroke-linecap="round"/>'
+            '<path d="M10.5 16.5 Q12 18 13.5 16.5" fill="none" '
+            'stroke="#F2C94C" stroke-width="1.2" stroke-linecap="round"/>'
+            "</svg>"
+        )
+    return (
+        '<svg viewBox="0 0 24 24" aria-hidden="true">'
+        '<circle cx="12" cy="12" r="7" fill="none" stroke="#777" stroke-width="1.6"/>'
+        '<path d="M8 12h8M12 8v8" stroke="#777" stroke-width="1.6" stroke-linecap="round"/>'
+        "</svg>"
+    )
+
+
+def _render_broker_presence_chip() -> None:
+    """Corner chip — which broker Room 3 thinks it's on, connected or not."""
+    broker = str(st.session_state.get("room3_broker") or "alpaca")
+    if broker == "ibkr":
+        status = str(st.session_state.get("room3_ibkr_status") or "disconnected")
+        name = "Interactive Brokers"
+        mark_key = "ibkr"
+    else:
+        status = str(st.session_state.get("room3_alpaca_status") or "disconnected")
+        name = "Alpaca"
+        mark_key = "alpaca"
+
+    if status == "connected":
+        state_class = "room3-broker-badge--on"
+        state_text = "Connected"
+        equity = float(st.session_state.get("room3_account_equity") or 0)
+        if broker == "alpaca" and equity > 0:
+            state_text = f"Connected · ${equity:,.0f}"
+    elif status == "waiting":
+        state_class = "room3-broker-badge--wait"
+        state_text = "Waiting…"
+    else:
+        state_class = "room3-broker-badge--off"
+        state_text = "Currently not connected"
+
+    html = (
+        f"<div class='room3-broker-badge-row'>"
+        f"<div class='room3-broker-badge room3-broker-badge--{mark_key} {state_class}' "
+        f"title='Active broker hose'>"
+        f"<span class='room3-broker-badge-mark'>{_broker_mark_svg(mark_key)}</span>"
+        f"<span class='room3-broker-badge-copy'>"
+        f"<span class='room3-broker-badge-name'>{name}</span>"
+        f"<span class='room3-broker-badge-state'>{state_text}</span>"
+        f"</span>"
+        f"<span class='room3-broker-badge-dot'></span>"
+        f"</div></div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _broker_connection_subtitle(mode: str) -> str:
+    """Honest status line — which broker, paper/live, real connect vs idle."""
+    lane = "LIVE" if mode == ROOM3_MODE_LIVE else "PAPER"
+    broker = str(st.session_state.get("room3_broker") or "alpaca")
+    name = _active_broker_name()
+
+    if broker == "alpaca":
+        status = str(st.session_state.get("room3_alpaca_status") or "disconnected")
+        if status == "connected":
+            equity = float(st.session_state.get("room3_account_equity") or 0)
+            acct = str(st.session_state.get("room3_alpaca_account") or "").strip()
+            core = f"<strong>Alpaca {lane}</strong> · connected"
+            if equity > 0:
+                core += f" · account <strong>${equity:,.2f}</strong>"
+            if acct:
+                core += f" · {acct.split('·')[0].strip()}"
+            if mode == ROOM3_MODE_LIVE:
+                core += " · <em>live lane idle until funded Alpaca or IBKR Pro</em>"
+            return core
+        if status == "waiting":
+            return f"<strong>Alpaca {lane}</strong> · waiting for handshake"
+        if mode == ROOM3_MODE_LIVE:
+            return (
+                f"<strong>Alpaca</strong> · live lane idle · "
+                f"use <strong>Paper</strong> for the real hose right now"
+            )
+        return f"<strong>Alpaca PAPER</strong> · <strong>not connected</strong>"
+
+    status = str(st.session_state.get("room3_ibkr_status") or "disconnected")
+    if status == "connected":
+        return f"<strong>IBKR {lane}</strong> · connected"
+    if status == "waiting":
+        return f"<strong>IBKR {lane}</strong> · waiting for Gateway/TWS"
+    return (
+        f"<strong>IBKR {lane}</strong> · <strong>not connected</strong> "
+        f"(idle — API needs Pro; Alpaca paper is the working path)"
+    )
+
+
 def _render_broker_status_card(mode: str) -> None:
     is_live = mode == ROOM3_MODE_LIVE
     shell_class = "room3-shell"
@@ -1087,20 +1343,11 @@ def _render_broker_status_card(mode: str) -> None:
         shell_class += " room3-shell-live"
     else:
         shell_class += " room3-shell-paper"
-    lane = "LIVE" if is_live else "PAPER"
-    status = str(st.session_state.get("room3_ibkr_status") or "disconnected")
-    if status == "connected":
-        link = st.session_state.room3_ibkr_account or "linked"
-        status_line = f"IBKR {lane} · <strong>connected</strong> · {escape(str(link))}"
-    elif status == "waiting":
-        status_line = f"IBKR {lane} · <strong>waiting for unlock</strong>"
-    else:
-        status_line = f"IBKR {lane} · <strong>not connected</strong>"
     st.markdown(
         f"<div class='{shell_class}'>"
-        f"<div class='room3-kicker'>Room 3 · Execution terminal</div>"
+        f"<div class='room3-kicker'>Room 3 · Execution terminal · {_active_broker_name()}</div>"
         f"<div class='room3-title'>{_mode_label(mode)}</div>"
-        f"<p class='room3-sub'>{status_line}</p>"
+        f"<p class='room3-sub'>{_broker_connection_subtitle(mode)}</p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -1110,7 +1357,8 @@ def _render_open_positions() -> None:
     st.markdown("### Open positions")
     rows = st.session_state.room3_open_positions or []
     if not rows:
-        st.caption("No open trades — IBKR fills will show here when connected.")
+        name = _active_broker_name()
+        st.caption(f"No open trades — {name} positions show here when connected.")
         return
     display = []
     for r in rows:
@@ -1214,6 +1462,17 @@ def _render_live_dashboard(mode: str) -> None:
         _sync_equity_curve_with_today()
     stats = _session_pl_stats()
     equity = float(stats["equity"])
+    # First paint: if tradable still equals full account and equity > 0, nudge to 50%
+    if (
+        "room3_tradable_seen" not in st.session_state
+        and equity > 0
+        and abs(float(stats["tradable"]) - equity) < 0.01
+    ):
+        _set_tradable_pct(50.0, equity)
+        st.session_state.room3_tradable_seen = True
+        stats = _session_pl_stats()
+    else:
+        st.session_state.room3_tradable_seen = True
     tradable = float(stats["tradable"])
     pct = float(stats["tradable_pct"])
     day_label = _trading_day_display(_trading_day_key())
@@ -1286,7 +1545,13 @@ def _render_live_dashboard(mode: str) -> None:
         win_label = f"{stats['win_rate']:.0f}%" if stats["wins"] + stats["losses"] else "—"
         st.metric("Win rate", win_label)
     if mode == ROOM3_MODE_LIVE:
-        st.caption("Kill switch: **SAFE** (no broker connected)")
+        if _broker_is_connected():
+            st.caption(
+                f"Kill switch: **ARMED** · {_active_broker_name()} connected "
+                "(live lane still idle until you fund live)"
+            )
+        else:
+            st.caption("Kill switch: **SAFE** (no broker connected)")
 
 
 def _render_session_summary() -> None:
@@ -1716,27 +1981,155 @@ def _render_operator_review_panel() -> None:
                 st.rerun()
 
 
+def _broker_is_connected() -> bool:
+    if str(st.session_state.get("room3_broker") or "alpaca") == "ibkr":
+        return str(st.session_state.get("room3_ibkr_status") or "") == "connected"
+    return str(st.session_state.get("room3_alpaca_status") or "") == "connected"
+
+
 def _ibkr_is_connected() -> bool:
     return str(st.session_state.get("room3_ibkr_status") or "") == "connected"
 
 
+def _render_alpaca_connection_panel(mode: str) -> None:
+    """Paper-first Alpaca gate — keys from secrets.toml, never typed in chat."""
+    status = str(st.session_state.get("room3_alpaca_status") or "disconnected")
+    is_paper = mode == ROOM3_MODE_PAPER
+
+    st.markdown("### Alpaca")
+    if status == "connected":
+        acct = st.session_state.room3_alpaca_account or "paper"
+        st.success(f"Connected · {'PAPER' if is_paper else 'LIVE'} · {acct}")
+        if st.button("Disconnect Alpaca", key="room3_alpaca_disconnect"):
+            st.session_state.room3_alpaca_status = "disconnected"
+            st.session_state.room3_alpaca_account = ""
+            st.session_state.room3_alpaca_last_check = "Disconnected."
+            st.rerun()
+        return
+
+    if not is_paper:
+        st.warning(
+            "Alpaca **live** needs a funded brokerage account + KYC. "
+            "Stay on **Paper** in Room 3 for now, or switch broker to IBKR when Pro is available."
+        )
+
+    st.markdown(
+        f"<div class='room3-shell'>"
+        f"<div class='room3-kicker'>Connection gate</div>"
+        f"<div class='room3-title'>Unlock Alpaca {'PAPER' if is_paper else 'LIVE'}</div>"
+        f"<p class='room3-sub'>"
+        f"Put your paper <strong>API Key</strong> + <strong>Secret</strong> in "
+        f"<code>.streamlit/secrets.toml</code>, restart Streamlit, then Check connection. "
+        f"Don’t paste secrets in chat."
+        f"</p>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("secrets.toml keys (paper)", expanded=True):
+        st.code(
+            'ALPACA_API_KEY = "PK..."\n'
+            'ALPACA_SECRET_KEY = "..."\n'
+            'ALPACA_ENDPOINT = "https://paper-api.alpaca.markets"',
+            language="toml",
+        )
+
+    creds = room3_alpaca.load_alpaca_credentials(paper=True)
+    if creds["key"] and creds["secret"]:
+        st.caption(f"Keys loaded · endpoint `{creds['endpoint']}` · key starts with `{creds['key'][:4]}…`")
+    else:
+        st.error("No Alpaca keys loaded yet — add them to secrets.toml and restart the app.")
+
+    if status == "waiting":
+        st.warning("Waiting for Alpaca… click **Check connection**.")
+
+    b1, b2, _ = st.columns([1, 1, 2])
+    with b1:
+        if st.button("Start waiting", key="room3_alpaca_wait", use_container_width=True):
+            st.session_state.room3_alpaca_status = "waiting"
+            st.session_state.room3_alpaca_last_check = ""
+            st.rerun()
+    with b2:
+        if st.button("Check connection", key="room3_alpaca_check", type="primary", use_container_width=True):
+            st.session_state.room3_alpaca_status = "waiting"
+            result = room3_alpaca.probe_alpaca_connection(paper=True)
+            if result.get("ok"):
+                equity = float(result.get("equity") or 0)
+                cash = float(result.get("cash") or 0)
+                buying_power = float(result.get("buying_power") or 0)
+                st.session_state.room3_alpaca_status = "connected"
+                st.session_state.room3_alpaca_account = (
+                    f"{result.get('account_number') or 'paper'} · "
+                    f"${equity:,.2f}"
+                )
+                # Genuine account pull — not a demo stub
+                st.session_state.room3_account_equity = equity
+                prev_start = float(st.session_state.get("room3_starting_equity") or 0)
+                if prev_start <= 0:
+                    st.session_state.room3_starting_equity = equity
+                st.session_state.room3_tradable_today = round(equity * 0.5, 2)
+                st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(
+                    paper=True
+                )
+                st.session_state.room3_alpaca_last_check = (
+                    f"Handshake OK · equity ${equity:,.2f} · cash ${cash:,.2f} · "
+                    f"buying power ${buying_power:,.2f} · status {result.get('status')}"
+                )
+            else:
+                st.session_state.room3_alpaca_status = "waiting"
+                st.session_state.room3_alpaca_account = ""
+                st.session_state.room3_alpaca_last_check = (
+                    f"Not connected yet — {result.get('error') or 'unknown error'}"
+                )
+            st.rerun()
+
+    msg = str(st.session_state.get("room3_alpaca_last_check") or "").strip()
+    if msg:
+        if "Not connected" in msg:
+            st.error(msg)
+        else:
+            st.caption(msg)
+
+
+def _render_broker_connection_panel(mode: str) -> None:
+    """Broker picker — Alpaca paper now; IBKR when Pro/API is available."""
+    st.markdown("### Broker connection")
+    broker = st.radio(
+        "Broker",
+        options=["alpaca", "ibkr"],
+        format_func=lambda x: "Alpaca (paper — recommended now)" if x == "alpaca" else "Interactive Brokers",
+        horizontal=True,
+        key="room3_broker",
+    )
+    if broker == "alpaca":
+        _render_alpaca_connection_panel(mode)
+    else:
+        _render_ibkr_connection_panel(mode)
+
+
 def _render_ibkr_connection_panel(mode: str) -> None:
-    """Waiting screen → connected. Password stays in TWS/Gateway, not Room 3."""
+    """Waiting screen → connected. Password stays in Gateway/TWS, not Room 3."""
     status = str(st.session_state.get("room3_ibkr_status") or "disconnected")
     lane = "LIVE" if mode == ROOM3_MODE_LIVE else "PAPER"
-    default_port = 7496 if mode == ROOM3_MODE_LIVE else 7497
-    prev_mode = str(st.session_state.get("room3_ibkr_port_mode") or "")
-    if prev_mode != mode:
+    platform = str(st.session_state.get("room3_ibkr_platform") or room3_ibkr.PLATFORM_GATEWAY)
+    default_port = room3_ibkr.default_port_for_mode(mode, platform)
+    sync_key = f"{mode}:{platform}"
+    prev_key = str(st.session_state.get("room3_ibkr_port_mode") or "")
+    if prev_key != sync_key:
         st.session_state.room3_ibkr_port = default_port
-        st.session_state.room3_ibkr_port_mode = mode
+        st.session_state.room3_ibkr_port_mode = sync_key
 
     st.markdown("### Interactive Brokers")
     if status == "connected":
         acct = st.session_state.room3_ibkr_account or "account linked"
-        st.success(f"Connected · {lane} · {acct}")
+        host = st.session_state.room3_ibkr_host
+        port = st.session_state.room3_ibkr_port
+        plat = "Gateway" if platform == room3_ibkr.PLATFORM_GATEWAY else "TWS"
+        st.success(f"Connected · {lane} · {plat} · {acct} · {host}:{port}")
         if st.button("Disconnect", key="room3_ibkr_disconnect"):
             st.session_state.room3_ibkr_status = "disconnected"
             st.session_state.room3_ibkr_account = ""
+            st.session_state.room3_ibkr_last_check = "Disconnected."
             st.rerun()
         return
 
@@ -1745,56 +2138,131 @@ def _render_ibkr_connection_panel(mode: str) -> None:
         f"<div class='room3-kicker'>Connection gate</div>"
         f"<div class='room3-title'>Unlock IBKR {lane}</div>"
         f"<p class='room3-sub'>"
-        f"Log into <strong>TWS or IB Gateway</strong> with your {lane.lower()} credentials. "
-        f"Room 3 never takes your IBKR password — it only attaches after IBKR is unlocked."
+        f"Log into <strong>IB Gateway</strong> (or TWS) with your {lane.lower()} password. "
+        f"Room 3 never takes that password — it only attaches after IBKR is unlocked. "
+        f"Don’t run Gateway and TWS on the same account at the same time."
         f"</p>"
         f"</div>",
         unsafe_allow_html=True,
     )
+
+    plat_choice = st.radio(
+        "Connect through",
+        options=[room3_ibkr.PLATFORM_GATEWAY, room3_ibkr.PLATFORM_TWS],
+        format_func=lambda x: "IB Gateway (recommended)" if x == room3_ibkr.PLATFORM_GATEWAY else "TWS",
+        horizontal=True,
+        key="room3_ibkr_platform",
+    )
+    if plat_choice != platform:
+        st.session_state.room3_ibkr_port = room3_ibkr.default_port_for_mode(mode, plat_choice)
+        st.session_state.room3_ibkr_port_mode = f"{mode}:{plat_choice}"
+        st.rerun()
+
+    platform = str(st.session_state.room3_ibkr_platform)
+    default_port = room3_ibkr.default_port_for_mode(mode, platform)
+
+    if platform == room3_ibkr.PLATFORM_GATEWAY:
+        with st.expander("Do this in IB Gateway", expanded=True):
+            st.markdown(
+                f"""
+1. Open the **IB Gateway** app you downloaded (not the App Store).
+2. Log in as **{lane}** (Paper / Live on the login screen).
+3. **Configure → Settings → API → Settings**
+4. Check **Enable ActiveX and Socket Clients**
+5. Socket port should be **{default_port}**
+   (Gateway Paper **4002** · Gateway Live **4001**)
+6. Apply / OK — leave Gateway open
+7. Come back here → **Check connection**
+
+Close **TWS** first if it’s logged into the same account.
+"""
+            )
+    else:
+        with st.expander("Do this in TWS", expanded=True):
+            st.markdown(
+                f"""
+1. Open **Trader Workstation** and log in as **{lane}**
+2. **Edit → Global Configuration → API → Settings**
+3. Check **Enable ActiveX and Socket Clients**
+4. Socket port should be **{default_port}**
+   (TWS Paper **7497** · TWS Live **7496**)
+5. Apply / OK — leave TWS open
+6. Come back here → **Check connection**
+
+Close **IB Gateway** first if it’s logged into the same account.
+"""
+            )
+
     c1, c2, c3 = st.columns(3)
     with c1:
         st.text_input("Host", key="room3_ibkr_host")
     with c2:
         st.number_input("Port", min_value=1, max_value=65535, key="room3_ibkr_port", step=1)
     with c3:
-        st.caption("Paper default **7497** · Live default **7496** (TWS API).")
+        st.number_input(
+            "Client ID",
+            min_value=1,
+            max_value=9999,
+            key="room3_ibkr_client_id",
+            step=1,
+            help="Unique id for Room 3. Change if another app already uses it.",
+        )
 
     if status == "waiting":
         st.warning(
-            f"Waiting for IBKR {lane}… unlock TWS/Gateway, enable API, then click **Check connection**."
-        )
-    else:
-        st.info(
-            "Steps: open TWS or IB Gateway → log in → File → Global Configuration → API → Settings → "
-            "Enable ActiveX and Socket Clients → note the socket port → return here."
+            f"Waiting for IBKR {lane}… finish the steps above, then **Check connection**."
         )
 
     b1, b2, _ = st.columns([1, 1, 2])
     with b1:
         if st.button("Start waiting", key="room3_ibkr_wait", use_container_width=True):
             st.session_state.room3_ibkr_status = "waiting"
+            st.session_state.room3_ibkr_last_check = ""
             st.rerun()
     with b2:
         if st.button("Check connection", key="room3_ibkr_check", type="primary", use_container_width=True):
             st.session_state.room3_ibkr_status = "waiting"
-            st.session_state.room3_ibkr_last_check = (
-                "API hook not wired yet — next step is ib_insync / Gateway handshake. "
-                f"Target {st.session_state.room3_ibkr_host}:{st.session_state.room3_ibkr_port}."
+            result = room3_ibkr.probe_tws_connection(
+                host=str(st.session_state.room3_ibkr_host or "127.0.0.1"),
+                port=int(st.session_state.room3_ibkr_port or default_port),
+                client_id=int(st.session_state.room3_ibkr_client_id or room3_ibkr.DEFAULT_CLIENT_ID),
             )
+            if result.get("ok"):
+                accounts = result.get("accounts") or []
+                st.session_state.room3_ibkr_status = "connected"
+                st.session_state.room3_ibkr_account = ", ".join(accounts) if accounts else "connected"
+                st.session_state.room3_ibkr_last_check = (
+                    f"Handshake OK · accounts: {st.session_state.room3_ibkr_account}"
+                )
+            else:
+                st.session_state.room3_ibkr_status = "waiting"
+                st.session_state.room3_ibkr_account = ""
+                st.session_state.room3_ibkr_last_check = (
+                    f"Not connected yet — {result.get('error') or 'unknown error'}"
+                )
             st.rerun()
+
     msg = str(st.session_state.get("room3_ibkr_last_check") or "").strip()
     if msg:
-        st.caption(msg)
+        if "Not connected" in msg:
+            st.error(msg)
+        else:
+            st.caption(msg)
 
 
 def _render_trading_workspace(mode: str) -> None:
+    frame_open = False
     if mode == ROOM3_MODE_PAPER:
         st.markdown("<div class='room3-paper-frame'>", unsafe_allow_html=True)
-    _render_ibkr_connection_panel(mode)
+        frame_open = True
+    elif mode == ROOM3_MODE_LIVE:
+        st.markdown("<div class='room3-live-frame'>", unsafe_allow_html=True)
+        frame_open = True
+    _render_broker_connection_panel(mode)
     _render_broker_status_card(mode)
-    if not _ibkr_is_connected():
-        st.caption("Trading panels stay empty until IBKR is connected.")
-        if mode == ROOM3_MODE_PAPER:
+    if not _broker_is_connected():
+        st.caption("Trading panels unlock after the broker connects.")
+        if frame_open:
             st.markdown("</div>", unsafe_allow_html=True)
         return
     _render_live_dashboard(mode)
@@ -1806,7 +2274,7 @@ def _render_trading_workspace(mode: str) -> None:
         _render_session_summary()
         _render_operator_review_panel()
     _render_strategy_health_strip()
-    if mode == ROOM3_MODE_PAPER:
+    if frame_open:
         st.markdown("</div>", unsafe_allow_html=True)
     _render_session_history()
 
@@ -1825,6 +2293,7 @@ def render_room3_trading_center() -> None:
     _inject_room3_css()
     _maybe_roll_trading_session()
 
+    _render_broker_presence_chip()
     _render_mode_slider()
 
     if ROOM3_LIVE_SECURITY_ENABLED and st.session_state.room3_live_gate_open:
@@ -1846,6 +2315,8 @@ def render_room3_trading_center() -> None:
     st.markdown("---")
     st.caption(
         f"Session · mode={st.session_state.room3_execution_mode} · "
+        f"broker={st.session_state.get('room3_broker')} · "
+        f"alpaca={st.session_state.get('room3_alpaca_status')} · "
         f"ibkr={st.session_state.room3_ibkr_status} · "
         f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
     )
