@@ -116,6 +116,22 @@ def load_alpaca_credentials(paper: bool = True) -> dict[str, str]:
     return {"key": key, "secret": secret, "endpoint": endpoint or (PAPER_BASE_URL if paper else LIVE_BASE_URL)}
 
 
+def _trading_client(paper: bool = True):
+    creds = load_alpaca_credentials(paper=paper)
+    if not creds["key"] or not creds["secret"]:
+        raise RuntimeError(
+            "Alpaca keys missing — add ALPACA_API_KEY and ALPACA_SECRET_KEY "
+            "to .streamlit/secrets.toml, then restart Streamlit."
+        )
+    from alpaca.trading.client import TradingClient
+
+    return TradingClient(
+        api_key=creds["key"],
+        secret_key=creds["secret"],
+        paper=bool(paper),
+    )
+
+
 def probe_alpaca_connection(paper: bool = True) -> dict[str, Any]:
     """One-shot account read to verify keys work."""
     creds = load_alpaca_credentials(paper=paper)
@@ -129,7 +145,7 @@ def probe_alpaca_connection(paper: bool = True) -> dict[str, Any]:
         }
 
     try:
-        from alpaca.trading.client import TradingClient
+        from alpaca.trading.client import TradingClient  # noqa: F401
     except ImportError:
         return {
             "ok": False,
@@ -137,11 +153,7 @@ def probe_alpaca_connection(paper: bool = True) -> dict[str, Any]:
         }
 
     try:
-        client = TradingClient(
-            api_key=creds["key"],
-            secret_key=creds["secret"],
-            paper=bool(paper),
-        )
+        client = _trading_client(paper=paper)
         account = client.get_account()
         equity = float(getattr(account, "equity", 0) or 0)
         cash = float(getattr(account, "cash", 0) or 0)
@@ -165,19 +177,11 @@ def probe_alpaca_connection(paper: bool = True) -> dict[str, Any]:
 
 
 def fetch_open_positions(paper: bool = True) -> list[dict[str, Any]]:
-    creds = load_alpaca_credentials(paper=paper)
-    if not creds["key"] or not creds["secret"]:
+    try:
+        client = _trading_client(paper=paper)
+    except Exception:
         return []
     try:
-        from alpaca.trading.client import TradingClient
-    except ImportError:
-        return []
-    try:
-        client = TradingClient(
-            api_key=creds["key"],
-            secret_key=creds["secret"],
-            paper=bool(paper),
-        )
         rows = []
         for p in client.get_all_positions() or []:
             qty = float(getattr(p, "qty", 0) or 0)
@@ -202,3 +206,60 @@ def fetch_open_positions(paper: bool = True) -> list[dict[str, Any]]:
         return rows
     except Exception:
         return []
+
+
+def place_market_order(
+    symbol: str,
+    side: str,
+    qty: float,
+    *,
+    paper: bool = True,
+) -> dict[str, Any]:
+    """Submit a paper/live market order. Returns ok + fill snapshot or error."""
+    ticker = str(symbol or "").strip().upper()
+    side_l = str(side or "").strip().lower()
+    try:
+        shares = float(qty)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Quantity must be a number."}
+    if not ticker:
+        return {"ok": False, "error": "Ticker required."}
+    if side_l not in ("buy", "sell"):
+        return {"ok": False, "error": "Side must be buy or sell."}
+    if shares <= 0:
+        return {"ok": False, "error": "Quantity must be > 0."}
+
+    try:
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.requests import MarketOrderRequest
+    except ImportError:
+        return {"ok": False, "error": "alpaca-py not installed — run: pip install alpaca-py"}
+
+    try:
+        client = _trading_client(paper=paper)
+        req = MarketOrderRequest(
+            symbol=ticker,
+            qty=shares,
+            side=OrderSide.BUY if side_l == "buy" else OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+        )
+        order = client.submit_order(order_data=req)
+        order_id = str(getattr(order, "id", "") or "")
+        status = str(getattr(order, "status", "") or "")
+        filled_qty = float(getattr(order, "filled_qty", 0) or 0)
+        filled_avg = getattr(order, "filled_avg_price", None)
+        fill_px = float(filled_avg) if filled_avg not in (None, "") else None
+        return {
+            "ok": True,
+            "order_id": order_id,
+            "symbol": ticker,
+            "side": side_l,
+            "qty": shares,
+            "status": status,
+            "filled_qty": filled_qty,
+            "filled_avg_price": fill_px,
+            "paper": paper,
+            "error": "",
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc).strip() or type(exc).__name__}

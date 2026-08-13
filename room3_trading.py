@@ -2250,6 +2250,117 @@ Close **IB Gateway** first if it’s logged into the same account.
             st.caption(msg)
 
 
+def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
+    """Pull live equity + positions from Alpaca into Room 3 session state."""
+    result = room3_alpaca.probe_alpaca_connection(paper=paper)
+    if not result.get("ok"):
+        return result
+    equity = float(result.get("equity") or 0)
+    st.session_state.room3_account_equity = equity
+    st.session_state.room3_alpaca_account = (
+        f"{result.get('account_number') or 'paper'} · ${equity:,.2f}"
+    )
+    st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(paper=paper)
+    return result
+
+
+def _log_alpaca_order_fill(result: dict) -> None:
+    """Append a paper fill into today's open book / trade log shape."""
+    now = datetime.now(ET).strftime("%H:%M:%S")
+    ticker = str(result.get("symbol") or "")
+    side = str(result.get("side") or "")
+    qty = float(result.get("qty") or 0)
+    px = result.get("filled_avg_price")
+    entry_px = float(px) if px not in (None, "") else 0.0
+    row = {
+        "id": f"alpaca-ord-{result.get('order_id') or now}",
+        "ticker": ticker,
+        "timeframe": "MKT",
+        "strategy": f"Alpaca {side.upper()}",
+        "entry_time": now,
+        "entry_price": entry_px,
+        "last_price": entry_px,
+        "pnl_usd": 0.0,
+        "pnl_pct": 0.0,
+        "qty": qty if side == "buy" else -qty,
+        "broker_order_id": result.get("order_id"),
+        "broker_status": result.get("status"),
+    }
+    # Buys / opens land in open positions via refresh; still stamp activity log
+    history = list(st.session_state.get("room3_trade_history") or [])
+    history.insert(
+        0,
+        {
+            **row,
+            "exit_time": "—",
+            "exit_price": entry_px,
+            "status": f"submitted · {result.get('status')}",
+            "operator_verdict": "",
+        },
+    )
+    st.session_state.room3_trade_history = history[:200]
+
+
+def _render_paper_order_ticket(mode: str) -> None:
+    """Simple Alpaca paper market ticket — real hose, not a fake fill."""
+    st.markdown("### Paper order ticket")
+    if mode != ROOM3_MODE_PAPER:
+        st.caption("Order ticket is paper-only while live sits idle.")
+        return
+    if str(st.session_state.get("room3_broker") or "") != "alpaca":
+        st.caption("Switch broker to Alpaca to send paper orders.")
+        return
+    if not _broker_is_connected():
+        st.caption("Connect Alpaca first.")
+        return
+
+    c1, c2, c3 = st.columns([1.2, 1, 1])
+    with c1:
+        ticker = st.text_input("Ticker", value="AAPL", key="room3_order_ticker")
+    with c2:
+        side = st.selectbox("Side", options=["buy", "sell"], key="room3_order_side")
+    with c3:
+        qty = st.number_input(
+            "Shares",
+            min_value=1.0,
+            value=1.0,
+            step=1.0,
+            key="room3_order_qty",
+        )
+
+    b1, b2, _ = st.columns([1, 1, 2])
+    with b1:
+        send = st.button("Send market order", type="primary", key="room3_order_send", use_container_width=True)
+    with b2:
+        if st.button("Refresh account", key="room3_order_refresh", use_container_width=True):
+            synced = _sync_alpaca_account_into_session(paper=True)
+            if synced.get("ok"):
+                st.success(f"Refreshed · equity ${float(synced.get('equity') or 0):,.2f}")
+            else:
+                st.error(synced.get("error") or "Refresh failed")
+            st.rerun()
+
+    if send:
+        result = room3_alpaca.place_market_order(
+            ticker,
+            side,
+            qty,
+            paper=True,
+        )
+        if result.get("ok"):
+            _log_alpaca_order_fill(result)
+            _sync_alpaca_account_into_session(paper=True)
+            fill = result.get("filled_avg_price")
+            fill_txt = f" @ ${float(fill):.2f}" if fill not in (None, "") else ""
+            st.success(
+                f"Order accepted · {str(side).upper()} {qty:g} {str(ticker).upper()}"
+                f"{fill_txt} · status {result.get('status')}"
+            )
+            st.rerun()
+        else:
+            st.error(result.get("error") or "Order failed")
+
+
 def _render_trading_workspace(mode: str) -> None:
     frame_open = False
     if mode == ROOM3_MODE_PAPER:
@@ -2266,6 +2377,7 @@ def _render_trading_workspace(mode: str) -> None:
             st.markdown("</div>", unsafe_allow_html=True)
         return
     _render_live_dashboard(mode)
+    _render_paper_order_ticket(mode)
     left, right = st.columns([1, 1])
     with left:
         _render_open_positions()
