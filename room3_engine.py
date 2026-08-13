@@ -14,6 +14,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import room3_alpaca
+import room3_bridge
 
 ET = ZoneInfo("America/New_York")
 
@@ -55,28 +56,8 @@ def session_label(window: str) -> str:
 
 
 def matrix_handshake(session_state: Any) -> dict[str, Any]:
-    """Light read of Room 2 / matrix RAM already in Streamlit session — no Room 1/2 imports."""
-    layouts = list(session_state.get("layout_master_matrix_index") or [])
-    deploys = list(session_state.get("room2_deploy_registry") or [])
-    patterns = int(session_state.get("matrix_active_pattern_count") or 0)
-    saves = int(session_state.get("matrix_active_save_count") or 0)
-    weather = session_state.get("market_weather_snapshot") or {}
-    weather_name = ""
-    if isinstance(weather, dict):
-        weather_name = str(
-            weather.get("label")
-            or weather.get("regime")
-            or weather.get("name")
-            or ""
-        ).strip()
-    return {
-        "layout_count": len(layouts),
-        "deploy_count": len(deploys),
-        "pattern_count": patterns,
-        "save_count": saves,
-        "weather": weather_name or "—",
-        "ready": bool(layouts or deploys or patterns or saves),
-    }
+    """Delegate to room3_bridge — only approved Room 2 keys, read-only."""
+    return room3_bridge.matrix_snapshot(session_state)
 
 
 def deployed_notional(open_positions: list[dict] | None) -> float:

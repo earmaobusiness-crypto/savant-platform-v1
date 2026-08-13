@@ -21,6 +21,7 @@ import streamlit as st
 import room3_alpaca
 import room3_engine
 import room3_ibkr
+import room3_watcher
 
 ROOM3_MODE_PAPER = "paper"
 ROOM3_MODE_LIVE = "live"
@@ -246,6 +247,10 @@ def init_room3_session_state() -> None:
         st.session_state.room3_auto_event_log = []
     if "room3_broker_truth" not in st.session_state:
         st.session_state.room3_broker_truth = False
+    if "room3_watch_book" not in st.session_state:
+        st.session_state.room3_watch_book = room3_watcher.empty_book()
+    if "room3_filter_universe" not in st.session_state:
+        st.session_state.room3_filter_universe = []
 
 
 def _inject_room3_css() -> None:
@@ -912,8 +917,13 @@ def _maybe_roll_trading_session() -> None:
     st.session_state.room3_operator_reviews = []
     st.session_state.room3_strategy_feedback = {}
     st.session_state.room3_decay_alerts = []
+    # Eyes: drop unused TF maps that scanned all day with no trade
+    st.session_state.room3_watch_book = room3_watcher.purge_untouched_maps(
+        st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
+    )
+    st.session_state.room3_filter_universe = []
     log = list(st.session_state.room3_matrix_sync_log or [])
-    log.append(f"Session rolled · new trading day {key} (4 AM ET)")
+    log.append(f"Session rolled · new trading day {key} (4 AM ET) · watch maps purged")
     st.session_state.room3_matrix_sync_log = log[-12:]
 
 
@@ -2538,9 +2548,31 @@ def _render_execution_posture(mode: str) -> None:
                 )
 
 
+def ingest_filter_universe(tickers: list[str] | None) -> None:
+    """
+    Public hook for TradingView / session filters.
+    Call this when a filter publishes names currently inside it.
+    """
+    init_room3_session_state()
+    names = [str(t).strip().upper() for t in (tickers or []) if str(t).strip()]
+    st.session_state.room3_filter_universe = names[: room3_watcher.MAX_NAMES]
+    st.session_state.room3_watch_book = room3_watcher.set_filter_universe(
+        st.session_state.get("room3_watch_book") or room3_watcher.empty_book(),
+        st.session_state.room3_filter_universe,
+    )
+
+
+def _session_scan_allowed() -> bool:
+    window = room3_engine.detect_session_window()
+    if window == room3_engine.SESSION_CLOSED:
+        return False
+    allowed = set(st.session_state.get("room3_allowed_sessions") or [])
+    return window in allowed
+
+
 @st.fragment(run_every=timedelta(seconds=30))
 def _room3_heartbeat_fragment() -> None:
-    """Unattended pulse — broker truth sync while Room 3 is open."""
+    """Unattended pulse — broker truth + watcher eyes."""
     if not _broker_is_connected():
         st.caption("Heartbeat idle · broker disconnected")
         return
@@ -2548,15 +2580,86 @@ def _room3_heartbeat_fragment() -> None:
     if str(st.session_state.get("room3_broker") or "") == "alpaca":
         paper = mode != ROOM3_MODE_LIVE
         _sync_alpaca_account_into_session(paper=paper)
+
+    # Keep book synced to latest filter feed
+    st.session_state.room3_watch_book = room3_watcher.set_filter_universe(
+        st.session_state.get("room3_watch_book") or room3_watcher.empty_book(),
+        list(st.session_state.get("room3_filter_universe") or []),
+    )
+    book, signals = room3_watcher.tick_watcher(
+        st.session_state.room3_watch_book,
+        session_state=st.session_state,
+        session_allowed=_session_scan_allowed(),
+        engine_armed=bool(st.session_state.get("room3_engine_armed")),
+    )
+    st.session_state.room3_watch_book = book
+
+    for sig in signals:
+        result = execute_matrix_signal(sig)
+        # Mark TF line if fill ok
+        if result.get("ok"):
+            key = room3_watcher.line_key(
+                str(sig.get("symbol") or ""),
+                str(sig.get("timeframe") or "1m"),
+            )
+            line = (st.session_state.room3_watch_book.get("lines") or {}).get(key)
+            if line:
+                if str(sig.get("intent")) == "entry":
+                    line["state"] = "in"
+                    line["trades_today"] = int(line.get("trades_today") or 0) + 1
+                elif str(sig.get("intent")) == "exit":
+                    line["state"] = "watching"
+                    line["trades_today"] = int(line.get("trades_today") or 0) + 1
+
     window = room3_engine.detect_session_window()
     gates = _current_gates("entry")
     sync_t = st.session_state.get("room3_last_broker_sync") or "—"
+    note = str(book.get("last_note") or "")
     st.caption(
         f"Heartbeat · {datetime.now(ET).strftime('%H:%M:%S ET')} · "
         f"{room3_engine.session_label(window)} · "
         f"broker sync {sync_t} · "
-        f"gates={'OPEN' if gates.get('ok') else 'CLOSED'}"
+        f"gates={'OPEN' if gates.get('ok') else 'CLOSED'} · "
+        f"{note}"
     )
+
+
+def _render_watch_book_panel() -> None:
+    st.markdown("### Eyes · watch book")
+    book = st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
+    if book.get("awaiting_filters"):
+        st.info(
+            "Watcher is built and waiting. Plug TradingView session filters next — "
+            "they call `ingest_filter_universe([...tickers...])`. "
+            "Each name gets **1m + 5m + 15m** maps (lean / medium / rich). "
+            "Heartbeat saves slices; EOD deletes maps with no trade."
+        )
+    else:
+        st.caption(
+            f"Universe: {', '.join(book.get('universe') or [])} · "
+            f"last tick {book.get('last_tick') or '—'} · ticks {book.get('ticks') or 0}"
+        )
+    rows = room3_watcher.book_status_rows(book)
+    if rows:
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No TF maps open yet.")
+
+    with st.expander("Filter feed (temporary until TradingView is wired)", expanded=False):
+        st.caption("Paste tickers to simulate a filter hit — remove when real filters connect.")
+        raw = st.text_input(
+            "Tickers",
+            value=",".join(st.session_state.get("room3_filter_universe") or []),
+            key="room3_filter_sim_input",
+            placeholder="AAPL, NVDA, MSFT",
+        )
+        if st.button("Apply filter universe", key="room3_filter_sim_apply"):
+            names = [p.strip().upper() for p in raw.split(",") if p.strip()]
+            ingest_filter_universe(names)
+            st.rerun()
+        if st.button("Clear filter universe", key="room3_filter_sim_clear"):
+            ingest_filter_universe([])
+            st.rerun()
 
 
 def _render_trading_workspace(mode: str) -> None:
@@ -2576,6 +2679,7 @@ def _render_trading_workspace(mode: str) -> None:
         return
     _render_live_dashboard(mode)
     _render_execution_posture(mode)
+    _render_watch_book_panel()
     _room3_heartbeat_fragment()
     left, right = st.columns([1, 1])
     with left:
