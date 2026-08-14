@@ -288,17 +288,29 @@ def passes_structure_rules(
     *,
     now_et: datetime | None = None,
 ) -> bool:
-    """Stage 2 — market cap ceiling + volume vs float."""
-    if not passes_market_cap(share_stats.get("market_cap"), rules):
+    """Stage 2 — market cap ceiling + volume vs float.
+
+    If Yahoo/float data is missing, keep the stage-1 survivor (don't zero the belt
+    on missing metadata). Hard-reject only when data is present and fails.
+    """
+    mcap = share_stats.get("market_cap")
+    fl = share_stats.get("float_shares")
+    has_mcap = mcap is not None and float(mcap) > 0
+    has_float = fl is not None and float(fl) > 0
+
+    if has_mcap and not passes_market_cap(mcap, rules):
         return False
     if not rules.get("require_volume_vs_float", True):
         return True
-    return passes_volume_vs_float(
-        metrics.get("volume_shares") or 0,
-        share_stats.get("float_shares"),
-        now_et=now_et,
-        rules=rules,
-    )
+    if has_float:
+        return passes_volume_vs_float(
+            metrics.get("volume_shares") or 0,
+            fl,
+            now_et=now_et,
+            rules=rules,
+        )
+    # Float missing — allow if mcap already checked or both unknown
+    return True
 
 
 def scan_universe(
@@ -370,12 +382,12 @@ def scan_universe(
     passed: list[tuple[str, float]] = []
     structure_rejected = 0
     if stage1:
-        # Only float/cap-enrich the strongest dollar-volume survivors.
-        stage1.sort(key=lambda x: x[1].get("dollar_volume") or 0.0, reverse=True)
-        enrich = stage1[: max(int(max_pass) * 4, 80)]
+        # Structure filters (≤$1B cap, volume vs float) must run on ALL stage-1
+        # survivors. Ranking by dollar volume first only enriches mega-caps and
+        # can zero out the belt.
         stats_by_sym: dict[str, dict[str, float | None]] = {}
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            futures = {pool.submit(fetch_share_stats, sym): sym for sym, _ in enrich}
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            futures = {pool.submit(fetch_share_stats, sym): sym for sym, _ in stage1}
             for fut in as_completed(futures):
                 sym = futures[fut]
                 try:
@@ -383,7 +395,7 @@ def scan_universe(
                 except Exception:
                     stats_by_sym[sym] = {"float_shares": None, "market_cap": None}
 
-        for sym, m in enrich:
+        for sym, m in stage1:
             stats = stats_by_sym.get(sym) or {"float_shares": None, "market_cap": None}
             if passes_structure_rules(m, stats, rules, now_et=started):
                 passed.append((sym, m["dollar_volume"]))

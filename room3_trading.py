@@ -2886,6 +2886,14 @@ def _render_rth_filter_attach() -> None:
         st.success(f"{len(names)} names on the belt: " + ", ".join(names))
     elif last.get("error"):
         st.warning(str(last.get("error")))
+    elif last.get("scanned") or last.get("stage1_passed") is not None:
+        st.warning(
+            f"Screener finished — **0 names** passed full filters "
+            f"(stage1 {last.get('stage1_passed', 0)} · "
+            f"float/mcap cut {last.get('structure_rejected', 0)} · "
+            f"scanned {last.get('scanned', 0)}). "
+            f"Rules may be too tight for this tape, or structure data failed."
+        )
     else:
         st.info("No screener pass yet — connect Alpaca and run once, or wait for the ~18 min timer.")
 
@@ -2911,7 +2919,15 @@ def _render_rth_filter_attach() -> None:
             if result.get("tickers"):
                 st.success(f"Found {len(result['tickers'])} names.")
             else:
-                st.warning(result.get("error") or "No names passed — tune rules to match your TV screener.")
+                st.warning(
+                    result.get("error")
+                    or (
+                        f"No names passed — stage1 {result.get('stage1_passed', 0)} · "
+                        f"float/mcap cut {result.get('structure_rejected', 0)} · "
+                        f"scanned {result.get('scanned', 0)}. "
+                        "Tune filter rules if this stays at 0."
+                    )
+                )
             st.rerun()
 
     with st.expander("Filter rules (tune to match TradingView)", expanded=False):
