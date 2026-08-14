@@ -19,8 +19,10 @@ import room3_alpaca
 ET = ZoneInfo("America/New_York")
 
 SCAN_INTERVAL_MINUTES = 18
-BATCH_SIZE = 80
-UNIVERSE_CAP = 3500  # safety cap on symbols per pass
+BATCH_SIZE = 100
+UNIVERSE_CAP = 2500  # major-exchange tradables per pass
+YF_PERIOD = "2mo"  # enough for 30d hist vol + HMA9
+YF_BATCH_WORKERS = 6  # parallel Yahoo batches (full scan ~tens of sec, not minutes)
 
 DEFAULT_RULES: dict[str, Any] = {
     "min_volatility_pct": 30.0,  # 30-day hist vol annualized
@@ -318,46 +320,62 @@ def scan_universe(
     scanned = 0
     errors = 0
     syms = [str(s).upper() for s in symbols if str(s).strip()]
-    for i in range(0, len(syms), BATCH_SIZE):
-        batch = syms[i : i + BATCH_SIZE]
-        tickers_str = " ".join(batch)
-        try:
-            data = yf.download(
-                tickers_str,
-                period="3mo",
-                interval="1d",
-                group_by="ticker",
-                auto_adjust=True,
-                progress=False,
-                threads=True,
-            )
-        except Exception:
-            errors += len(batch)
-            continue
-        if data is None or getattr(data, "empty", True):
-            errors += len(batch)
-            continue
-        for sym in batch:
-            scanned += 1
+    batches = [syms[i : i + BATCH_SIZE] for i in range(0, len(syms), BATCH_SIZE)]
+
+    def _download_batch(batch: list[str]):
+        data = yf.download(
+            " ".join(batch),
+            period=YF_PERIOD,
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+        )
+        return batch, data
+
+    with ThreadPoolExecutor(max_workers=YF_BATCH_WORKERS) as pool:
+        futures = [pool.submit(_download_batch, b) for b in batches]
+        for fut in as_completed(futures):
             try:
-                if len(batch) == 1:
-                    hist = data
-                else:
-                    hist = data[sym] if sym in data.columns.get_level_values(0) else None
-                m = _metrics_from_history(hist)
-                if not m:
-                    continue
-                if passes_rules(m, rules):
-                    stage1.append((sym, m))
+                batch, data = fut.result()
             except Exception:
-                errors += 1
+                errors += BATCH_SIZE
+                continue
+            if data is None or getattr(data, "empty", True):
+                errors += len(batch)
+                continue
+            for sym in batch:
+                scanned += 1
+                try:
+                    if len(batch) == 1:
+                        hist = data
+                    else:
+                        try:
+                            hist = (
+                                data[sym]
+                                if sym in data.columns.get_level_values(0)
+                                else None
+                            )
+                        except Exception:
+                            hist = None
+                    m = _metrics_from_history(hist)
+                    if not m:
+                        continue
+                    if passes_rules(m, rules):
+                        stage1.append((sym, m))
+                except Exception:
+                    errors += 1
 
     passed: list[tuple[str, float]] = []
     structure_rejected = 0
     if stage1:
+        # Only float/cap-enrich the strongest dollar-volume survivors.
+        stage1.sort(key=lambda x: x[1].get("dollar_volume") or 0.0, reverse=True)
+        enrich = stage1[: max(int(max_pass) * 4, 80)]
         stats_by_sym: dict[str, dict[str, float | None]] = {}
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(fetch_share_stats, sym): sym for sym, _ in stage1}
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(fetch_share_stats, sym): sym for sym, _ in enrich}
             for fut in as_completed(futures):
                 sym = futures[fut]
                 try:
@@ -365,7 +383,7 @@ def scan_universe(
                 except Exception:
                     stats_by_sym[sym] = {"float_shares": None, "market_cap": None}
 
-        for sym, m in stage1:
+        for sym, m in enrich:
             stats = stats_by_sym.get(sym) or {"float_shares": None, "market_cap": None}
             if passes_structure_rules(m, stats, rules, now_et=started):
                 passed.append((sym, m["dollar_volume"]))

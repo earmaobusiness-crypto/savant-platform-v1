@@ -2875,8 +2875,9 @@ def _render_watch_book_panel() -> None:
 def _render_rth_filter_attach() -> None:
     st.markdown("#### Filter · Market hours (built-in screener)")
     st.caption(
-        "Job 1: scans NASDAQ + NYSE every ~18 min (vol ≥ 30%, price > HMA9, "
-        "price×vol & price×avg-vol ≥ $10M, market cap ≤ $1B, volume vs float). "
+        "Job 1: scans NASDAQ + NYSE (~every 18 min in RTH; usually under ~1 min after speedup). "
+        "Filters: vol ≥ 30%, price > HMA9, price×vol & price×avg-vol ≥ $10M, "
+        "market cap ≤ $1B, volume vs float. "
         "Job 2: every survivor gets 1m / 5m / 15m maps + matrix scan + auto path when armed."
     )
     last = st.session_state.get("room3_screener_last") or {}
