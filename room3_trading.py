@@ -2954,9 +2954,10 @@ def _render_rth_filter_attach() -> None:
             key="room3_rule_vol",
         )
         rules["require_price_above_hma9"] = st.checkbox(
-            "Price above Hull MA 9",
+            "Price above Hull MA 9 (1-minute)",
             value=bool(rules.get("require_price_above_hma9", True)),
             key="room3_rule_hma",
+            help="Uses 1m HMA9 (day-trade), not daily — daily HMA was cutting runners like ONFO.",
         )
         rules["min_dollar_volume"] = st.number_input(
             "Min price × volume (today $)",
