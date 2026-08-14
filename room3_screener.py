@@ -20,9 +20,29 @@ ET = ZoneInfo("America/New_York")
 
 SCAN_INTERVAL_MINUTES = 18
 BATCH_SIZE = 100
-UNIVERSE_CAP = 2500  # major-exchange tradables per pass
+UNIVERSE_CAP = 8000  # full major-exchange common-stock universe (ETFs stripped)
 YF_PERIOD = "2mo"  # enough for 30d hist vol + HMA9
 YF_BATCH_WORKERS = 6  # parallel Yahoo batches (full scan ~tens of sec, not minutes)
+
+# Alpaca lists leveraged single-stock products as us_equity — strip by name.
+_ETF_NAME_MARKERS = (
+    " ETF",
+    "ETN",
+    "2X",
+    "3X",
+    "1X",
+    " BULL ",
+    " BEAR ",
+    "DIREXION",
+    "GRANITESHARES",
+    "PROSHARES",
+    "DEFIANCE",
+    "LEVERAGE SHARES",
+    "ULTRAPRO",
+    "ULTRASHORT",
+    "DAILY TARGET",
+    "INVERSE",
+)
 
 DEFAULT_RULES: dict[str, Any] = {
     "min_volatility_pct": 30.0,  # 30-day hist vol annualized
@@ -33,7 +53,8 @@ DEFAULT_RULES: dict[str, Any] = {
     "require_volume_vs_float": True,
     "high_float_shares": 90_000_000.0,  # mega-float: time-of-day ratio instead of vol > float
     "low_float_shares": 2_000_000.0,  # tiny float: stricter headroom above float
-    "min_price": 1.0,
+    "min_price": 0.01,  # match TV-style sub-$1 names (was $1 and killed them)
+    "exclude_etfs": True,
     "exchanges": ("NASDAQ", "NYSE", "AMEX"),
 }
 
@@ -105,11 +126,18 @@ def _asset_field_str(value: Any) -> str:
     return str(value).strip()
 
 
+def _looks_like_etf_name(name: str) -> bool:
+    n = f" {str(name or '').upper()} "
+    if "ETF" in n or " ETN" in n:
+        return True
+    return any(m in n for m in _ETF_NAME_MARKERS)
+
+
 def fetch_nyse_nasdaq_universe(
     *, paper: bool = True, cap: int = UNIVERSE_CAP
 ) -> tuple[list[str], str]:
     """
-    Alpaca tradable US equities on major exchanges.
+    Alpaca tradable US equities on major exchanges (ETFs stripped by name).
     Returns (symbols, error). error is empty on success.
     """
     try:
@@ -129,12 +157,17 @@ def fetch_nyse_nasdaq_universe(
     allowed = {str(x).upper() for x in DEFAULT_RULES.get("exchanges") or ("NASDAQ", "NYSE")}
     out: list[str] = []
     seen: set[str] = set()
+    etf_skipped = 0
     for a in assets:
         try:
             status = _asset_field_str(getattr(a, "status", "")).lower()
             if status and status != "active":
                 continue
             if not bool(getattr(a, "tradable", False)):
+                continue
+            name = str(getattr(a, "name", "") or "")
+            if _looks_like_etf_name(name):
+                etf_skipped += 1
                 continue
             sym = _asset_field_str(getattr(a, "symbol", "")).upper()
             if not sym or sym in seen or "." in sym:
@@ -151,7 +184,8 @@ def fetch_nyse_nasdaq_universe(
     if not out:
         return [], (
             f"Alpaca returned {len(assets)} assets but 0 matched "
-            f"active/tradable on {sorted(allowed)}"
+            f"active/tradable stocks on {sorted(allowed)} "
+            f"(skipped {etf_skipped} ETF-like names)"
         )
     return sorted(out), ""
 
@@ -263,12 +297,16 @@ def passes_market_cap(market_cap: float | None, rules: dict[str, Any] | None = N
 
 
 def fetch_share_stats(sym: str) -> dict[str, float | None]:
-    """Float + market cap from yfinance (stage-2 only — called on survivors)."""
+    """Float + market cap + quote type (stage-2 only — called on survivors)."""
     import yfinance as yf
 
     try:
         info = yf.Ticker(sym).info or {}
-        raw_float = info.get("floatShares") or info.get("sharesOutstanding")
+        quote_type = str(info.get("quoteType") or info.get("quote_type") or "").upper()
+        # Prefer real float only — sharesOutstanding can be absurd vs tiny mcap.
+        raw_float = info.get("floatShares")
+        if raw_float is None:
+            raw_float = info.get("sharesOutstanding")
         raw_cap = info.get("marketCap")
         float_shares = float(raw_float) if raw_float else None
         market_cap = float(raw_cap) if raw_cap else None
@@ -276,9 +314,21 @@ def fetch_share_stats(sym: str) -> dict[str, float | None]:
             float_shares = None
         if market_cap is not None and market_cap <= 0:
             market_cap = None
-        return {"float_shares": float_shares, "market_cap": market_cap}
+        # Sanity: float that implies ridiculous share count vs mcap → drop float
+        if (
+            float_shares
+            and market_cap
+            and float_shares > 0
+            and market_cap / float_shares < 0.0001
+        ):
+            float_shares = None
+        return {
+            "float_shares": float_shares,
+            "market_cap": market_cap,
+            "quote_type": quote_type or None,  # type: ignore[dict-item]
+        }
     except Exception:
-        return {"float_shares": None, "market_cap": None}
+        return {"float_shares": None, "market_cap": None, "quote_type": None}
 
 
 def passes_structure_rules(
@@ -288,10 +338,11 @@ def passes_structure_rules(
     *,
     now_et: datetime | None = None,
 ) -> bool:
-    """Stage 2 — market cap ceiling + volume vs float.
-
-    Missing float/mcap = fail (same spirit as TradingView: can't verify → out).
-    """
+    """Stage 2 — equities only, market cap ceiling + volume vs float."""
+    if rules.get("exclude_etfs", True):
+        qt = str(share_stats.get("quote_type") or "").upper()
+        if qt in {"ETF", "ETN", "MUTUALFUND", "FUND"}:
+            return False
     if not passes_market_cap(share_stats.get("market_cap"), rules):
         return False
     if not rules.get("require_volume_vs_float", True):
@@ -384,10 +435,18 @@ def scan_universe(
                 try:
                     stats_by_sym[sym] = fut.result()
                 except Exception:
-                    stats_by_sym[sym] = {"float_shares": None, "market_cap": None}
+                    stats_by_sym[sym] = {
+                        "float_shares": None,
+                        "market_cap": None,
+                        "quote_type": None,
+                    }
 
         for sym, m in stage1:
-            stats = stats_by_sym.get(sym) or {"float_shares": None, "market_cap": None}
+            stats = stats_by_sym.get(sym) or {
+                "float_shares": None,
+                "market_cap": None,
+                "quote_type": None,
+            }
             if passes_structure_rules(m, stats, rules, now_et=started):
                 passed.append((sym, m["dollar_volume"]))
             else:

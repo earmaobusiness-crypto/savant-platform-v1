@@ -2746,7 +2746,21 @@ def _run_screener_pass() -> dict:
     """Job 1 — light NASDAQ/NYSE scan; survivors feed the watch book."""
     mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
     paper = mode != ROOM3_MODE_LIVE
-    rules = dict(st.session_state.get("room3_filter_rules") or room3_screener.default_rules())
+    saved = dict(st.session_state.get("room3_filter_rules") or {})
+    rules = {**room3_screener.default_rules(), **saved}
+    # Always strip leveraged ETFs unless operator explicitly disabled it.
+    rules["exclude_etfs"] = bool(saved.get("exclude_etfs", True))
+    # Old default was $1 and killed sub-$1 TV names — migrate once.
+    if float(saved.get("min_price") or 0) >= 1.0 and not st.session_state.get(
+        "room3_min_price_tv_aligned"
+    ):
+        rules["min_price"] = 0.01
+        st.session_state.room3_min_price_tv_aligned = True
+        st.session_state.room3_filter_rules = {
+            **saved,
+            "min_price": 0.01,
+            "exclude_etfs": True,
+        }
     result = room3_screener.run_rth_scan(
         paper=paper,
         rules=rules,
@@ -2965,6 +2979,20 @@ def _render_rth_filter_attach() -> None:
             step=100_000_000.0,
             key="room3_rule_mcap",
             help="Exclude names above this market cap (default $1B).",
+        )
+        rules["min_price"] = st.number_input(
+            "Min price ($)",
+            value=float(rules.get("min_price") or 0.01),
+            min_value=0.0,
+            step=0.01,
+            key="room3_rule_min_px",
+            help="Use 0.01 to keep sub-$1 names (TradingView-style). Old default $1 hid them.",
+        )
+        rules["exclude_etfs"] = st.checkbox(
+            "Exclude ETFs / leveraged products",
+            value=bool(rules.get("exclude_etfs", True)),
+            key="room3_rule_no_etf",
+            help="Drops SQQQ, TSLL, NVDL, 2x/3x single-stock funds, etc.",
         )
         rules["require_volume_vs_float"] = st.checkbox(
             "Volume vs float filter",
