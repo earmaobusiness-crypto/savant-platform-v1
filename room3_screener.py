@@ -220,21 +220,117 @@ def fetch_nyse_nasdaq_universe(
     return out, ""
 
 
+def _flatten_ohlcv(hist) -> Any | None:
+    """
+    Normalize Yahoo frames to simple Close/Volume columns.
+    yfinance flips between flat columns and MultiIndex (Ticker, Price) /
+    (Price, Ticker) depending on version and batch size.
+    """
+    try:
+        if hist is None or getattr(hist, "empty", True):
+            return None
+        cols = hist.columns
+        if getattr(cols, "nlevels", 1) > 1:
+            # Prefer selecting the Price level so we get Open/High/Low/Close/Volume
+            names = [str(n).lower() if n is not None else "" for n in (cols.names or [])]
+            frame = hist
+            if "price" in names:
+                price_lvl = names.index("price")
+                try:
+                    frame = hist.droplevel(0 if price_lvl else 1, axis=1)
+                except Exception:
+                    # Fall back: take first ticker slice if present
+                    try:
+                        top = cols.get_level_values(0)[0]
+                        frame = hist[top]
+                    except Exception:
+                        return None
+            else:
+                # No named levels — try common patterns
+                try:
+                    lvl0 = set(map(str, cols.get_level_values(0)))
+                    if {"Open", "High", "Low", "Close", "Volume"} & lvl0:
+                        # (Price, Ticker) → pick first ticker under Close etc.
+                        tickers = list(dict.fromkeys(cols.get_level_values(1)))
+                        if not tickers:
+                            return None
+                        frame = hist.xs(tickers[0], axis=1, level=1)
+                    else:
+                        top = cols.get_level_values(0)[0]
+                        frame = hist[top]
+                except Exception:
+                    return None
+            hist = frame
+        # After MultiIndex collapse, columns should be flat strings
+        have = {str(c) for c in hist.columns}
+        if "Close" not in have or "Volume" not in have:
+            # Sometimes still tuples
+            try:
+                hist.columns = [
+                    c[0] if isinstance(c, tuple) else c for c in hist.columns
+                ]
+            except Exception:
+                return None
+            have = {str(c) for c in hist.columns}
+        if "Close" not in have or "Volume" not in have:
+            return None
+        return hist
+    except Exception:
+        return None
+
+
+def _series_floats(frame, col: str) -> list[float]:
+    try:
+        raw = frame[col]
+        if hasattr(raw, "columns"):
+            # Still a DataFrame — take first column
+            raw = raw.iloc[:, 0]
+        out: list[float] = []
+        for x in raw.dropna().tolist():
+            try:
+                if hasattr(x, "iloc"):
+                    x = x.iloc[0]
+                v = float(x)
+            except (TypeError, ValueError):
+                continue
+            if v == v:  # not NaN
+                out.append(v)
+        return out
+    except Exception:
+        return []
+
+
+def _last_positive_volume_idx(vols: list[float]) -> int | None:
+    for i in range(len(vols) - 1, -1, -1):
+        if vols[i] > 0:
+            return i
+    return None
+
+
 def _metrics_from_history(hist) -> dict[str, float] | None:
     try:
-        if hist is None or hist.empty:
+        hist = _flatten_ohlcv(hist)
+        if hist is None:
             return None
-        if "Close" not in hist.columns or "Volume" not in hist.columns:
-            return None
-        closes_raw = [float(x) for x in hist["Close"].dropna().tolist()]
-        vols = [float(x) for x in hist["Volume"].dropna().tolist()]
+        closes_raw = _series_floats(hist, "Close")
+        vols = _series_floats(hist, "Volume")
         if len(closes_raw) < 12 or len(vols) < 10:
             return None
+        # Align lengths if Yahoo drops a volume cell
+        n = min(len(closes_raw), len(vols))
+        closes_raw = closes_raw[-n:]
+        vols = vols[-n:]
         # Split-adjust closes for HMA / hist-vol (TV does this; raw Yahoo often doesn't)
         closes = _adjust_close_splits(closes_raw)
         close = closes[-1]
-        vol_today = vols[-1]
-        avg_vol_10 = sum(vols[-10:]) / min(10, len(vols[-10:]))
+        # After hours Yahoo sometimes posts today's volume as 0 until settled —
+        # walk back to the last positive-volume session print.
+        v_idx = _last_positive_volume_idx(vols)
+        if v_idx is None:
+            return None
+        vol_today = vols[v_idx]
+        vol_window = [v for v in vols[-10:] if v > 0] or vols[-10:]
+        avg_vol_10 = sum(vol_window) / max(1, len(vol_window))
         hma = hull_ma9(closes)
         vol_pct = historical_vol_pct(closes)
         if close <= 0:
