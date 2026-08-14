@@ -1,0 +1,3 @@
+# Edge function for TradingView webhooks — JWT off so TV can POST with secret in JSON body.
+[functions.tv-screener]
+verify_jwt = false

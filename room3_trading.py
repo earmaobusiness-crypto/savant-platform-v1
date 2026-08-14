@@ -20,6 +20,7 @@ import streamlit as st
 
 import room3_alpaca
 import room3_engine
+import room3_filters
 import room3_ibkr
 import room3_watcher
 
@@ -234,11 +235,8 @@ def init_room3_session_state() -> None:
     if "room3_pause_entries" not in st.session_state:
         st.session_state.room3_pause_entries = False
     if "room3_allowed_sessions" not in st.session_state:
-        st.session_state.room3_allowed_sessions = [
-            room3_engine.SESSION_PRE,
-            room3_engine.SESSION_RTH,
-            room3_engine.SESSION_POST,
-        ]
+        # Start with RTH only — pre/post filters attach later
+        st.session_state.room3_allowed_sessions = [room3_engine.SESSION_RTH]
     if "room3_broker_equity" not in st.session_state:
         st.session_state.room3_broker_equity = 0.0
     if "room3_last_broker_sync" not in st.session_state:
@@ -251,6 +249,8 @@ def init_room3_session_state() -> None:
         st.session_state.room3_watch_book = room3_watcher.empty_book()
     if "room3_filter_universe" not in st.session_state:
         st.session_state.room3_filter_universe = []
+    if "room3_filter_slots" not in st.session_state:
+        st.session_state.room3_filter_slots = room3_filters.empty_slots()
     if "room3_broker_day_pl" not in st.session_state:
         st.session_state.room3_broker_day_pl = None
     if "room3_broker_day_pl_pct" not in st.session_state:
@@ -2675,8 +2675,8 @@ def _render_execution_posture(mode: str) -> None:
 
 def ingest_filter_universe(tickers: list[str] | None) -> None:
     """
-    Public hook for TradingView / session filters.
-    Call this when a filter publishes names currently inside it.
+    Public hook — names currently inside the *active* filter.
+    Prefer ingest_filter_slot() so pre/RTH/post stay separate.
     """
     init_room3_session_state()
     names = [str(t).strip().upper() for t in (tickers or []) if str(t).strip()]
@@ -2687,12 +2687,50 @@ def ingest_filter_universe(tickers: list[str] | None) -> None:
     )
 
 
+def ingest_filter_slot(slot: str, tickers: list[str] | None) -> None:
+    """Save a named session screener (RTH first). Active watch book follows the clock."""
+    init_room3_session_state()
+    st.session_state.room3_filter_slots = room3_filters.set_slot(
+        st.session_state.get("room3_filter_slots"),
+        slot,
+        list(tickers or []),
+    )
+    _apply_active_filter_universe()
+
+
+def _apply_active_filter_universe() -> list[str]:
+    window = room3_engine.detect_session_window()
+    live = room3_filters.fetch_live_hits(session=window)
+    st.session_state.room3_filter_live_meta = live
+    names = room3_filters.active_universe(
+        st.session_state.get("room3_filter_slots"),
+        window=window,
+        allowed=list(st.session_state.get("room3_allowed_sessions") or []),
+        live=list(live.get("tickers") or []),
+    )
+    ingest_filter_universe(names)
+    return names
+
+
 def _session_scan_allowed() -> bool:
     window = room3_engine.detect_session_window()
     if window == room3_engine.SESSION_CLOSED:
         return False
     allowed = set(st.session_state.get("room3_allowed_sessions") or [])
     return window in allowed
+
+
+@st.fragment(run_every=timedelta(seconds=8))
+def _room3_filter_inbox_fragment() -> None:
+    """Fast poll — new TradingView names, not full chart maps."""
+    names = _apply_active_filter_universe()
+    live = st.session_state.get("room3_filter_live_meta") or {}
+    err = str(live.get("error") or "")
+    st.caption(
+        f"Filter inbox · {datetime.now(ET).strftime('%H:%M:%S ET')} · "
+        f"{len(names)} live name(s)"
+        + (f" · {err}" if err else "")
+    )
 
 
 @st.fragment(run_every=timedelta(seconds=30))
@@ -2706,11 +2744,7 @@ def _room3_heartbeat_fragment() -> None:
         paper = mode != ROOM3_MODE_LIVE
         _sync_alpaca_account_into_session(paper=paper)
 
-    # Keep book synced to latest filter feed
-    st.session_state.room3_watch_book = room3_watcher.set_filter_universe(
-        st.session_state.get("room3_watch_book") or room3_watcher.empty_book(),
-        list(st.session_state.get("room3_filter_universe") or []),
-    )
+    _apply_active_filter_universe()
     book, signals = room3_watcher.tick_watcher(
         st.session_state.room3_watch_book,
         session_state=st.session_state,
@@ -2751,14 +2785,24 @@ def _room3_heartbeat_fragment() -> None:
 
 def _render_watch_book_panel() -> None:
     st.markdown("### Eyes · watch book")
+    _render_rth_filter_attach()
     book = st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
+    window = room3_engine.detect_session_window()
+    slots = st.session_state.get("room3_filter_slots") or room3_filters.empty_slots()
+    rth_saved = list(slots.get(room3_filters.SLOT_RTH) or [])
     if book.get("awaiting_filters"):
-        st.info(
-            "Watcher is built and waiting. Plug TradingView session filters next — "
-            "they call `ingest_filter_universe([...tickers...])`. "
-            "Each name gets **1m + 5m + 15m** maps (lean / medium / rich). "
-            "Heartbeat saves slices; EOD deletes maps with no trade."
-        )
+        if rth_saved and window != room3_engine.SESSION_RTH:
+            st.info(
+                f"Market-hours names are waiting until **Market hours**. "
+                f"Now: {room3_engine.session_label(window)}."
+            )
+        elif not rth_saved and not (st.session_state.get("room3_filter_live_meta") or {}).get("tickers"):
+            st.info(
+                "Waiting for TradingView to push a market-hours hit. "
+                "Each name gets **1m + 5m + 15m** maps. Pre / post later."
+            )
+        else:
+            st.info("Market-hours filter is saved, but this session window is not allowed to watch yet.")
     else:
         st.caption(
             f"Universe: {', '.join(book.get('universe') or [])} · "
@@ -2770,21 +2814,69 @@ def _render_watch_book_panel() -> None:
     else:
         st.caption("No TF maps open yet.")
 
-    with st.expander("Filter feed (temporary until TradingView is wired)", expanded=False):
-        st.caption("Paste tickers to simulate a filter hit — remove when real filters connect.")
-        raw = st.text_input(
-            "Tickers",
-            value=",".join(st.session_state.get("room3_filter_universe") or []),
-            key="room3_filter_sim_input",
-            placeholder="AAPL, NVDA, MSFT",
+
+def _render_rth_filter_attach() -> None:
+    st.markdown("#### Filter · Market hours (live from TradingView)")
+    st.caption(
+        "TradingView will not let this app log in and read your screener table. "
+        "When a name **pops** on your market-hours screener, TradingView **pushes** it here. "
+        "Heartbeat picks it up (~30s) and opens 1m/5m/15m maps. "
+        "Hits stay hot for 90 minutes. Pre/post later."
+    )
+    hook = room3_filters.webhook_url()
+    live = st.session_state.get("room3_filter_live_meta") or {}
+    live_names = list(live.get("tickers") or [])
+    if live_names:
+        st.success("Live RTH names: " + ", ".join(live_names))
+    elif live.get("error"):
+        st.warning(f"Live feed: {live.get('error')}")
+    else:
+        st.info("No live hits in the last 90 minutes — waiting for TradingView to push a ticker.")
+
+    if hook:
+        st.code(hook, language=None)
+    else:
+        st.warning("Supabase URL missing — webhook inbox cannot be shown.")
+
+    st.markdown(
+        """
+1. In Supabase SQL editor run `supabase/migrations/011_room3_screener_hits.sql`.
+2. Deploy the function `tv-screener` and set secret `TV_WEBHOOK_SECRET`.
+3. TradingView (Essential+): on the **market hours** screener, create an **Alert** → Notifications → **Webhook URL** → paste the URL above.
+4. Alert message (JSON):
+"""
+    )
+    st.code(
+        '{"secret":"YOUR_TV_WEBHOOK_SECRET","ticker":"{{ticker}}","session":"rth"}',
+        language="json",
+    )
+    st.caption(
+        "Each time a stock qualifies, TradingView POSTs. Room 3 does not scrape TradingView. "
+        "Auto orders still need the engine armed and a matrix match — this step is the live name feed."
+    )
+
+    with st.expander("Manual backup paste (not the live path)", expanded=False):
+        slots = st.session_state.get("room3_filter_slots") or room3_filters.empty_slots()
+        saved = list(slots.get(room3_filters.SLOT_RTH) or [])
+        if saved:
+            st.caption("Backup names: " + ", ".join(saved))
+        raw = st.text_area(
+            "Paste tickers only if the webhook is down",
+            key="room3_filter_rth_paste",
+            height=100,
+            placeholder="AAPL\nNVDA\nMSFT",
         )
-        if st.button("Apply filter universe", key="room3_filter_sim_apply"):
-            names = [p.strip().upper() for p in raw.split(",") if p.strip()]
-            ingest_filter_universe(names)
-            st.rerun()
-        if st.button("Clear filter universe", key="room3_filter_sim_clear"):
-            ingest_filter_universe([])
-            st.rerun()
+        parsed = room3_filters.parse_screener_paste(raw)
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("Save backup list", key="room3_filter_rth_save"):
+                ingest_filter_slot(room3_filters.SLOT_RTH, parsed["tickers"])
+                st.rerun()
+        with b2:
+            if st.button("Clear backup list", key="room3_filter_rth_clear"):
+                ingest_filter_slot(room3_filters.SLOT_RTH, [])
+                st.session_state.pop("room3_filter_rth_paste", None)
+                st.rerun()
 
 
 def _render_trading_workspace(mode: str) -> None:
@@ -2805,6 +2897,7 @@ def _render_trading_workspace(mode: str) -> None:
     _render_live_dashboard(mode)
     _render_execution_posture(mode)
     _render_watch_book_panel()
+    _room3_filter_inbox_fragment()
     _room3_heartbeat_fragment()
     left, right = st.columns([1, 1])
     with left:

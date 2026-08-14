@@ -5,7 +5,8 @@ One stock in the filter → three maps (1m / 5m / 15m), different data diets.
 Heartbeat appends a slice (not "trade on 30s alone").
 Filter drop → purge map unless sticky (close to repertoire).
 Day end / no trade → delete maps.
-Filter feed plugs in via set_filter_universe() — TradingView filters next.
+Filter feed plugs in via named session slots (RTH first).
+TradingView screener is pasted — no unofficial scrape.
 
 Does NOT import Room 2 modules. Uses room3_bridge snapshot only for repertoire hints.
 """
