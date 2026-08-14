@@ -3072,6 +3072,7 @@ def _render_rth_filter_attach() -> None:
             f"scanned {last.get('scanned', 0)} · "
             f"bars {last.get('hist_ok', '—')} · "
             f"liquid {last.get('prescreen_liquid', '—')} · "
+            f"mcap-skip {last.get('mcap_skipped', '—')} · "
             f"deep {last.get('deep_scanned', '—')} · "
             f"passed {last.get('passed', 0)}{extra} · "
             f"{last.get('elapsed_sec', 0)}s"

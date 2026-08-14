@@ -413,8 +413,9 @@ def passes_market_cap(market_cap: float | None, rules: dict[str, Any] | None = N
     cap_max = float(rules.get("max_market_cap") or 0)
     if cap_max <= 0:
         return True
+    # Unknown / missing mcap (Yahoo gaps) → keep; only reject when known and over the ceiling.
     if market_cap is None or market_cap <= 0:
-        return False
+        return True
     return market_cap <= cap_max
 
 
@@ -454,6 +455,71 @@ def fetch_share_stats(sym: str) -> dict[str, float | None]:
         }
     except Exception:
         return {"float_shares": None, "market_cap": None, "quote_type": None}
+
+
+def _pick_deep_symbols(
+    liquid: list[tuple[str, float]],
+    *,
+    rules: dict[str, Any],
+    cap: int = DEEP_SCAN_CAP,
+) -> tuple[list[str], dict[str, dict[str, float | None]], int]:
+    """
+    Walk liquid names (highest DV first), skip known mega-caps / ETFs, fill deep slots.
+
+    Without this, top-N by dollar volume is almost all >$1B names — then structure
+    rejects them and the belt is empty while real TV-style names never got a deep look.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if cap <= 0:
+        return [], {}, 0
+    max_mcap = float(rules.get("max_market_cap") or 0)
+    exclude_etfs = bool(rules.get("exclude_etfs", True))
+    # No mcap ceiling → old behavior
+    if max_mcap <= 0 and not exclude_etfs:
+        return [s for s, _ in liquid[:cap]], {}, 0
+
+    selected: list[str] = []
+    stats_cache: dict[str, dict[str, float | None]] = {}
+    mcap_skipped = 0
+    wave = 60
+    i = 0
+    while len(selected) < cap and i < len(liquid):
+        chunk = liquid[i : i + wave]
+        i += wave
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            futs = {pool.submit(fetch_share_stats, sym): (sym, score) for sym, score in chunk}
+            kept: list[tuple[str, float]] = []
+            for fut in as_completed(futs):
+                sym, score = futs[fut]
+                try:
+                    stats = fut.result()
+                except Exception:
+                    stats = {
+                        "float_shares": None,
+                        "market_cap": None,
+                        "quote_type": None,
+                    }
+                stats_cache[sym] = stats
+                qt = str(stats.get("quote_type") or "").upper()
+                if exclude_etfs and qt in {"ETF", "ETN", "MUTUALFUND", "FUND"}:
+                    mcap_skipped += 1
+                    continue
+                mcap = stats.get("market_cap")
+                if (
+                    max_mcap > 0
+                    and mcap is not None
+                    and float(mcap) > max_mcap
+                ):
+                    mcap_skipped += 1
+                    continue
+                kept.append((sym, score))
+        kept.sort(key=lambda x: x[1], reverse=True)
+        for sym, _score in kept:
+            if len(selected) >= cap:
+                break
+            selected.append(sym)
+    return selected, stats_cache, mcap_skipped
 
 
 def passes_structure_rules(
@@ -619,7 +685,9 @@ def scan_universe(
                 pass
             liquid.append((sym, score))
     liquid.sort(key=lambda x: x[1], reverse=True)
-    deep_syms = [s for s, _ in liquid[:DEEP_SCAN_CAP]]
+    deep_syms, stats_cache, mcap_skipped = _pick_deep_symbols(
+        liquid, rules=rules, cap=DEEP_SCAN_CAP
+    )
 
     stage1: list[tuple[str, dict[str, float]]] = []
     deep_scanned = 0
@@ -644,19 +712,21 @@ def scan_universe(
     passed: list[tuple[str, float]] = []
     structure_rejected = 0
     if stage1:
-        stats_by_sym: dict[str, dict[str, float | None]] = {}
-        with ThreadPoolExecutor(max_workers=12) as pool:
-            futures = {pool.submit(fetch_share_stats, sym): sym for sym, _ in stage1}
-            for fut in as_completed(futures):
-                sym = futures[fut]
-                try:
-                    stats_by_sym[sym] = fut.result()
-                except Exception:
-                    stats_by_sym[sym] = {
-                        "float_shares": None,
-                        "market_cap": None,
-                        "quote_type": None,
-                    }
+        stats_by_sym: dict[str, dict[str, float | None]] = dict(stats_cache)
+        need = [sym for sym, _ in stage1 if sym not in stats_by_sym]
+        if need:
+            with ThreadPoolExecutor(max_workers=12) as pool:
+                futures = {pool.submit(fetch_share_stats, sym): sym for sym in need}
+                for fut in as_completed(futures):
+                    sym = futures[fut]
+                    try:
+                        stats_by_sym[sym] = fut.result()
+                    except Exception:
+                        stats_by_sym[sym] = {
+                            "float_shares": None,
+                            "market_cap": None,
+                            "quote_type": None,
+                        }
 
         for sym, m in stage1:
             stats = stats_by_sym.get(sym) or {
@@ -677,6 +747,8 @@ def scan_universe(
         note = "Yahoo bars unreadable (column layout) — retry; parser was updated"
     elif not tickers and not liquid and scanned > 0:
         note = "Liquidity prescreen empty — check min dollar volume / Yahoo volume"
+    elif not tickers and stage1 and structure_rejected:
+        note = "Stage1 names failed float/mcap — tune structure rules"
     return {
         "ok": True,
         "tickers": tickers,
@@ -687,6 +759,7 @@ def scan_universe(
         "hist_ok": len(pre_hist),
         "deep_scanned": deep_scanned,
         "prescreen_liquid": len(liquid),
+        "mcap_skipped": mcap_skipped,
         "errors": errors,
         "elapsed_sec": round(elapsed, 1),
         "at": started.strftime("%H:%M:%S ET"),
