@@ -2775,11 +2775,23 @@ def _run_screener_pass() -> dict:
 
 
 def _session_scan_allowed() -> bool:
+    """Auto path may run only in operator-enabled session windows."""
     window = room3_engine.detect_session_window()
     if window == room3_engine.SESSION_CLOSED:
         return False
     allowed = set(st.session_state.get("room3_allowed_sessions") or [])
     return window in allowed
+
+
+def _manual_rth_filter_review_allowed() -> bool:
+    """
+    Manual Job 1 click — show what the *market-hours* filter would list.
+
+    Does NOT require Post-market. Session checkboxes only gate auto trading /
+    auto screener, not this after-close review. Same filter rules; daily bar is
+    the RTH session print TradingView still shows after 4:00.
+    """
+    return _broker_is_connected()
 
 
 @st.fragment(run_every=timedelta(minutes=room3_screener.SCAN_INTERVAL_MINUTES))
@@ -2889,10 +2901,12 @@ def _render_watch_book_panel() -> None:
 def _render_rth_filter_attach() -> None:
     st.markdown("#### Filter · Market hours (built-in screener)")
     st.caption(
-        "Job 1 (filter): cheap liquidity pass on the full list → HMA/vol/float only on a "
-        f"short liquid list → belt max **{room3_watcher.MAX_NAMES}**. "
-        "Job 2 (watcher): 1m/5m/15m maps + matrix compare **only on belt names**. "
-        "Job 3 (execution): Alpaca when armed. No deep maps on all ~8k."
+        "Job 1 (filter): cheap liquidity pass → HMA/vol/float on a shortlist → "
+        f"belt max **{room3_watcher.MAX_NAMES}**. "
+        "**Run screener now** always uses your market-hours filter rules "
+        "(works after 4:00 to review the RTH close list — you do **not** need "
+        "Post-market for that). Post-market only unlocks *auto trading* in that window. "
+        "Job 2 maps survivors; Job 3 trades only when armed."
     )
 
     last = st.session_state.get("room3_screener_last") or {}
@@ -2926,17 +2940,24 @@ def _render_rth_filter_attach() -> None:
         )
 
     if st.button("Run screener now", type="primary", key="room3_screener_run_now"):
-        if not _broker_is_connected():
+        if not _manual_rth_filter_review_allowed():
             st.error("Connect Alpaca first.")
-        elif not _session_scan_allowed():
-            st.error("Enable **Market hours** under session filters.")
         else:
+            window = room3_engine.detect_session_window()
+            review_note = ""
+            if window != room3_engine.SESSION_RTH:
+                review_note = (
+                    f" · RTH-close review (now {room3_engine.session_label(window)}; "
+                    "Post-market not required to list names)"
+                )
             with st.spinner(
-                "Scanning NYSE/NASDAQ (liquidity pre-pass, then deep HMA on survivors)…"
+                "Scanning NYSE/NASDAQ with market-hours filter rules…"
             ):
                 result = _run_screener_pass()
             if result.get("tickers"):
-                st.success(f"Found {len(result['tickers'])} names.")
+                st.success(
+                    f"Found {len(result['tickers'])} names{review_note}."
+                )
             else:
                 st.warning(
                     result.get("error")
