@@ -1,11 +1,11 @@
 """
-Room 3 watcher — the eyes.
+Room 3 watcher — Job 2 (the eyes / middleman).
 
-One stock in the filter → three maps (1m / 5m / 15m), different data diets.
-Heartbeat appends a slice (not "trade on 30s alone").
-Filter drop → purge map unless sticky (close to repertoire).
-Day end / no trade → delete maps.
-Filter feed plugs in via built-in screener (room3_screener) + watch book.
+Job 1 (screener) hands a small belt. This module:
+  - builds 1m / 5m / 15m maps only for those survivors
+  - lookback = max needed for that TF's strategy compare (not forever)
+  - matrix match vs repertoire
+Job 3 (execution) fires only when armed + gates open.
 
 Does NOT import Room 2 modules. Uses room3_bridge snapshot only for repertoire hints.
 """
@@ -23,31 +23,33 @@ import room3_matrix
 ET = ZoneInfo("America/New_York")
 
 TIMEFRAMES = ("1m", "5m", "15m")
-MAX_NAMES = 40  # cap on filtered names getting full TF maps (operator tunable later)
+# Job 2 only maps Job 1 survivors — keep this tight (operator: ~5–10 typical)
+MAX_NAMES = 15
 STICKY_MIN_SCORE = 0.72  # keep after filter drop if map this close to repertoire
 STICKY_MAX_MINUTES = 90
 
-# Picture budget — lean 1m, richer 15m
+# Picture budget — lean where strategies are short; richer only on 15m
+# bars_keep ≈ max lookback strategies on that TF need (not full-day dumps)
 TF_DIET: dict[str, dict[str, Any]] = {
     "1m": {
-        "max_slices": 24,  # ~last ~12–24 min of pulse memory
+        "max_slices": 12,  # ~last 12 minutes of pulse memory
         "yf_interval": "1m",
         "yf_period": "1d",
-        "bars_keep": 12,  # thin chart memory
-        "extras": "chart",  # almost chart-only
+        "bars_keep": 8,  # most 1m strategies need ≤ ~5–8 minutes
+        "extras": "chart",
     },
     "5m": {
-        "max_slices": 36,
+        "max_slices": 18,
         "yf_interval": "5m",
-        "yf_period": "5d",
-        "bars_keep": 36,
+        "yf_period": "1d",
+        "bars_keep": 12,  # ~1 hour of 5m bars
         "extras": "light",
     },
     "15m": {
-        "max_slices": 48,
+        "max_slices": 24,
         "yf_interval": "15m",
-        "yf_period": "10d",
-        "bars_keep": 64,
+        "yf_period": "5d",
+        "bars_keep": 24,  # richer but not 10d of everything
         "extras": "rich",
     },
 }

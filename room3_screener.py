@@ -1,10 +1,13 @@
 """
-Room 3 built-in RTH screener — Job 1.
+Room 3 built-in screener — Job 1 (FILTER ONLY).
 
-Periodic light scan on liquid NASDAQ + NYSE (Alpaca tradable universe).
-Survivors feed the watch book for 1m / 5m / 15m maps + matrix path.
+Architecture:
+  Job 1 · Screener  → cheap yes/no on full universe → small belt (~5–15)
+  Job 2 · Watcher   → 1m/5m/15m maps + matrix compare (survivors only)
+  Job 3 · Execution → Alpaca when armed + match
 
-Thresholds are tunable; operator refines to match their TradingView screener.
+This module must NOT do map/matrix work. Deep daily history is only for
+filter fields (HMA / vol) on a short liquid shortlist — never on all ~8k.
 """
 
 from __future__ import annotations
@@ -21,10 +24,11 @@ ET = ZoneInfo("America/New_York")
 SCAN_INTERVAL_MINUTES = 18
 BATCH_SIZE = 120
 UNIVERSE_CAP = 20000  # safety ceiling only — do NOT truncate mid-list (drops WETO/CAPR/etc.)
-YF_PERIOD = "2mo"  # deep history for HMA + 30d vol (survivors only)
-YF_PRESCREEN_PERIOD = "5d"  # cheap liquidity pre-pass on the full list
+YF_PERIOD = "2mo"  # deep history for HMA + 30d vol (Pass B shortlist only)
+YF_PRESCREEN_PERIOD = "5d"  # Pass A — cheap liquidity on the full list
 YF_BATCH_WORKERS = 8
-DEEP_SCAN_CAP = 500  # max names that get full 2mo HMA/vol history per run
+DEEP_SCAN_CAP = 200  # Pass B: max names that get full 2mo HMA/vol (not Job 2 maps)
+BELT_MAX = 15  # Job 1 output cap → Job 2 maps only these
 
 # Alpaca lists leveraged single-stock products as us_equity — strip by name.
 _ETF_NAME_MARKERS = (
@@ -469,12 +473,13 @@ def scan_universe(
     symbols: list[str],
     *,
     rules: dict[str, Any] | None = None,
-    max_pass: int = 40,
+    max_pass: int = BELT_MAX,
 ) -> dict[str, Any]:
     """
-    Fast two-pass scan:
-      1) short daily history on the full list → liquidity rank
-      2) full 2mo history only on top liquid survivors → HMA / vol / float / mcap
+    Job 1 cascade (filter only — no maps / no matrix):
+      Pass A — short daily bars on full list → liquidity kill
+      Pass B — 2mo history only on top liquid shortlist → HMA / vol / float / mcap
+      Output  — small belt for Job 2
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -567,7 +572,9 @@ def scan_universe(
     }
 
 
-def run_rth_scan(*, paper: bool = True, rules: dict[str, Any] | None = None, max_pass: int = 40) -> dict[str, Any]:
+def run_rth_scan(
+    *, paper: bool = True, rules: dict[str, Any] | None = None, max_pass: int = BELT_MAX
+) -> dict[str, Any]:
     universe, uni_err = fetch_nyse_nasdaq_universe(paper=paper)
     if not universe:
         return {

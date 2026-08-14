@@ -2889,11 +2889,10 @@ def _render_watch_book_panel() -> None:
 def _render_rth_filter_attach() -> None:
     st.markdown("#### Filter · Market hours (built-in screener)")
     st.caption(
-        "Job 1: fast liquidity pre-scan, then deep HMA/vol only on the hottest names "
-        "(usually well under ~2 min). "
-        "Filters: vol ≥ 30%, price > daily HMA9, price×vol & price×avg-vol ≥ $10M, "
-        "market cap ≤ $1B, volume vs float (keep if float unknown). "
-        "Job 2: survivors get 1m / 5m / 15m maps + matrix when armed."
+        "Job 1 (filter): cheap liquidity pass on the full list → HMA/vol/float only on a "
+        f"short liquid list → belt max **{room3_watcher.MAX_NAMES}**. "
+        "Job 2 (watcher): 1m/5m/15m maps + matrix compare **only on belt names**. "
+        "Job 3 (execution): Alpaca when armed. No deep maps on all ~8k."
     )
 
     last = st.session_state.get("room3_screener_last") or {}
