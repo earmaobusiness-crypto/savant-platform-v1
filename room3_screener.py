@@ -19,10 +19,12 @@ import room3_alpaca
 ET = ZoneInfo("America/New_York")
 
 SCAN_INTERVAL_MINUTES = 18
-BATCH_SIZE = 100
-UNIVERSE_CAP = 8000  # full major-exchange common-stock universe (ETFs stripped)
-YF_PERIOD = "2mo"  # enough for 30d hist vol + HMA9
-YF_BATCH_WORKERS = 6  # parallel Yahoo batches (full scan ~tens of sec, not minutes)
+BATCH_SIZE = 120
+UNIVERSE_CAP = 8000  # stock list size (ETF-stripped); not all get full 2mo history
+YF_PERIOD = "2mo"  # deep history for HMA + 30d vol (survivors only)
+YF_PRESCREEN_PERIOD = "5d"  # cheap liquidity pre-pass on the full list
+YF_BATCH_WORKERS = 8
+DEEP_SCAN_CAP = 500  # max names that get full 2mo HMA/vol history per run
 
 # Alpaca lists leveraged single-stock products as us_equity — strip by name.
 _ETF_NAME_MARKERS = (
@@ -382,31 +384,25 @@ def passes_structure_rules(
     )
 
 
-def scan_universe(
+def _download_daily_batches(
     symbols: list[str],
     *,
-    rules: dict[str, Any] | None = None,
-    max_pass: int = 40,
-) -> dict[str, Any]:
-    """
-    Two-stage light pass — daily history, then float/market-cap on survivors.
-    Returns tickers sorted by dollar volume desc.
-    """
+    period: str,
+) -> tuple[dict[str, Any], int, int]:
+    """Parallel Yahoo daily download. Returns (sym→history, scanned, errors)."""
     import yfinance as yf
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    rules = rules or default_rules()
-    started = datetime.now(ET)
-    stage1: list[tuple[str, dict[str, float]]] = []
+    by_sym: dict[str, Any] = {}
     scanned = 0
     errors = 0
     syms = [str(s).upper() for s in symbols if str(s).strip()]
     batches = [syms[i : i + BATCH_SIZE] for i in range(0, len(syms), BATCH_SIZE)]
 
-    def _download_batch(batch: list[str]):
+    def _one(batch: list[str]):
         data = yf.download(
             " ".join(batch),
-            period=YF_PERIOD,
+            period=period,
             interval="1d",
             group_by="ticker",
             auto_adjust=True,
@@ -416,7 +412,7 @@ def scan_universe(
         return batch, data
 
     with ThreadPoolExecutor(max_workers=YF_BATCH_WORKERS) as pool:
-        futures = [pool.submit(_download_batch, b) for b in batches]
+        futures = [pool.submit(_one, b) for b in batches]
         for fut in as_completed(futures):
             try:
                 batch, data = fut.result()
@@ -440,20 +436,88 @@ def scan_universe(
                             )
                         except Exception:
                             hist = None
-                    m = _metrics_from_history(hist)
-                    if not m:
-                        continue
-                    if passes_rules(m, rules):
-                        stage1.append((sym, m))
+                    if hist is not None and not getattr(hist, "empty", True):
+                        by_sym[sym] = hist
                 except Exception:
                     errors += 1
+    return by_sym, scanned, errors
+
+
+def _liquidity_score(hist) -> float:
+    """Rough today dollar volume from a short daily window (prescreen)."""
+    try:
+        if hist is None or getattr(hist, "empty", True):
+            return 0.0
+        if "Close" not in hist.columns or "Volume" not in hist.columns:
+            return 0.0
+        closes = [float(x) for x in hist["Close"].dropna().tolist()]
+        vols = [float(x) for x in hist["Volume"].dropna().tolist()]
+        if not closes or not vols:
+            return 0.0
+        return max(0.0, closes[-1] * vols[-1])
+    except Exception:
+        return 0.0
+
+
+def scan_universe(
+    symbols: list[str],
+    *,
+    rules: dict[str, Any] | None = None,
+    max_pass: int = 40,
+) -> dict[str, Any]:
+    """
+    Fast two-pass scan:
+      1) short daily history on the full list → liquidity rank
+      2) full 2mo history only on top liquid survivors → HMA / vol / float / mcap
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    rules = rules or default_rules()
+    started = datetime.now(ET)
+    syms = [str(s).upper() for s in symbols if str(s).strip()]
+    min_dv = float(rules.get("min_dollar_volume") or 0)
+    # Slightly loose on prescreen so borderline names still get a deep look.
+    pre_floor = max(0.0, min_dv * 0.5) if min_dv > 0 else 0.0
+
+    pre_hist, scanned, errors = _download_daily_batches(syms, period=YF_PRESCREEN_PERIOD)
+    liquid: list[tuple[str, float]] = []
+    for sym, hist in pre_hist.items():
+        score = _liquidity_score(hist)
+        if score >= pre_floor:
+            # Also respect min price from last close when available
+            try:
+                closes = [float(x) for x in hist["Close"].dropna().tolist()]
+                if closes and closes[-1] < float(rules.get("min_price") or 0):
+                    continue
+            except Exception:
+                pass
+            liquid.append((sym, score))
+    liquid.sort(key=lambda x: x[1], reverse=True)
+    deep_syms = [s for s, _ in liquid[:DEEP_SCAN_CAP]]
+
+    stage1: list[tuple[str, dict[str, float]]] = []
+    deep_scanned = 0
+    if deep_syms:
+        deep_hist, deep_scanned, deep_err = _download_daily_batches(
+            deep_syms, period=YF_PERIOD
+        )
+        errors += deep_err
+        for sym in deep_syms:
+            hist = deep_hist.get(sym)
+            if hist is None:
+                continue
+            try:
+                m = _metrics_from_history(hist)
+                if not m:
+                    continue
+                if passes_rules(m, rules):
+                    stage1.append((sym, m))
+            except Exception:
+                errors += 1
 
     passed: list[tuple[str, float]] = []
     structure_rejected = 0
     if stage1:
-        # Structure filters (≤$1B cap, volume vs float) must run on ALL stage-1
-        # survivors. Ranking by dollar volume first only enriches mega-caps and
-        # can zero out the belt.
         stats_by_sym: dict[str, dict[str, float | None]] = {}
         with ThreadPoolExecutor(max_workers=12) as pool:
             futures = {pool.submit(fetch_share_stats, sym): sym for sym, _ in stage1}
@@ -489,6 +553,8 @@ def scan_universe(
         "stage1_passed": len(stage1),
         "structure_rejected": structure_rejected,
         "scanned": scanned,
+        "deep_scanned": deep_scanned,
+        "prescreen_liquid": len(liquid),
         "errors": errors,
         "elapsed_sec": round(elapsed, 1),
         "at": started.strftime("%H:%M:%S ET"),

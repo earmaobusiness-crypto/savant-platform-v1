@@ -2889,11 +2889,13 @@ def _render_watch_book_panel() -> None:
 def _render_rth_filter_attach() -> None:
     st.markdown("#### Filter · Market hours (built-in screener)")
     st.caption(
-        "Job 1: scans NASDAQ + NYSE (~every 18 min in RTH; usually under ~1 min after speedup). "
-        "Filters: vol ≥ 30%, price > HMA9, price×vol & price×avg-vol ≥ $10M, "
-        "market cap ≤ $1B, volume vs float. "
-        "Job 2: every survivor gets 1m / 5m / 15m maps + matrix scan + auto path when armed."
+        "Job 1: fast liquidity pre-scan, then deep HMA/vol only on the hottest names "
+        "(usually well under ~2 min). "
+        "Filters: vol ≥ 30%, price > daily HMA9, price×vol & price×avg-vol ≥ $10M, "
+        "market cap ≤ $1B, volume vs float (keep if float unknown). "
+        "Job 2: survivors get 1m / 5m / 15m maps + matrix when armed."
     )
+
     last = st.session_state.get("room3_screener_last") or {}
     names = list(last.get("tickers") or [])
     if names:
@@ -2918,7 +2920,9 @@ def _render_rth_filter_attach() -> None:
         st.caption(
             f"Last pass {last.get('at') or '—'} · "
             f"universe {last.get('universe_size', '—')} · "
-            f"scanned {last.get('scanned', 0)} · passed {last.get('passed', 0)}{extra} · "
+            f"scanned {last.get('scanned', 0)} · "
+            f"deep {last.get('deep_scanned', '—')} · "
+            f"passed {last.get('passed', 0)}{extra} · "
             f"{last.get('elapsed_sec', 0)}s"
         )
 
@@ -2928,7 +2932,9 @@ def _render_rth_filter_attach() -> None:
         elif not _session_scan_allowed():
             st.error("Enable **Market hours** under session filters.")
         else:
-            with st.spinner("Scanning NYSE/NASDAQ…"):
+            with st.spinner(
+                "Scanning NYSE/NASDAQ (liquidity pre-pass, then deep HMA on survivors)…"
+            ):
                 result = _run_screener_pass()
             if result.get("tickers"):
                 st.success(f"Found {len(result['tickers'])} names.")
