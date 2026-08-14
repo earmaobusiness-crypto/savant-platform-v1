@@ -255,6 +255,8 @@ def init_room3_session_state() -> None:
         st.session_state.room3_filter_slots = room3_filters.empty_slots()
     if "room3_screener_last" not in st.session_state:
         st.session_state.room3_screener_last = {}
+    if "room3_screener_day_cache" not in st.session_state:
+        st.session_state.room3_screener_day_cache = {}
     if "room3_filter_rules" not in st.session_state:
         st.session_state.room3_filter_rules = room3_screener.default_rules()
     if "room3_broker_day_pl" not in st.session_state:
@@ -2748,23 +2750,12 @@ def _apply_active_filter_universe() -> list[str]:
     return names
 
 
-def _run_screener_pass() -> dict:
-    """
-    Job 1 — light NASDAQ/NYSE scan.
-
-    Inside an enabled trade window: survivors feed the watch book (maps → compare → trade).
-    Outside that window but with a session enabled: still scan the end-of-session print,
-    show the list, and stop (no maps / compare / orders).
-    """
-    mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
-    paper = mode != ROOM3_MODE_LIVE
+def _screener_rules_for_scan() -> dict:
     saved = dict(st.session_state.get("room3_filter_rules") or {})
     rules = {**room3_screener.default_rules(), **saved}
     if float(rules.get("max_market_cap") or 0) <= 0:
         rules["max_market_cap"] = float(room3_screener.DEFAULT_RULES["max_market_cap"])
-    # Always strip leveraged ETFs unless operator explicitly disabled it.
     rules["exclude_etfs"] = bool(saved.get("exclude_etfs", True))
-    # Old default was $1 and killed sub-$1 TV names — migrate once.
     if float(saved.get("min_price") or 0) >= 1.0 and not st.session_state.get(
         "room3_min_price_tv_aligned"
     ):
@@ -2775,25 +2766,62 @@ def _run_screener_pass() -> dict:
             "min_price": 0.01,
             "exclude_etfs": True,
         }
-    result = room3_screener.run_rth_scan(
-        paper=paper,
-        rules=rules,
-        max_pass=room3_watcher.MAX_NAMES,
-    )
+    return rules
+
+
+def _screener_cache_key(rules: dict, *, slot: str) -> str:
+    """Freeze end-of-session lists per calendar day + rules (Yahoo noise otherwise reshuffles)."""
+    day = datetime.now(ET).date().isoformat()
+    blob = hashlib.sha1(
+        repr(
+            sorted(
+                (k, rules.get(k))
+                for k in (
+                    "min_volatility_pct",
+                    "require_price_above_hma9",
+                    "hma_tolerance_pct",
+                    "min_dollar_volume",
+                    "min_dollar_avg_vol_10d",
+                    "max_market_cap",
+                    "require_volume_vs_float",
+                    "min_price",
+                    "exclude_etfs",
+                )
+            )
+        ).encode()
+    ).hexdigest()[:10]
+    return f"{day}|{slot}|{blob}|{room3_watcher.MAX_NAMES}"
+
+
+def _run_screener_pass(*, force: bool = False) -> dict:
+    """
+    Job 1 — light NASDAQ/NYSE scan.
+
+    Inside an enabled trade window: survivors feed the watch book (maps → compare → trade).
+    Outside that window but with a session enabled: still scan the end-of-session print,
+    show the list, and stop (no maps / compare / orders).
+
+    After the close, reuses today's cached end list so a second click is instant and
+    identical (fresh Yahoo pulls otherwise shuffle 10↔11 names).
+    """
+    mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
+    paper = mode != ROOM3_MODE_LIVE
+    rules = _screener_rules_for_scan()
     trade_window = _session_trading_allowed()
     review_slot = _session_review_target()
-    result["pipeline"] = "full" if trade_window else "list_only"
-    result["session_slot"] = (
-        room3_engine.detect_session_window() if trade_window else review_slot
-    )
-    st.session_state.room3_screener_last = result
-    tickers = list(result.get("tickers") or [])
-    if trade_window and tickers:
-        # Full path: attach survivors to the *current* enabled window's belt.
-        slot = room3_engine.detect_session_window()
-        ingest_filter_slot(slot, tickers)
-    else:
-        # List-only: remember end-of-session names; do not start maps.
+    slot = room3_engine.detect_session_window() if trade_window else review_slot
+    cache_key = _screener_cache_key(rules, slot=str(slot))
+    cache = dict(st.session_state.get("room3_screener_day_cache") or {})
+
+    # End-of-session / closed clock: pin the first good list of the day.
+    if (not trade_window) and (not force) and cache_key in cache:
+        result = dict(cache[cache_key])
+        result["cached"] = True
+        result["pipeline"] = "list_only"
+        result["session_slot"] = slot
+        result["elapsed_sec"] = 0.0
+        st.session_state.room3_screener_last = result
+        tickers = list(result.get("tickers") or [])
         if tickers and review_slot:
             st.session_state.room3_filter_slots = room3_filters.set_slot(
                 st.session_state.get("room3_filter_slots"),
@@ -2801,6 +2829,54 @@ def _run_screener_pass() -> dict:
                 tickers,
             )
         _apply_active_filter_universe()
+        return result
+
+    result = room3_screener.run_rth_scan(
+        paper=paper,
+        rules=rules,
+        max_pass=room3_watcher.MAX_NAMES,
+    )
+    result["pipeline"] = "full" if trade_window else "list_only"
+    result["session_slot"] = slot
+    result["cached"] = False
+    st.session_state.room3_screener_last = result
+    tickers = list(result.get("tickers") or [])
+    if trade_window and tickers:
+        ingest_filter_slot(slot, tickers)
+    else:
+        if tickers and review_slot:
+            st.session_state.room3_filter_slots = room3_filters.set_slot(
+                st.session_state.get("room3_filter_slots"),
+                review_slot,
+                tickers,
+            )
+        _apply_active_filter_universe()
+        # Freeze today's end list only when we actually got names (or a finished 0-pass).
+        if result.get("ok") and (tickers or result.get("scanned")):
+            cache[cache_key] = {
+                k: result.get(k)
+                for k in (
+                    "ok",
+                    "tickers",
+                    "passed",
+                    "stage1_passed",
+                    "structure_rejected",
+                    "scanned",
+                    "hist_ok",
+                    "deep_scanned",
+                    "prescreen_liquid",
+                    "mcap_skipped",
+                    "errors",
+                    "at",
+                    "error",
+                    "universe_size",
+                )
+            }
+            # keep a handful of days max
+            if len(cache) > 6:
+                for old in list(cache.keys())[:-6]:
+                    cache.pop(old, None)
+            st.session_state.room3_screener_day_cache = cache
     return result
 
 
@@ -3036,6 +3112,33 @@ def _render_rth_filter_attach() -> None:
     list_only = (not trading_now) and _any_session_enabled()
     review_slot = str(last.get("session_slot") or _session_review_target())
     review_label = room3_engine.session_label(review_slot)
+    # Seed today's freeze from the list already on screen (avoids another long pull
+    # just to populate the cache after deploy).
+    if list_only and names and not last.get("cached"):
+        rules = _screener_rules_for_scan()
+        key = _screener_cache_key(rules, slot=review_slot)
+        cache = dict(st.session_state.get("room3_screener_day_cache") or {})
+        if key not in cache:
+            cache[key] = {
+                k: last.get(k)
+                for k in (
+                    "ok",
+                    "tickers",
+                    "passed",
+                    "stage1_passed",
+                    "structure_rejected",
+                    "scanned",
+                    "hist_ok",
+                    "deep_scanned",
+                    "prescreen_liquid",
+                    "mcap_skipped",
+                    "errors",
+                    "at",
+                    "error",
+                    "universe_size",
+                )
+            }
+            st.session_state.room3_screener_day_cache = cache
     if names and list_only:
         st.warning(
             f"**Not trading** — {review_label} is enabled, but that window is not open "
@@ -3067,9 +3170,10 @@ def _render_rth_filter_attach() -> None:
         if last.get("stage1_passed") is not None:
             extra = f" · stage1 {last.get('stage1_passed', 0)} · float/mcap cut {last.get('structure_rejected', 0)}"
         pipe = str(last.get("pipeline") or ("list_only" if list_only else "full"))
+        cached_note = " · cached" if last.get("cached") else ""
         st.caption(
             f"Last pass {last.get('at') or '—'} · "
-            f"{pipe} · {review_label} · "
+            f"{pipe}{cached_note} · {review_label} · "
             f"universe {last.get('universe_size', '—')} · "
             f"scanned {last.get('scanned', 0)} · "
             f"bars {last.get('hist_ok', '—')} · "
@@ -3080,13 +3184,31 @@ def _render_rth_filter_attach() -> None:
             f"{last.get('elapsed_sec', 0)}s"
         )
 
+    force = st.checkbox(
+        "Force fresh scan (ignore today's cached end list)",
+        value=False,
+        key="room3_screener_force_fresh",
+        help="After the close, Run screener now reuses today's list instantly. "
+        "Check this only if you really want a full Yahoo re-pull.",
+    )
     if st.button("Run screener now", type="primary", key="room3_screener_run_now"):
         if not _manual_screener_allowed():
             st.error("Connect Alpaca and enable at least one session (Pre / Market hours / Post).")
         else:
-            with st.spinner("Scanning NYSE/NASDAQ…"):
-                result = _run_screener_pass()
-            if result.get("tickers"):
+            use_force = bool(force) or _session_trading_allowed()
+            spin = (
+                "Scanning NYSE/NASDAQ…"
+                if use_force or force
+                else "Loading today's end list (or scanning if first run)…"
+            )
+            with st.spinner(spin):
+                result = _run_screener_pass(force=bool(force))
+            if result.get("cached"):
+                st.info(
+                    f"Same list as earlier today ({len(result.get('tickers') or [])} names) — "
+                    "cached end-of-session snapshot. Check **Force fresh scan** to re-pull Yahoo."
+                )
+            elif result.get("tickers"):
                 if result.get("pipeline") == "list_only":
                     slot_lbl = room3_engine.session_label(
                         str(result.get("session_slot") or _session_review_target())
