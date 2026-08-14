@@ -22,6 +22,7 @@ import room3_alpaca
 import room3_engine
 import room3_filters
 import room3_ibkr
+import room3_screener
 import room3_watcher
 
 ROOM3_MODE_PAPER = "paper"
@@ -251,6 +252,10 @@ def init_room3_session_state() -> None:
         st.session_state.room3_filter_universe = []
     if "room3_filter_slots" not in st.session_state:
         st.session_state.room3_filter_slots = room3_filters.empty_slots()
+    if "room3_screener_last" not in st.session_state:
+        st.session_state.room3_screener_last = {}
+    if "room3_filter_rules" not in st.session_state:
+        st.session_state.room3_filter_rules = room3_screener.default_rules()
     if "room3_broker_day_pl" not in st.session_state:
         st.session_state.room3_broker_day_pl = None
     if "room3_broker_day_pl_pct" not in st.session_state:
@@ -2700,16 +2705,33 @@ def ingest_filter_slot(slot: str, tickers: list[str] | None) -> None:
 
 def _apply_active_filter_universe() -> list[str]:
     window = room3_engine.detect_session_window()
-    live = room3_filters.fetch_live_hits(session=window)
-    st.session_state.room3_filter_live_meta = live
+    screener = list((st.session_state.get("room3_screener_last") or {}).get("tickers") or [])
     names = room3_filters.active_universe(
         st.session_state.get("room3_filter_slots"),
         window=window,
         allowed=list(st.session_state.get("room3_allowed_sessions") or []),
-        live=list(live.get("tickers") or []),
+        screener=screener,
     )
     ingest_filter_universe(names)
     return names
+
+
+def _run_screener_pass() -> dict:
+    """Job 1 — light NASDAQ/NYSE scan; survivors feed the watch book."""
+    mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
+    paper = mode != ROOM3_MODE_LIVE
+    rules = dict(st.session_state.get("room3_filter_rules") or room3_screener.default_rules())
+    result = room3_screener.run_rth_scan(
+        paper=paper,
+        rules=rules,
+        max_pass=room3_watcher.MAX_NAMES,
+    )
+    st.session_state.room3_screener_last = result
+    if result.get("tickers"):
+        ingest_filter_slot(room3_filters.SLOT_RTH, list(result["tickers"]))
+    else:
+        _apply_active_filter_universe()
+    return result
 
 
 def _session_scan_allowed() -> bool:
@@ -2720,17 +2742,24 @@ def _session_scan_allowed() -> bool:
     return window in allowed
 
 
-@st.fragment(run_every=timedelta(seconds=8))
-def _room3_filter_inbox_fragment() -> None:
-    """Fast poll — new TradingView names, not full chart maps."""
-    names = _apply_active_filter_universe()
-    live = st.session_state.get("room3_filter_live_meta") or {}
-    err = str(live.get("error") or "")
-    st.caption(
-        f"Filter inbox · {datetime.now(ET).strftime('%H:%M:%S ET')} · "
-        f"{len(names)} live name(s)"
-        + (f" · {err}" if err else "")
-    )
+@st.fragment(run_every=timedelta(minutes=room3_screener.SCAN_INTERVAL_MINUTES))
+def _room3_screener_fragment() -> None:
+    """Job 1 — periodic light filter on NYSE/NASDAQ (every ~18 min in RTH)."""
+    if not _broker_is_connected():
+        return
+    if not _session_scan_allowed():
+        return
+    if room3_engine.detect_session_window() != room3_engine.SESSION_RTH:
+        return
+    result = _run_screener_pass()
+    if result.get("ok"):
+        st.caption(
+            f"Screener · {result.get('at') or '—'} · "
+            f"{result.get('passed', 0)} passed / {result.get('scanned', 0)} scanned · "
+            f"{result.get('elapsed_sec', 0)}s"
+        )
+    elif result.get("error"):
+        st.caption(f"Screener error · {result.get('error')}")
 
 
 @st.fragment(run_every=timedelta(seconds=30))
@@ -2790,19 +2819,21 @@ def _render_watch_book_panel() -> None:
     window = room3_engine.detect_session_window()
     slots = st.session_state.get("room3_filter_slots") or room3_filters.empty_slots()
     rth_saved = list(slots.get(room3_filters.SLOT_RTH) or [])
+    screener = st.session_state.get("room3_screener_last") or {}
+    screener_names = list(screener.get("tickers") or [])
     if book.get("awaiting_filters"):
-        if rth_saved and window != room3_engine.SESSION_RTH:
+        if window != room3_engine.SESSION_RTH:
             st.info(
-                f"Market-hours names are waiting until **Market hours**. "
+                f"Screener runs in **Market hours** only. "
                 f"Now: {room3_engine.session_label(window)}."
             )
-        elif not rth_saved and not (st.session_state.get("room3_filter_live_meta") or {}).get("tickers"):
+        elif not screener_names and not rth_saved:
             st.info(
-                "Waiting for TradingView to push a market-hours hit. "
-                "Each name gets **1m + 5m + 15m** maps. Pre / post later."
+                "Built-in screener will run every ~18 min in RTH, or click **Run screener now**. "
+                "Each survivor gets **1m + 5m + 15m** maps."
             )
         else:
-            st.info("Market-hours filter is saved, but this session window is not allowed to watch yet.")
+            st.info("Session filter closed — enable **Market hours** under session filters.")
     else:
         st.caption(
             f"Universe: {', '.join(book.get('universe') or [])} · "
@@ -2816,67 +2847,107 @@ def _render_watch_book_panel() -> None:
 
 
 def _render_rth_filter_attach() -> None:
-    st.markdown("#### Filter · Market hours (live from TradingView)")
+    st.markdown("#### Filter · Market hours (built-in screener)")
     st.caption(
-        "TradingView will not let this app log in and read your screener table. "
-        "When a name **pops** on your market-hours screener, TradingView **pushes** it here. "
-        "Heartbeat picks it up (~30s) and opens 1m/5m/15m maps. "
-        "Hits stay hot for 90 minutes. Pre/post later."
+        "Job 1: scans NASDAQ + NYSE every ~18 min (vol ≥ 30%, price > HMA9, "
+        "price×vol & price×avg-vol ≥ $10M, market cap ≤ $1B, volume vs float). "
+        "Job 2: every survivor gets 1m / 5m / 15m maps + matrix scan + auto path when armed."
     )
-    hook = room3_filters.webhook_url()
-    live = st.session_state.get("room3_filter_live_meta") or {}
-    live_names = list(live.get("tickers") or [])
-    if live_names:
-        st.success("Live RTH names: " + ", ".join(live_names))
-    elif live.get("error"):
-        st.warning(f"Live feed: {live.get('error')}")
+    last = st.session_state.get("room3_screener_last") or {}
+    names = list(last.get("tickers") or [])
+    if names:
+        st.success(f"{len(names)} names on the belt: " + ", ".join(names))
+    elif last.get("error"):
+        st.warning(str(last.get("error")))
     else:
-        st.info("No live hits in the last 90 minutes — waiting for TradingView to push a ticker.")
+        st.info("No screener pass yet — connect Alpaca and run once, or wait for the ~18 min timer.")
 
-    if hook:
-        st.code(hook, language=None)
-    else:
-        st.warning("Supabase URL missing — webhook inbox cannot be shown.")
+    if last:
+        extra = ""
+        if last.get("stage1_passed") is not None:
+            extra = f" · stage1 {last.get('stage1_passed', 0)} · float/mcap cut {last.get('structure_rejected', 0)}"
+        st.caption(
+            f"Last pass {last.get('at') or '—'} · "
+            f"universe {last.get('universe_size', '—')} · "
+            f"scanned {last.get('scanned', 0)} · passed {last.get('passed', 0)}{extra} · "
+            f"{last.get('elapsed_sec', 0)}s"
+        )
 
-    st.markdown(
-        """
-1. In Supabase SQL editor run `supabase/migrations/011_room3_screener_hits.sql`.
-2. Deploy the function `tv-screener` and set secret `TV_WEBHOOK_SECRET`.
-3. TradingView (Essential+): on the **market hours** screener, create an **Alert** → Notifications → **Webhook URL** → paste the URL above.
-4. Alert message (JSON):
-"""
-    )
-    st.code(
-        '{"secret":"YOUR_TV_WEBHOOK_SECRET","ticker":"{{ticker}}","session":"rth"}',
-        language="json",
-    )
-    st.caption(
-        "Each time a stock qualifies, TradingView POSTs. Room 3 does not scrape TradingView. "
-        "Auto orders still need the engine armed and a matrix match — this step is the live name feed."
-    )
+    if st.button("Run screener now", type="primary", key="room3_screener_run_now"):
+        if not _broker_is_connected():
+            st.error("Connect Alpaca first.")
+        elif not _session_scan_allowed():
+            st.error("Enable **Market hours** under session filters.")
+        else:
+            with st.spinner("Scanning NYSE/NASDAQ…"):
+                result = _run_screener_pass()
+            if result.get("tickers"):
+                st.success(f"Found {len(result['tickers'])} names.")
+            else:
+                st.warning(result.get("error") or "No names passed — tune rules to match your TV screener.")
+            st.rerun()
 
-    with st.expander("Manual backup paste (not the live path)", expanded=False):
-        slots = st.session_state.get("room3_filter_slots") or room3_filters.empty_slots()
-        saved = list(slots.get(room3_filters.SLOT_RTH) or [])
-        if saved:
-            st.caption("Backup names: " + ", ".join(saved))
+    with st.expander("Filter rules (tune to match TradingView)", expanded=False):
+        rules = dict(st.session_state.get("room3_filter_rules") or room3_screener.default_rules())
+        rules["min_volatility_pct"] = st.number_input(
+            "Min volatility % (30-day)",
+            value=float(rules.get("min_volatility_pct") or 30),
+            min_value=0.0,
+            step=1.0,
+            key="room3_rule_vol",
+        )
+        rules["require_price_above_hma9"] = st.checkbox(
+            "Price above Hull MA 9",
+            value=bool(rules.get("require_price_above_hma9", True)),
+            key="room3_rule_hma",
+        )
+        rules["min_dollar_volume"] = st.number_input(
+            "Min price × volume (today $)",
+            value=float(rules.get("min_dollar_volume") or 10_000_000),
+            min_value=0.0,
+            step=1_000_000.0,
+            key="room3_rule_dv",
+        )
+        rules["min_dollar_avg_vol_10d"] = st.number_input(
+            "Min price × avg volume 10d ($)",
+            value=float(rules.get("min_dollar_avg_vol_10d") or 10_000_000),
+            min_value=0.0,
+            step=1_000_000.0,
+            key="room3_rule_avg",
+        )
+        rules["max_market_cap"] = st.number_input(
+            "Max market cap ($)",
+            value=float(rules.get("max_market_cap") or 1_000_000_000),
+            min_value=0.0,
+            step=100_000_000.0,
+            key="room3_rule_mcap",
+            help="Exclude names above this market cap (default $1B).",
+        )
+        rules["require_volume_vs_float"] = st.checkbox(
+            "Volume vs float filter",
+            value=bool(rules.get("require_volume_vs_float", True)),
+            key="room3_rule_float",
+            help=(
+                "Default: today's share volume must exceed float. "
+                "Mega-float (≥90M): 50% pre-9:30 → 80% by noon. "
+                "Low float (≤2M): stricter — need clear headroom above float."
+            ),
+        )
+        if st.button("Save filter rules", key="room3_rule_save"):
+            st.session_state.room3_filter_rules = rules
+            st.success("Rules saved — next screener pass uses these.")
+
+    with st.expander("Manual paste backup", expanded=False):
         raw = st.text_area(
-            "Paste tickers only if the webhook is down",
+            "Paste tickers if screener is offline",
             key="room3_filter_rth_paste",
-            height=100,
-            placeholder="AAPL\nNVDA\nMSFT",
+            height=80,
+            placeholder="AAPL\nNVDA",
         )
         parsed = room3_filters.parse_screener_paste(raw)
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button("Save backup list", key="room3_filter_rth_save"):
-                ingest_filter_slot(room3_filters.SLOT_RTH, parsed["tickers"])
-                st.rerun()
-        with b2:
-            if st.button("Clear backup list", key="room3_filter_rth_clear"):
-                ingest_filter_slot(room3_filters.SLOT_RTH, [])
-                st.session_state.pop("room3_filter_rth_paste", None)
-                st.rerun()
+        if st.button("Apply paste backup", key="room3_filter_rth_save"):
+            ingest_filter_slot(room3_filters.SLOT_RTH, parsed["tickers"])
+            st.rerun()
 
 
 def _render_trading_workspace(mode: str) -> None:
@@ -2897,7 +2968,7 @@ def _render_trading_workspace(mode: str) -> None:
     _render_live_dashboard(mode)
     _render_execution_posture(mode)
     _render_watch_book_panel()
-    _room3_filter_inbox_fragment()
+    _room3_screener_fragment()
     _room3_heartbeat_fragment()
     left, right = st.columns([1, 1])
     with left:

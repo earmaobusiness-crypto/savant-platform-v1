@@ -1,11 +1,8 @@
 """
 Room 3 session filter slots.
 
-TradingView has no public API to poll a saved screener. Operator copies the
-screener table (or symbol column) into a named slot. Heartbeat only watches
-the slot that matches the current session window.
-
-Start with RTH. Pre / post slots stay empty until you attach those screeners.
+Built-in screener (room3_screener) is the primary RTH feed.
+Optional paste backup + dormant TV webhook inbox remain for fallback.
 """
 
 from __future__ import annotations
@@ -208,27 +205,29 @@ def active_universe(
     *,
     window: str,
     allowed: list[str] | None,
-    live: list[str] | None = None,
+    screener: list[str] | None = None,
 ) -> list[str]:
-    """Live TradingView hits first; saved slot is backup only."""
+    """Built-in screener first; manual paste slot is backup."""
     if window not in SLOTS:
         return []
     if window not in set(allowed or []):
         return []
-    live_names: list[str] = []
-    seen: set[str] = set()
-    for raw in live or []:
-        t = _normalize_token(str(raw))
-        if not t or t in seen:
-            continue
-        seen.add(t)
-        live_names.append(t)
-        if len(live_names) >= room3_watcher.MAX_NAMES:
-            return live_names
-    if live_names:
-        return live_names
+    cap = room3_watcher.MAX_NAMES
+    if screener:
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in screener:
+            t = _normalize_token(str(raw))
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
+            if len(out) >= cap:
+                return out
+        if out:
+            return out
     names = list((slots or {}).get(window) or [])
-    return names[: room3_watcher.MAX_NAMES]
+    return names[:cap]
 
 
 def slot_label(slot: str) -> str:

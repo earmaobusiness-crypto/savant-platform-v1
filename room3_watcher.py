@@ -5,8 +5,7 @@ One stock in the filter → three maps (1m / 5m / 15m), different data diets.
 Heartbeat appends a slice (not "trade on 30s alone").
 Filter drop → purge map unless sticky (close to repertoire).
 Day end / no trade → delete maps.
-Filter feed plugs in via named session slots (RTH first).
-TradingView screener is pasted — no unofficial scrape.
+Filter feed plugs in via built-in screener (room3_screener) + watch book.
 
 Does NOT import Room 2 modules. Uses room3_bridge snapshot only for repertoire hints.
 """
@@ -23,7 +22,7 @@ import room3_engine
 ET = ZoneInfo("America/New_York")
 
 TIMEFRAMES = ("1m", "5m", "15m")
-MAX_NAMES = 10
+MAX_NAMES = 40  # cap on filtered names getting full TF maps (operator tunable later)
 STICKY_MIN_SCORE = 0.72  # keep after filter drop if map this close to repertoire
 STICKY_MAX_MINUTES = 90
 
