@@ -2963,7 +2963,19 @@ def _render_rth_filter_attach() -> None:
             "Price above Hull MA 9 (daily)",
             value=bool(rules.get("require_price_above_hma9", True)),
             key="room3_rule_hma",
-            help="1-day HMA9 like TradingView. History is split-adjusted so reverse-split names (e.g. ONFO) match TV.",
+            help=(
+                "1-day HMA9 like TradingView. Split-adjusted history. "
+                "Allows 1% slack by default so near-misses (e.g. STKH) match TV noise."
+            ),
+        )
+        rules["hma_tolerance_pct"] = st.number_input(
+            "HMA slack % (0 = strict)",
+            value=float(rules.get("hma_tolerance_pct") if rules.get("hma_tolerance_pct") is not None else 1.0),
+            min_value=0.0,
+            max_value=5.0,
+            step=0.25,
+            key="room3_rule_hma_tol",
+            help="Price may sit this % under HMA and still pass. Bridges Yahoo vs TradingView.",
         )
         rules["min_dollar_volume"] = st.number_input(
             "Min price × volume (today $)",

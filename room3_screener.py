@@ -20,7 +20,7 @@ ET = ZoneInfo("America/New_York")
 
 SCAN_INTERVAL_MINUTES = 18
 BATCH_SIZE = 120
-UNIVERSE_CAP = 8000  # stock list size (ETF-stripped); not all get full 2mo history
+UNIVERSE_CAP = 20000  # safety ceiling only — do NOT truncate mid-list (drops WETO/CAPR/etc.)
 YF_PERIOD = "2mo"  # deep history for HMA + 30d vol (survivors only)
 YF_PRESCREEN_PERIOD = "5d"  # cheap liquidity pre-pass on the full list
 YF_BATCH_WORKERS = 8
@@ -56,6 +56,8 @@ DEFAULT_RULES: dict[str, Any] = {
     "high_float_shares": 90_000_000.0,  # mega-float: time-of-day ratio instead of vol > float
     "low_float_shares": 2_000_000.0,  # tiny float: stricter headroom above float
     "min_price": 0.01,  # match TV-style sub-$1 names (was $1 and killed them)
+    # Yahoo vs TV HMA can disagree by a hair (STKH was ~0.5% under). Allow tiny slack.
+    "hma_tolerance_pct": 1.0,
     "exclude_etfs": True,
     "exchanges": ("NASDAQ", "NYSE", "AMEX"),
 }
@@ -200,17 +202,18 @@ def fetch_nyse_nasdaq_universe(
                 continue
             seen.add(sym)
             out.append(sym)
-            if len(out) >= cap:
-                break
         except Exception:
             continue
+    # Cap only AFTER full pass — early break dropped late symbols (WETO, CAPR, …)
+    # that still pass filters, while earlier alphabet/API order filled the quota.
+    out = sorted(out)[: max(1, int(cap))]
     if not out:
         return [], (
             f"Alpaca returned {len(assets)} assets but 0 matched "
             f"active/tradable stocks on {sorted(allowed)} "
             f"(skipped {etf_skipped} ETF-like names)"
         )
-    return sorted(out), ""
+    return out, ""
 
 
 def _metrics_from_history(hist) -> dict[str, float] | None:
@@ -251,7 +254,10 @@ def passes_rules(metrics: dict[str, float], rules: dict[str, Any]) -> bool:
     if metrics["vol_pct"] < float(rules.get("min_volatility_pct") or 0):
         return False
     if rules.get("require_price_above_hma9") and metrics["hma9"] > 0:
-        if metrics["close"] <= metrics["hma9"]:
+        tol = max(0.0, float(rules.get("hma_tolerance_pct") or 0.0)) / 100.0
+        # close >= HMA * (1 - tol). tol=0 → strict above; 1% keeps STKH-type near-misses.
+        floor = float(metrics["hma9"]) * (1.0 - tol)
+        if metrics["close"] < floor:
             return False
     if metrics["dollar_volume"] < float(rules.get("min_dollar_volume") or 0):
         return False
