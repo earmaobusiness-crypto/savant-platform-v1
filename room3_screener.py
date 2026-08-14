@@ -231,47 +231,37 @@ def _flatten_ohlcv(hist) -> Any | None:
             return None
         cols = hist.columns
         if getattr(cols, "nlevels", 1) > 1:
-            # Prefer selecting the Price level so we get Open/High/Low/Close/Volume
             names = [str(n).lower() if n is not None else "" for n in (cols.names or [])]
-            frame = hist
-            if "price" in names:
-                price_lvl = names.index("price")
+            lvl0 = list(map(str, cols.get_level_values(0)))
+            ohlcv = {"Open", "High", "Low", "Close", "Volume"}
+            if ohlcv & set(lvl0):
+                # Already price-on-level-0 (single ticker wrapped) — drop ticker level
                 try:
-                    frame = hist.droplevel(0 if price_lvl else 1, axis=1)
+                    hist = hist.droplevel(1, axis=1)
                 except Exception:
-                    # Fall back: take first ticker slice if present
-                    try:
-                        top = cols.get_level_values(0)[0]
-                        frame = hist[top]
-                    except Exception:
-                        return None
+                    hist = hist.copy()
+                    hist.columns = lvl0
+            elif "ticker" in names and names.index("ticker") == 0:
+                top = str(cols.get_level_values(0)[0])
+                hist = hist[top]
             else:
-                # No named levels — try common patterns
                 try:
-                    lvl0 = set(map(str, cols.get_level_values(0)))
-                    if {"Open", "High", "Low", "Close", "Volume"} & lvl0:
-                        # (Price, Ticker) → pick first ticker under Close etc.
-                        tickers = list(dict.fromkeys(cols.get_level_values(1)))
-                        if not tickers:
-                            return None
-                        frame = hist.xs(tickers[0], axis=1, level=1)
-                    else:
-                        top = cols.get_level_values(0)[0]
-                        frame = hist[top]
+                    top = str(cols.get_level_values(0)[0])
+                    hist = hist[top]
                 except Exception:
                     return None
-            hist = frame
-        # After MultiIndex collapse, columns should be flat strings
-        have = {str(c) for c in hist.columns}
-        if "Close" not in have or "Volume" not in have:
-            # Sometimes still tuples
-            try:
-                hist.columns = [
-                    c[0] if isinstance(c, tuple) else c for c in hist.columns
-                ]
-            except Exception:
-                return None
-            have = {str(c) for c in hist.columns}
+        # Collapse any leftover tuple column labels
+        flat_cols = []
+        for c in hist.columns:
+            if isinstance(c, tuple):
+                # Prefer the price name inside the tuple
+                picked = next((str(x) for x in c if str(x) in {"Open", "High", "Low", "Close", "Volume"}), str(c[0]))
+                flat_cols.append(picked)
+            else:
+                flat_cols.append(str(c))
+        hist = hist.copy()
+        hist.columns = flat_cols
+        have = set(hist.columns)
         if "Close" not in have or "Volume" not in have:
             return None
         return hist
@@ -490,6 +480,39 @@ def passes_structure_rules(
     )
 
 
+def _extract_symbol_frame(data, sym: str, *, batch_len: int):
+    """Pull one symbol's OHLCV out of a yfinance download result."""
+    if data is None or getattr(data, "empty", True):
+        return None
+    cols = data.columns
+    nlevels = int(getattr(cols, "nlevels", 1) or 1)
+    hist = None
+    try:
+        if nlevels == 1:
+            # Single-ticker flat frame (rare with group_by=ticker)
+            hist = data
+        else:
+            names = [str(n).lower() if n is not None else "" for n in (cols.names or [])]
+            lvl0 = cols.get_level_values(0)
+            lvl1 = cols.get_level_values(1) if nlevels > 1 else None
+            # Common: (Ticker, Price) — symbol on level 0
+            if sym in set(map(str, lvl0)):
+                hist = data[sym]
+            # Alternate: (Price, Ticker) — symbol on level 1
+            elif lvl1 is not None and sym in set(map(str, lvl1)):
+                hist = data.xs(sym, axis=1, level=1)
+            elif batch_len == 1:
+                # Lone ticker still MultiIndex-wrapped as (SYM, Price)
+                try:
+                    top = str(lvl0[0])
+                    hist = data[top]
+                except Exception:
+                    hist = data
+    except Exception:
+        return None
+    return _flatten_ohlcv(hist)
+
+
 def _download_daily_batches(
     symbols: list[str],
     *,
@@ -531,17 +554,7 @@ def _download_daily_batches(
             for sym in batch:
                 scanned += 1
                 try:
-                    if len(batch) == 1:
-                        hist = data
-                    else:
-                        try:
-                            hist = (
-                                data[sym]
-                                if sym in data.columns.get_level_values(0)
-                                else None
-                            )
-                        except Exception:
-                            hist = None
+                    hist = _extract_symbol_frame(data, sym, batch_len=len(batch))
                     if hist is not None and not getattr(hist, "empty", True):
                         by_sym[sym] = hist
                 except Exception:
@@ -550,17 +563,22 @@ def _download_daily_batches(
 
 
 def _liquidity_score(hist) -> float:
-    """Rough today dollar volume from a short daily window (prescreen)."""
+    """Best recent dollar volume from a short daily window (prescreen)."""
     try:
-        if hist is None or getattr(hist, "empty", True):
+        hist = _flatten_ohlcv(hist)
+        if hist is None:
             return 0.0
-        if "Close" not in hist.columns or "Volume" not in hist.columns:
-            return 0.0
-        closes = [float(x) for x in hist["Close"].dropna().tolist()]
-        vols = [float(x) for x in hist["Volume"].dropna().tolist()]
+        closes = _series_floats(hist, "Close")
+        vols = _series_floats(hist, "Volume")
         if not closes or not vols:
             return 0.0
-        return max(0.0, closes[-1] * vols[-1])
+        n = min(len(closes), len(vols), 5)
+        best = 0.0
+        for i in range(1, n + 1):
+            c, v = closes[-i], vols[-i]
+            if c > 0 and v > 0:
+                best = max(best, c * v)
+        return best
     except Exception:
         return 0.0
 
@@ -593,7 +611,8 @@ def scan_universe(
         if score >= pre_floor:
             # Also respect min price from last close when available
             try:
-                closes = [float(x) for x in hist["Close"].dropna().tolist()]
+                flat = _flatten_ohlcv(hist)
+                closes = _series_floats(flat, "Close") if flat is not None else []
                 if closes and closes[-1] < float(rules.get("min_price") or 0):
                     continue
             except Exception:
@@ -653,6 +672,11 @@ def scan_universe(
     passed.sort(key=lambda x: x[1], reverse=True)
     tickers = [t for t, _ in passed[: int(max_pass)]]
     elapsed = (datetime.now(ET) - started).total_seconds()
+    note = ""
+    if not tickers and len(pre_hist) == 0 and scanned > 0:
+        note = "Yahoo bars unreadable (column layout) — retry; parser was updated"
+    elif not tickers and not liquid and scanned > 0:
+        note = "Liquidity prescreen empty — check min dollar volume / Yahoo volume"
     return {
         "ok": True,
         "tickers": tickers,
@@ -660,11 +684,13 @@ def scan_universe(
         "stage1_passed": len(stage1),
         "structure_rejected": structure_rejected,
         "scanned": scanned,
+        "hist_ok": len(pre_hist),
         "deep_scanned": deep_scanned,
         "prescreen_liquid": len(liquid),
         "errors": errors,
         "elapsed_sec": round(elapsed, 1),
         "at": started.strftime("%H:%M:%S ET"),
+        "error": note,
     }
 
 
