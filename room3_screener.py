@@ -93,26 +93,51 @@ def historical_vol_pct(closes: list[float], lookback: int = 30) -> float | None:
     return math.sqrt(var) * math.sqrt(252.0) * 100.0
 
 
-def fetch_nyse_nasdaq_universe(*, paper: bool = True, cap: int = UNIVERSE_CAP) -> list[str]:
-    """Alpaca tradable US equities on major exchanges."""
+def _asset_field_str(value: Any) -> str:
+    """Alpaca enums stringify as 'AssetExchange.NASDAQ' — use .value when present."""
+    if value is None:
+        return ""
+    raw = getattr(value, "value", None)
+    if raw is not None:
+        return str(raw).strip()
+    return str(value).strip()
+
+
+def fetch_nyse_nasdaq_universe(
+    *, paper: bool = True, cap: int = UNIVERSE_CAP
+) -> tuple[list[str], str]:
+    """
+    Alpaca tradable US equities on major exchanges.
+    Returns (symbols, error). error is empty on success.
+    """
     try:
+        from alpaca.trading.enums import AssetClass, AssetStatus
+        from alpaca.trading.requests import GetAssetsRequest
+
         client = room3_alpaca._trading_client(paper=paper)
-        assets = client.get_all_assets() or []
-    except Exception:
-        return []
+        req = GetAssetsRequest(
+            status=AssetStatus.ACTIVE,
+            asset_class=AssetClass.US_EQUITY,
+        )
+        assets = client.get_all_assets(req) or []
+    except Exception as exc:
+        msg = str(exc).strip() or type(exc).__name__
+        return [], f"Alpaca assets failed: {msg}"
+
     allowed = {str(x).upper() for x in DEFAULT_RULES.get("exchanges") or ("NASDAQ", "NYSE")}
     out: list[str] = []
     seen: set[str] = set()
     for a in assets:
         try:
-            if str(getattr(a, "status", "") or "").lower() != "active":
+            status = _asset_field_str(getattr(a, "status", "")).lower()
+            if status and status != "active":
                 continue
             if not bool(getattr(a, "tradable", False)):
                 continue
-            sym = str(getattr(a, "symbol", "") or "").upper()
+            sym = _asset_field_str(getattr(a, "symbol", "")).upper()
             if not sym or sym in seen or "." in sym:
                 continue
-            exch = str(getattr(a, "exchange", "") or "").upper()
+            exch = _asset_field_str(getattr(a, "exchange", "")).upper()
             if exch not in allowed:
                 continue
             seen.add(sym)
@@ -121,7 +146,12 @@ def fetch_nyse_nasdaq_universe(*, paper: bool = True, cap: int = UNIVERSE_CAP) -
                 break
         except Exception:
             continue
-    return sorted(out)
+    if not out:
+        return [], (
+            f"Alpaca returned {len(assets)} assets but 0 matched "
+            f"active/tradable on {sorted(allowed)}"
+        )
+    return sorted(out), ""
 
 
 def _metrics_from_history(hist) -> dict[str, float] | None:
@@ -359,14 +389,15 @@ def scan_universe(
 
 
 def run_rth_scan(*, paper: bool = True, rules: dict[str, Any] | None = None, max_pass: int = 40) -> dict[str, Any]:
-    universe = fetch_nyse_nasdaq_universe(paper=paper)
+    universe, uni_err = fetch_nyse_nasdaq_universe(paper=paper)
     if not universe:
         return {
             "ok": False,
             "tickers": [],
-            "error": "universe empty — Alpaca connection or assets unavailable",
+            "error": uni_err or "universe empty — Alpaca connection or assets unavailable",
             "scanned": 0,
             "passed": 0,
+            "universe_size": 0,
         }
     result = scan_universe(universe, rules=rules, max_pass=max_pass)
     result["universe_size"] = len(universe)

@@ -2440,6 +2440,12 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     result = room3_alpaca.probe_alpaca_connection(paper=paper)
     if not result.get("ok"):
         st.session_state.room3_broker_truth = False
+        err = str(result.get("error") or "Alpaca sync failed")
+        # Stale "connected" + dead keys → empty screener universe. Clear the badge.
+        if "unauthorized" in err.lower() or "401" in err or "forbidden" in err.lower():
+            st.session_state.room3_alpaca_status = "waiting"
+            st.session_state.room3_alpaca_account = ""
+            st.session_state.room3_alpaca_last_check = err
         return result
     equity = float(result.get("equity") or 0)
     st.session_state.room3_broker_equity = equity
