@@ -290,27 +290,18 @@ def passes_structure_rules(
 ) -> bool:
     """Stage 2 — market cap ceiling + volume vs float.
 
-    If Yahoo/float data is missing, keep the stage-1 survivor (don't zero the belt
-    on missing metadata). Hard-reject only when data is present and fails.
+    Missing float/mcap = fail (same spirit as TradingView: can't verify → out).
     """
-    mcap = share_stats.get("market_cap")
-    fl = share_stats.get("float_shares")
-    has_mcap = mcap is not None and float(mcap) > 0
-    has_float = fl is not None and float(fl) > 0
-
-    if has_mcap and not passes_market_cap(mcap, rules):
+    if not passes_market_cap(share_stats.get("market_cap"), rules):
         return False
     if not rules.get("require_volume_vs_float", True):
         return True
-    if has_float:
-        return passes_volume_vs_float(
-            metrics.get("volume_shares") or 0,
-            fl,
-            now_et=now_et,
-            rules=rules,
-        )
-    # Float missing — allow if mcap already checked or both unknown
-    return True
+    return passes_volume_vs_float(
+        metrics.get("volume_shares") or 0,
+        share_stats.get("float_shares"),
+        now_et=now_et,
+        rules=rules,
+    )
 
 
 def scan_universe(
