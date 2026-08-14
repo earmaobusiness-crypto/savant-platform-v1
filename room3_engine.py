@@ -1,8 +1,8 @@
 """
 Room 3 execution core — gates + auto signal path.
 
-Intended loop (filters/scan wire next):
-  session window → matrix signal → gated Alpaca entry → hold → exit signal → Alpaca exit
+Intended loop:
+  session filter → screener → maps → matrix DNA match → gated Alpaca entry → hold → exit → log
 
 You supervise. The engine fires. No manual ticket desk.
 """

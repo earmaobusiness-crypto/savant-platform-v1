@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 import room3_bridge
 import room3_engine
+import room3_matrix
 
 ET = ZoneInfo("America/New_York")
 
@@ -226,30 +227,6 @@ def _append_slice(line: dict[str, Any], snap: dict[str, Any]) -> bool:
     return True
 
 
-def _score_against_repertoire(line: dict[str, Any], matrix: dict[str, Any]) -> float:
-    """
-    Soft proximity score until full matrix DNA matching is plugged in.
-    Uses map warmth + Room 2 handshake presence — does NOT invent fake entries.
-    """
-    slices = list(line.get("slices") or [])
-    if not slices:
-        return 0.0
-    warmth = min(1.0, len(slices) / float(TF_DIET.get(line.get("timeframe") or "1m", {}).get("max_slices") or 24))
-    # Recent motion energy (chart-led, especially 1m)
-    last = slices[-1]
-    energy = min(1.0, abs(float(last.get("ret") or 0)) * 40.0 + abs(float(last.get("range") or 0)) * 8.0)
-    matrix_boost = 0.15 if matrix.get("ready") else 0.0
-    # Heavier TFs lean a bit more on accumulated map than instant energy
-    tf = str(line.get("timeframe") or "1m")
-    if tf == "1m":
-        score = 0.55 * energy + 0.30 * warmth + matrix_boost
-    elif tf == "5m":
-        score = 0.40 * energy + 0.45 * warmth + matrix_boost
-    else:
-        score = 0.30 * energy + 0.55 * warmth + matrix_boost
-    return round(min(1.0, score), 4)
-
-
 def _maybe_mark_sticky(line: dict[str, Any]) -> None:
     score = float(line.get("score") or 0)
     if score >= STICKY_MIN_SCORE and line.get("state") in ("watching", "committed"):
@@ -263,13 +240,7 @@ def _maybe_mark_sticky(line: dict[str, Any]) -> None:
 
 
 def evaluate_line_signals(line: dict[str, Any]) -> dict[str, Any] | None:
-    """
-    Produce an entry/exit intent only when rules say so.
-
-    Until TradingView filters + matrix DNA are plugged in, this stays conservative:
-    no automatic entries from warmup alone. Exit still returns if state==in and
-    an exit_signal was stamped (future path).
-    """
+    """Emit queued entry/exit intents stamped by matrix DNA matching."""
     if line.get("state") == "in" and line.get("exit_signal"):
         sig = dict(line["exit_signal"])
         line["exit_signal"] = None
@@ -361,6 +332,7 @@ def tick_watcher(
         return book, signals
 
     _ensure_lines_for_universe(book)
+    repertoire = room3_bridge.matrix_repertoire(session_state)
     matrix = room3_bridge.matrix_snapshot(session_state)
 
     # Cap work: universe already capped; scan lines
@@ -372,7 +344,13 @@ def tick_watcher(
             continue
         snap = _fetch_bar_snapshot(str(line["ticker"]), str(line["timeframe"]))
         _append_slice(line, snap or {})
-        line["score"] = _score_against_repertoire(line, matrix)
+        room3_matrix.maybe_queue_matrix_signals(
+            book,
+            line,
+            repertoire,
+            session_state,
+            engine_armed=engine_armed,
+        )
         if line.get("in_filter") is False:
             _maybe_mark_sticky(line)
         elif float(line.get("score") or 0) >= STICKY_MIN_SCORE:
@@ -384,9 +362,11 @@ def tick_watcher(
                 signals.append(sig)
 
     n_lines = len(book.get("lines") or {})
+    layouts = int(repertoire.get("layout_count") or 0)
     book["last_note"] = (
         f"Scanned {n_lines} TF maps · universe {len(book.get('universe') or [])} · "
-        f"matrix={'ready' if matrix.get('ready') else 'quiet'}"
+        f"matrix={'ready' if matrix.get('ready') else 'quiet'} · "
+        f"{layouts} layout(s) · DNA ≥{room3_matrix.MATCH_THRESHOLD_PCT}% → entry"
     )
     return book, signals
 
@@ -422,6 +402,8 @@ def book_status_rows(book: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "Line": key,
                 "State": line.get("state"),
+                "Match%": int(line.get("match_pct") or 0),
+                "Layout": str(line.get("nearest_layout") or "—")[:16],
                 "Slices": len(line.get("slices") or []),
                 "Score": f"{float(line.get('score') or 0):.2f}",
                 "Filter": "in" if line.get("in_filter") else ("sticky" if line.get("sticky") else "out"),

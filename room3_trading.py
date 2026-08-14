@@ -22,7 +22,7 @@ import room3_alpaca
 import room3_engine
 import room3_filters
 import room3_ibkr
-import room3_screener
+import room3_matrix
 import room3_watcher
 
 ROOM3_MODE_PAPER = "paper"
@@ -262,6 +262,11 @@ def init_room3_session_state() -> None:
         st.session_state.room3_broker_day_pl_pct = None
     # Drop legacy local-only clear flag if an old session still carries it
     st.session_state.pop("room3_positions_pinned_empty", None)
+    if not st.session_state.get("room3_layout_hydrated_once"):
+        import room3_bridge
+
+        st.session_state.room3_layout_count = room3_bridge.ensure_layout_library(st.session_state)
+        st.session_state.room3_layout_hydrated_once = True
 
 
 def _inject_room3_css() -> None:
@@ -2649,9 +2654,17 @@ def _render_execution_posture(mode: str) -> None:
     with mh4:
         st.metric("Weather", hs["weather"] if hs["weather"] != "—" else "—")
     if not hs["ready"]:
-        st.caption("Matrix handshake quiet — open Room 2 so layouts/patterns hydrate into session.")
+        st.warning(
+            "Matrix DNA empty — deploy/save patterns in **Room 2**, or set Supabase secrets "
+            "so layouts hydrate from vault on startup."
+        )
     else:
-        st.caption("Matrix handshake live from session RAM (Room 2).")
+        src = hs.get("source") or "session"
+        st.caption(
+            f"Matrix DNA live ({src}) · "
+            f"entry when map match ≥ **{room3_matrix.MATCH_THRESHOLD_PCT}%** · "
+            f"exit on stop / target / match fade · arm engine to fire Alpaca orders."
+        )
 
     if mode == ROOM3_MODE_LIVE and not room3_engine.LIVE_ORDERS_ENABLED:
         st.info("Live orders are hard-disabled. Auto path is paper-only until you enable live.")
