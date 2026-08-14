@@ -342,71 +342,54 @@ def fetch_broker_day_pl(paper: bool = True) -> dict[str, Any]:
         }
 
 
-def _fetch_fill_activities_raw(paper: bool = True) -> list[dict[str, Any]]:
-    """alpaca-py 0.44 has no activities helper — hit REST directly."""
-    creds = load_alpaca_credentials(paper=paper)
-    if not creds["key"] or not creds["secret"]:
-        return []
-    base = (creds["endpoint"] or PAPER_BASE_URL).rstrip("/")
+def _et_trading_day(now: datetime | None = None):
+    """Match Room 3 session day — rolls at 4:00 AM Eastern."""
+    from datetime import timedelta
+
     et = ZoneInfo("America/New_York")
-    today = datetime.now(et).date().isoformat()
-    qs = urllib.parse.urlencode({"activity_types": "FILL", "date": today, "page_size": 100})
-    url = f"{base}/v2/account/activities?{qs}"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "APCA-API-KEY-ID": creds["key"],
-            "APCA-API-SECRET-KEY": creds["secret"],
-            "Accept": "application/json",
-        },
-        method="GET",
-    )
+    now = now or datetime.now(et)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=et)
+    else:
+        now = now.astimezone(et)
+    if now.hour < 4:
+        return (now - timedelta(days=1)).date()
+    return now.date()
+
+
+def _parse_alpaca_ts(raw: Any) -> datetime | None:
+    et = ZoneInfo("America/New_York")
+    if raw is None:
+        return None
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-        return payload if isinstance(payload, list) else []
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, OSError):
-        return []
+        if isinstance(raw, datetime):
+            ts = raw
+        else:
+            ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=et)
+        return ts.astimezone(et)
+    except Exception:
+        return None
 
 
-def fetch_closed_trades_today(paper: bool = True) -> list[dict[str, Any]]:
-    """
-    Rebuild today's closed round-trips from Alpaca FILL activities (ET day).
-    Open legs stay out — those belong in open positions.
-    """
-    acts = _fetch_fill_activities_raw(paper=paper)
-    if not acts:
-        return []
-
-    et = ZoneInfo("America/New_York")
-    today = datetime.now(et).date()
+def _closed_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    session_day = _et_trading_day()
     lots: dict[str, list[dict[str, Any]]] = {}
     closed: list[dict[str, Any]] = []
-
-    ordered = sorted(
-        acts,
-        key=lambda a: str(a.get("transaction_time") or a.get("timestamp") or ""),
-    )
-    for a in ordered:
+    for ev in events:
         try:
-            raw_ts = a.get("transaction_time") or a.get("timestamp")
-            if not raw_ts:
-                continue
-            ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).astimezone(et)
-            if ts.date() != today:
-                continue
-            sym = str(a.get("symbol") or "").upper()
-            side = str(a.get("side") or "").lower()
-            qty = abs(float(a.get("qty") or 0))
-            px = float(a.get("price") or 0)
-            if not sym or qty <= 0 or px <= 0:
-                continue
-            oid = str(a.get("id") or a.get("order_id") or f"{sym}-{ts.isoformat()}")
+            sym = str(ev["symbol"]).upper()
+            side = str(ev["side"]).lower()
+            qty = abs(float(ev["qty"]))
+            px = float(ev["price"])
+            ts: datetime = ev["ts"]
+            oid = str(ev["id"])
             book = lots.setdefault(sym, [])
-            if side in ("buy", "b"):
+            if side == "buy":
                 book.append({"qty": qty, "px": px, "ts": ts.strftime("%H:%M:%S")})
                 continue
-            if side not in ("sell", "s"):
+            if side != "sell":
                 continue
             remain = qty
             entry_px_acc = 0.0
@@ -423,7 +406,7 @@ def fetch_closed_trades_today(paper: bool = True) -> list[dict[str, Any]]:
                 remain -= take
                 if float(lot["qty"]) <= 1e-9:
                     book.pop(0)
-            if entry_qty_acc <= 0:
+            if entry_qty_acc <= 0 or _et_trading_day(ts) != session_day:
                 continue
             avg_entry = entry_px_acc / entry_qty_acc
             pnl = (px - avg_entry) * entry_qty_acc
@@ -451,14 +434,210 @@ def fetch_closed_trades_today(paper: bool = True) -> list[dict[str, Any]]:
     return closed
 
 
+def _fetch_fill_events(paper: bool = True) -> tuple[list[dict[str, Any]], str]:
+    """
+    Filled buy/sell legs for FIFO. Prefer closed orders (Trading API).
+    Activities `date=` is UTC and misses evening ET fills — avoid that.
+    """
+    from datetime import timedelta
+
+    et = ZoneInfo("America/New_York")
+    session_day = _et_trading_day()
+    lookback_start = datetime.combine(
+        session_day - timedelta(days=5), datetime.min.time(), tzinfo=et
+    )
+
+    events: list[dict[str, Any]] = []
+    err = ""
+
+    try:
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        client = _trading_client(paper=paper)
+        orders = (
+            client.get_orders(
+                GetOrdersRequest(
+                    status=QueryOrderStatus.CLOSED,
+                    after=lookback_start,
+                    direction="asc",
+                    limit=100,
+                )
+            )
+            or []
+        )
+        for o in orders:
+            filled_qty = float(getattr(o, "filled_qty", 0) or 0)
+            avg = getattr(o, "filled_avg_price", None)
+            px = float(avg) if avg not in (None, "") else 0.0
+            if filled_qty <= 0 or px <= 0:
+                continue
+            ts = _parse_alpaca_ts(
+                getattr(o, "filled_at", None) or getattr(o, "submitted_at", None)
+            )
+            if ts is None:
+                continue
+            side_raw = getattr(o, "side", "") or ""
+            side = str(getattr(side_raw, "value", side_raw) or "").lower()
+            sym = str(getattr(o, "symbol", "") or "").upper()
+            oid = str(getattr(o, "id", "") or "")
+            if not sym or side not in ("buy", "sell"):
+                continue
+            events.append(
+                {
+                    "symbol": sym,
+                    "side": side,
+                    "qty": filled_qty,
+                    "price": px,
+                    "ts": ts,
+                    "id": oid or f"{sym}-{ts.isoformat()}",
+                    "source": "order",
+                }
+            )
+    except Exception as exc:
+        err = str(exc).strip() or type(exc).__name__
+
+    if events:
+        events.sort(key=lambda e: e["ts"])
+        return events, err
+
+    try:
+        creds = load_alpaca_credentials(paper=paper)
+        if not creds["key"] or not creds["secret"]:
+            return [], err or "Alpaca keys missing"
+        base = (creds["endpoint"] or PAPER_BASE_URL).rstrip("/")
+        after = lookback_start.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+        until = (datetime.now(et) + timedelta(minutes=5)).astimezone(ZoneInfo("UTC")).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        qs = urllib.parse.urlencode(
+            {
+                "activity_types": "FILL",
+                "after": after,
+                "until": until,
+                "direction": "asc",
+                "page_size": 100,
+            }
+        )
+        url = f"{base}/v2/account/activities?{qs}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "APCA-API-KEY-ID": creds["key"],
+                "APCA-API-SECRET-KEY": creds["secret"],
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        for a in payload if isinstance(payload, list) else []:
+            ts = _parse_alpaca_ts(a.get("transaction_time") or a.get("timestamp"))
+            if ts is None:
+                continue
+            sym = str(a.get("symbol") or "").upper()
+            side = str(a.get("side") or "").lower()
+            qty = abs(float(a.get("qty") or 0))
+            px = float(a.get("price") or 0)
+            oid = str(a.get("order_id") or a.get("id") or "")
+            if side in ("b",):
+                side = "buy"
+            if side in ("s",):
+                side = "sell"
+            if not sym or side not in ("buy", "sell") or qty <= 0 or px <= 0:
+                continue
+            events.append(
+                {
+                    "symbol": sym,
+                    "side": side,
+                    "qty": qty,
+                    "price": px,
+                    "ts": ts,
+                    "id": oid or f"{sym}-{ts.isoformat()}",
+                    "source": "activity",
+                }
+            )
+        events.sort(key=lambda e: e["ts"])
+    except Exception as exc:
+        msg = str(exc).strip() or type(exc).__name__
+        err = f"{err}; {msg}" if err else msg
+    return events, err
+
+
+def fetch_closed_trades_today(paper: bool = True) -> list[dict[str, Any]]:
+    """Rebuild this trading day's closed round-trips from Alpaca fills (manual EH included)."""
+    events, _err = _fetch_fill_events(paper=paper)
+    return _closed_from_events(events)
+
+
+def fetch_closed_trades_today_debug(paper: bool = True) -> dict[str, Any]:
+    """Closed trades plus sync diagnostics for the Room 3 refresh caption."""
+    events, err = _fetch_fill_events(paper=paper)
+    closed = _closed_from_events(events)
+    return {
+        "closed": closed,
+        "fill_events": len(events),
+        "closed_count": len(closed),
+        "error": err,
+        "session_day": _et_trading_day().isoformat(),
+    }
+
+
+def fetch_latest_price(symbol: str, *, paper: bool = True) -> float | None:
+    """Best-effort last price for EH limit orders (trade → position → None)."""
+    ticker = str(symbol or "").strip().upper()
+    if not ticker:
+        return None
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockLatestTradeRequest
+
+        creds = load_alpaca_credentials(paper=paper)
+        data = StockHistoricalDataClient(creds["key"], creds["secret"])
+        latest = data.get_stock_latest_trade(StockLatestTradeRequest(symbol_or_symbols=ticker))
+        trade = latest.get(ticker) if isinstance(latest, dict) else None
+        px = float(getattr(trade, "price", 0) or 0)
+        if px > 0:
+            return px
+    except Exception:
+        pass
+    try:
+        client = _trading_client(paper=paper)
+        pos = client.get_open_position(ticker)
+        px = float(getattr(pos, "current_price", 0) or getattr(pos, "lastday_price", 0) or 0)
+        if px > 0:
+            return px
+    except Exception:
+        pass
+    return None
+
+
+def session_needs_extended_hours(session_window: str | None = None) -> bool:
+    """Alpaca fills market orders in RTH only; pre/post/overnight need EH limits."""
+    try:
+        import room3_engine
+
+        window = session_window or room3_engine.detect_session_window()
+        return window != room3_engine.SESSION_RTH
+    except Exception:
+        # Fail safe: outside unknown clock, prefer EH-capable limit
+        return True
+
+
 def place_market_order(
     symbol: str,
     side: str,
     qty: float,
     *,
     paper: bool = True,
+    limit_price: float | None = None,
+    ref_price: float | None = None,
+    extended_hours: bool | None = None,
 ) -> dict[str, Any]:
-    """Submit a paper/live market order. Returns ok + fill snapshot or error."""
+    """
+    Submit equity order. RTH → market; outside RTH → limit + extended_hours
+    (Alpaca will not fill market orders in pre/post — they queue until 9:30 ET).
+    """
     ticker = str(symbol or "").strip().upper()
     side_l = str(side or "").strip().lower()
     try:
@@ -474,18 +653,52 @@ def place_market_order(
 
     try:
         from alpaca.trading.enums import OrderSide, TimeInForce
-        from alpaca.trading.requests import MarketOrderRequest
+        from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
     except ImportError:
         return {"ok": False, "error": "alpaca-py not installed — run: pip install alpaca-py"}
 
+    use_eh = bool(extended_hours) if extended_hours is not None else session_needs_extended_hours()
+    order_side = OrderSide.BUY if side_l == "buy" else OrderSide.SELL
+
     try:
         client = _trading_client(paper=paper)
-        req = MarketOrderRequest(
-            symbol=ticker,
-            qty=shares,
-            side=OrderSide.BUY if side_l == "buy" else OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
-        )
+        if use_eh:
+            px = float(limit_price or 0) or float(ref_price or 0) or (fetch_latest_price(ticker, paper=paper) or 0.0)
+            if px <= 0:
+                return {
+                    "ok": False,
+                    "error": (
+                        "Extended-hours needs a limit price — no last quote available. "
+                        "Pass limit_price / ref_price, or retry in market hours."
+                    ),
+                }
+            # Slightly aggressive so thin EH books still have a chance to fill
+            slip = 0.01
+            if side_l == "buy":
+                limit_px = round(px * (1.0 + slip), 2)
+            else:
+                limit_px = round(px * (1.0 - slip), 2)
+            if limit_px <= 0:
+                limit_px = round(px, 2)
+            req = LimitOrderRequest(
+                symbol=ticker,
+                qty=shares,
+                side=order_side,
+                time_in_force=TimeInForce.DAY,
+                limit_price=limit_px,
+                extended_hours=True,
+            )
+            order_kind = "limit+extended_hours"
+        else:
+            req = MarketOrderRequest(
+                symbol=ticker,
+                qty=shares,
+                side=order_side,
+                time_in_force=TimeInForce.DAY,
+            )
+            limit_px = None
+            order_kind = "market"
+
         order = client.submit_order(order_data=req)
         order_id = str(getattr(order, "id", "") or "")
         status = str(getattr(order, "status", "") or "")
@@ -501,8 +714,42 @@ def place_market_order(
             "status": status,
             "filled_qty": filled_qty,
             "filled_avg_price": fill_px,
+            "limit_price": limit_px,
+            "order_kind": order_kind,
+            "extended_hours": use_eh,
             "paper": paper,
             "error": "",
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc).strip() or type(exc).__name__}
+
+
+def close_position_now(
+    symbol: str,
+    *,
+    paper: bool = True,
+    qty: float | None = None,
+) -> dict[str, Any]:
+    """
+    Flatten one symbol. Outside RTH uses EH limit (dashboard 'X / liquidate'
+    often queues a market order until 9:30).
+    """
+    ticker = str(symbol or "").strip().upper()
+    if not ticker:
+        return {"ok": False, "error": "Ticker required."}
+    try:
+        client = _trading_client(paper=paper)
+        pos = client.get_open_position(ticker)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc).strip() or f"No open position for {ticker}"}
+    try:
+        raw_qty = float(getattr(pos, "qty", 0) or 0)
+    except (TypeError, ValueError):
+        raw_qty = 0.0
+    if raw_qty == 0:
+        return {"ok": False, "error": f"{ticker} already flat"}
+    shares = abs(float(qty) if qty is not None else raw_qty)
+    # Long → sell; short → buy
+    side = "sell" if raw_qty > 0 else "buy"
+    ref = float(getattr(pos, "current_price", 0) or 0) or None
+    return place_market_order(ticker, side, shares, paper=paper, ref_price=ref)

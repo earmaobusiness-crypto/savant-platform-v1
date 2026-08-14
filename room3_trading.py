@@ -1414,22 +1414,52 @@ def _render_open_positions() -> None:
     st.markdown("### Open positions")
     rows = st.session_state.room3_open_positions or []
     if str(st.session_state.get("room3_broker") or "") == "alpaca":
-        if st.button("Refresh from Alpaca", key="room3_pos_resync", use_container_width=True):
-            mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
-            synced = _sync_alpaca_account_into_session(paper=(mode != ROOM3_MODE_LIVE))
-            if synced.get("ok"):
-                n = len(st.session_state.get("room3_open_positions") or [])
-                closed_n = sum(
-                    1
-                    for r in (st.session_state.get("room3_trade_history") or [])
-                    if r.get("broker_source")
-                )
-                st.success(
-                    f"Alpaca truth · {n} open · {closed_n} closed today in trade log"
-                )
-            else:
-                st.error(synced.get("error") or "Sync failed")
-            st.rerun()
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Refresh from Alpaca", key="room3_pos_resync", use_container_width=True):
+                mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
+                synced = _sync_alpaca_account_into_session(paper=(mode != ROOM3_MODE_LIVE))
+                if synced.get("ok"):
+                    n = len(st.session_state.get("room3_open_positions") or [])
+                    sync_meta = st.session_state.get("room3_broker_closed_sync") or {}
+                    closed_n = int(sync_meta.get("closed_count") or 0)
+                    st.success(
+                        f"Alpaca truth · {n} open · {closed_n} closed today in trade log"
+                    )
+                    if sync_meta.get("error"):
+                        st.warning(f"Closed-fill sync note: {sync_meta.get('error')}")
+                else:
+                    st.error(synced.get("error") or "Sync failed")
+                st.rerun()
+        with c2:
+            if rows and st.button(
+                "Flatten open (EH limit)",
+                key="room3_pos_flatten_eh",
+                use_container_width=True,
+                help=(
+                    "Alpaca dashboard X often sends a market order that waits until 9:30. "
+                    "This submits an extended-hours limit so pre/post can actually fill."
+                ),
+            ):
+                mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
+                paper = mode != ROOM3_MODE_LIVE
+                results = []
+                for r in rows:
+                    sym = str(r.get("ticker") or "").upper()
+                    if not sym:
+                        continue
+                    results.append(room3_alpaca.close_position_now(sym, paper=paper))
+                _sync_alpaca_account_into_session(paper=paper)
+                ok_n = sum(1 for x in results if x.get("ok"))
+                err = next((x.get("error") for x in results if not x.get("ok")), "")
+                kinds = {x.get("order_kind") for x in results if x.get("ok")}
+                if ok_n:
+                    st.success(
+                        f"Submitted {ok_n} flatten order(s) · {', '.join(sorted(k for k in kinds if k))}"
+                    )
+                if err:
+                    st.error(err)
+                st.rerun()
 
     rows = st.session_state.room3_open_positions or []
     if not rows:
@@ -1452,9 +1482,12 @@ def _render_open_positions() -> None:
             }
         )
     _render_dark_table(display)
+    window = room3_engine.detect_session_window()
     st.caption(
-        "Open list mirrors Alpaca only. Closing a trade in Alpaca removes it here and "
-        "adds it to Today's trade log / summary — clearing the UI does not erase that it happened."
+        f"Session now: {room3_engine.session_label(window)}. "
+        "Outside regular hours Alpaca only fills **limit + extended hours** — "
+        "market / dashboard liquidate waits until 9:30 ET. "
+        "Cancel those queued market closes in Recent orders, then use Flatten open (EH limit)."
     )
 
 
@@ -1508,9 +1541,30 @@ def _render_trade_history() -> None:
             }
         )
     if not rows:
-        st.caption("Log empty.")
+        sync_meta = st.session_state.get("room3_broker_closed_sync") or {}
+        detail = ""
+        if sync_meta:
+            detail = (
+                f" Last sync {sync_meta.get('at') or '—'} · "
+                f"{sync_meta.get('fill_events', 0)} fills seen · "
+                f"{sync_meta.get('closed_count', 0)} closed built"
+            )
+            if sync_meta.get("error"):
+                detail += f" · {sync_meta.get('error')}"
+        st.caption(
+            "Log empty — closed Alpaca fills should land here after Refresh from Alpaca."
+            + detail
+        )
         return
     _render_dark_table(rows)
+    sync_meta = st.session_state.get("room3_broker_closed_sync") or {}
+    if sync_meta:
+        st.caption(
+            f"Broker closed sync · {sync_meta.get('at') or '—'} · "
+            f"session {sync_meta.get('session_day') or '—'} · "
+            f"{sync_meta.get('closed_count', 0)} closed from "
+            f"{sync_meta.get('fill_events', 0)} fills"
+        )
 
     fb = st.session_state.room3_strategy_feedback or {}
     if fb:
@@ -2384,9 +2438,17 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     )
     # Open = still open at broker. Flat account ⇒ empty open table.
     st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(paper=paper) or []
-    # Closed today stays in the log even after the position is gone.
-    closed = room3_alpaca.fetch_closed_trades_today(paper=paper) or []
+    # Closed today stays in the log even after the position is gone (manual EH included).
+    dbg = room3_alpaca.fetch_closed_trades_today_debug(paper=paper)
+    closed = dbg.get("closed") or []
     _merge_broker_closed_trades(closed)
+    st.session_state.room3_broker_closed_sync = {
+        "fill_events": int(dbg.get("fill_events") or 0),
+        "closed_count": int(dbg.get("closed_count") or 0),
+        "error": str(dbg.get("error") or ""),
+        "session_day": str(dbg.get("session_day") or ""),
+        "at": datetime.now(ET).strftime("%H:%M:%S ET"),
+    }
     st.session_state.room3_broker_day_pl = float(result.get("day_pl") or 0)
     st.session_state.room3_broker_day_pl_pct = float(result.get("day_pl_pct") or 0)
     st.session_state.room3_last_broker_sync = datetime.now(ET).strftime("%H:%M:%S ET")

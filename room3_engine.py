@@ -194,7 +194,23 @@ def execute_matrix_signal(
     if intent == "entry" and not side:
         side = "buy"
 
-    result = room3_alpaca.place_market_order(symbol, side, qty, paper=paper)
+    def _opt_float(key: str) -> float | None:
+        raw = signal.get(key)
+        if raw in (None, ""):
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    result = room3_alpaca.place_market_order(
+        symbol,
+        side,
+        qty,
+        paper=paper,
+        limit_price=_opt_float("limit_price"),
+        ref_price=_opt_float("ref_price") or _opt_float("entry_price"),
+    )
     result = dict(result)
     result["intent"] = intent
     result["strategy"] = str(signal.get("strategy") or "matrix")
