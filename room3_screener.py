@@ -55,8 +55,6 @@ DEFAULT_RULES: dict[str, Any] = {
     "low_float_shares": 2_000_000.0,  # tiny float: stricter headroom above float
     "min_price": 0.01,  # match TV-style sub-$1 names (was $1 and killed them)
     "exclude_etfs": True,
-    # Day-trade HMA: check price > HMA9 on 1m (not daily). Daily HMA dropped ONFO-type runners.
-    "hma_interval": "1m",
     "exchanges": ("NASDAQ", "NYSE", "AMEX"),
 }
 
@@ -76,16 +74,39 @@ def _wma(values: list[float], period: int) -> float | None:
     return sum(v * w for v, w in zip(tail, weights)) / denom
 
 
+def _adjust_close_splits(closes: list[float]) -> list[float]:
+    """
+    TradingView adjusts history for splits; Yahoo sometimes leaves a raw jump
+    (e.g. ONFO 0.04 → 2.40). Re-scale older closes across big gaps so HMA matches TV.
+    """
+    if len(closes) < 2:
+        return list(closes)
+    out = [float(x) for x in closes]
+    for i in range(1, len(out)):
+        prev, cur = out[i - 1], out[i]
+        if prev <= 0 or cur <= 0:
+            continue
+        ratio = cur / prev
+        # Reverse split (price jumps up) or forward split (price gaps down)
+        if ratio >= 8.0:
+            for j in range(i):
+                out[j] *= ratio
+        elif ratio <= 0.125:
+            for j in range(i):
+                out[j] *= ratio
+    return out
+
+
 def hull_ma9(closes: list[float]) -> float | None:
     """
-    Standard Hull MA(9): WMA(floor(sqrt(9))) of (2*WMA(4) - WMA(9)).
-    Same definition TradingView Pine uses for HMA.
+    TradingView-style Hull MA(9):
+    wma(2 * wma(src, length/2) - wma(src, length), round(sqrt(length)))
     """
     n = 9
     if len(closes) < n:
         return None
     half = max(1, n // 2)
-    sqrt_n = max(1, int(math.floor(math.sqrt(n))))
+    sqrt_n = max(1, int(round(math.sqrt(n))))
     series: list[float] = []
     for i in range(n, len(closes) + 1):
         chunk = closes[:i]
@@ -196,10 +217,12 @@ def _metrics_from_history(hist) -> dict[str, float] | None:
             return None
         if "Close" not in hist.columns or "Volume" not in hist.columns:
             return None
-        closes = [float(x) for x in hist["Close"].dropna().tolist()]
+        closes_raw = [float(x) for x in hist["Close"].dropna().tolist()]
         vols = [float(x) for x in hist["Volume"].dropna().tolist()]
-        if len(closes) < 12 or len(vols) < 10:
+        if len(closes_raw) < 12 or len(vols) < 10:
             return None
+        # Split-adjust closes for HMA / hist-vol (TV does this; raw Yahoo often doesn't)
+        closes = _adjust_close_splits(closes_raw)
         close = closes[-1]
         vol_today = vols[-1]
         avg_vol_10 = sum(vols[-10:]) / min(10, len(vols[-10:]))
@@ -220,52 +243,19 @@ def _metrics_from_history(hist) -> dict[str, float] | None:
 
 
 def passes_rules(metrics: dict[str, float], rules: dict[str, Any]) -> bool:
-    """Stage 1 liquidity — price/vol/dollar-volume (HMA checked separately on intraday)."""
+    """Stage 1 — daily price/vol/HMA/dollar-volume (TV-style 1D HMA9)."""
     if metrics["close"] < float(rules.get("min_price") or 0):
         return False
     if metrics["vol_pct"] < float(rules.get("min_volatility_pct") or 0):
         return False
+    if rules.get("require_price_above_hma9") and metrics["hma9"] > 0:
+        if metrics["close"] <= metrics["hma9"]:
+            return False
     if metrics["dollar_volume"] < float(rules.get("min_dollar_volume") or 0):
         return False
     if metrics["dollar_avg_vol_10d"] < float(rules.get("min_dollar_avg_vol_10d") or 0):
         return False
     return True
-
-
-def price_above_hma9_intraday(sym: str, *, interval: str = "1m") -> bool | None:
-    """
-    True if last price > HMA9 on intraday bars.
-    None = could not compute (treat as fail when HMA required).
-    """
-    import yfinance as yf
-
-    period = "1d" if interval == "1m" else "5d"
-    try:
-        hist = yf.download(
-            sym,
-            period=period,
-            interval=interval,
-            auto_adjust=True,
-            progress=False,
-            threads=False,
-        )
-    except Exception:
-        return None
-    if hist is None or getattr(hist, "empty", True) or "Close" not in hist.columns:
-        return None
-    close_col = hist["Close"]
-    try:
-        if hasattr(close_col, "columns"):
-            close_col = close_col.iloc[:, 0]
-        closes = [float(x) for x in close_col.dropna().values.tolist()]
-    except Exception:
-        return None
-    if len(closes) < 12:
-        return None
-    hma = hull_ma9(closes)
-    if hma is None or hma <= 0:
-        return None
-    return closes[-1] > hma
 
 
 def required_volume_float_ratio(
@@ -458,28 +448,6 @@ def scan_universe(
                 except Exception:
                     errors += 1
 
-    # HMA9 on 1m (day-trade), not daily — daily HMA wrongly cuts runners like ONFO.
-    hma_rejected = 0
-    if stage1 and rules.get("require_price_above_hma9", True):
-        interval = str(rules.get("hma_interval") or "1m")
-        kept: list[tuple[str, dict[str, float]]] = []
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            futures = {
-                pool.submit(price_above_hma9_intraday, sym, interval=interval): (sym, m)
-                for sym, m in stage1
-            }
-            for fut in as_completed(futures):
-                sym, m = futures[fut]
-                try:
-                    ok = fut.result()
-                except Exception:
-                    ok = None
-                if ok is True:
-                    kept.append((sym, m))
-                else:
-                    hma_rejected += 1
-        stage1 = kept
-
     passed: list[tuple[str, float]] = []
     structure_rejected = 0
     if stage1:
@@ -519,7 +487,6 @@ def scan_universe(
         "tickers": tickers,
         "passed": len(passed),
         "stage1_passed": len(stage1),
-        "hma_rejected": hma_rejected,
         "structure_rejected": structure_rejected,
         "scanned": scanned,
         "errors": errors,
