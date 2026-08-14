@@ -309,13 +309,14 @@ def tick_watcher(
     session_state: Any,
     session_allowed: bool,
     engine_armed: bool,
+    scan_allowed: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """
     One heartbeat:
       - sync lines to filter universe
       - append TF slices (diets)
-      - score sticky proximity
-      - emit queued signals (from filter/matrix adapter)
+      - score vs full matrix library (layout · strategy · TF buckets)
+      - emit queued signals only when scan + session + armed allow trading
     Returns (book, signals_to_fire).
     """
     book = dict(book or empty_book())
@@ -323,19 +324,18 @@ def tick_watcher(
     book["ticks"] = int(book.get("ticks") or 0) + 1
     book["last_tick"] = datetime.now(ET).strftime("%H:%M:%S ET")
 
-    if not session_allowed:
-        book["last_note"] = "Session filter closed / not armed for this window — maps held, no new scan."
+    if not scan_allowed:
+        book["last_note"] = "Scan paused — no ticker universe."
         return book, signals
 
     if book.get("awaiting_filters") or not (book.get("universe") or []):
-        book["last_note"] = "Eyes ready · waiting for TradingView filter names."
+        book["last_note"] = "Eyes ready · waiting for filter names (screener or paste)."
         return book, signals
+
+    trade_ok = bool(session_allowed and engine_armed)
 
     _ensure_lines_for_universe(book)
     repertoire = room3_bridge.matrix_repertoire(session_state)
-    matrix = room3_bridge.matrix_snapshot(session_state)
-
-    # Cap work: universe already capped; scan lines
     for key, line in list((book.get("lines") or {}).items()):
         if line.get("state") == "flat_day":
             continue
@@ -349,24 +349,25 @@ def tick_watcher(
             line,
             repertoire,
             session_state,
-            engine_armed=engine_armed,
+            engine_armed=trade_ok,
         )
         if line.get("in_filter") is False:
             _maybe_mark_sticky(line)
         elif float(line.get("score") or 0) >= STICKY_MIN_SCORE:
             _maybe_mark_sticky(line)
 
-        if engine_armed:
+        if trade_ok:
             sig = evaluate_line_signals(line)
             if sig:
                 signals.append(sig)
 
     n_lines = len(book.get("lines") or {})
     layouts = int(repertoire.get("layout_count") or 0)
+    trade_note = "trading ON" if trade_ok else "maps only (arm + session to trade)"
     book["last_note"] = (
         f"Scanned {n_lines} TF maps · universe {len(book.get('universe') or [])} · "
-        f"matrix={'ready' if matrix.get('ready') else 'quiet'} · "
-        f"{layouts} layout(s) · DNA ≥{room3_matrix.MATCH_THRESHOLD_PCT}% → entry"
+        f"{layouts} matrix buckets · {trade_note} · "
+        f"DNA ≥{room3_matrix.MATCH_THRESHOLD_PCT}%"
     )
     return book, signals
 
@@ -404,6 +405,7 @@ def book_status_rows(book: dict[str, Any]) -> list[dict[str, Any]]:
                 "State": line.get("state"),
                 "Match%": int(line.get("match_pct") or 0),
                 "Layout": str(line.get("nearest_layout") or "—")[:16],
+                "Strategy": str(line.get("nearest_strategy") or "—")[:12],
                 "Slices": len(line.get("slices") or []),
                 "Score": f"{float(line.get('score') or 0):.2f}",
                 "Filter": "in" if line.get("in_filter") else ("sticky" if line.get("sticky") else "out"),

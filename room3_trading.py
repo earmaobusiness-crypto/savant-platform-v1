@@ -266,7 +266,8 @@ def init_room3_session_state() -> None:
     if not st.session_state.get("room3_layout_hydrated_once"):
         import room3_bridge
 
-        st.session_state.room3_layout_count = room3_bridge.ensure_layout_library(st.session_state)
+        room3_bridge.ensure_layout_library(st.session_state)
+        st.session_state.pop("room3_repertoire_cache", None)
         st.session_state.room3_layout_hydrated_once = True
 
 
@@ -2664,10 +2665,12 @@ def _render_execution_posture(mode: str) -> None:
             st.caption(note)
     else:
         src = hs.get("source") or "session"
+        vault_n = int(hs.get("vault_rows") or hs.get("pattern_count") or 0)
         st.caption(
-            f"Matrix DNA live ({src}) · "
+            f"Collective matrix ({src}) · **{hs['layout_count']} layout bucket(s)** "
+            f"from **{vault_n}** pattern save(s) · "
             f"entry when map match ≥ **{room3_matrix.MATCH_THRESHOLD_PCT}%** · "
-            f"exit on stop / target / match fade · arm engine to fire Alpaca orders."
+            f"arm engine to fire Alpaca orders."
         )
 
     if mode == ROOM3_MODE_LIVE and not room3_engine.LIVE_ORDERS_ENABLED:
@@ -2955,6 +2958,10 @@ def _render_rth_filter_attach() -> None:
             st.success("Rules saved — next screener pass uses these.")
 
     with st.expander("Manual paste backup", expanded=False):
+        st.caption(
+            "Works **now** (pre-market too) — paste tickers to test maps + matrix Match% "
+            "against all layout·strategy·TF buckets. No orders unless armed + session open."
+        )
         raw = st.text_area(
             "Paste tickers if screener is offline",
             key="room3_filter_rth_paste",
@@ -2964,6 +2971,7 @@ def _render_rth_filter_attach() -> None:
         parsed = room3_filters.parse_screener_paste(raw)
         if st.button("Apply paste backup", key="room3_filter_rth_save"):
             ingest_filter_slot(room3_filters.SLOT_RTH, parsed["tickers"])
+            st.session_state.pop("room3_repertoire_cache", None)
             st.rerun()
 
 

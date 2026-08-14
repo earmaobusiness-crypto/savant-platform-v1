@@ -83,31 +83,60 @@ def build_live_feature_vector(line: dict[str, Any]) -> list[float] | None:
     ]
 
 
-def match_spatial(snapshot_vec: list[float], layouts: list[dict[str, Any]]) -> dict[str, Any]:
+def match_spatial(
+    snapshot_vec: list[float],
+    layouts: list[dict[str, Any]],
+    *,
+    watch_timeframe: str | None = None,
+) -> dict[str, Any]:
     best_cosine = 0.0
     nearest = "NEW_LAYOUT"
+    nearest_strategy = ""
     structural_move = 0.0
     best_ticker = ""
     best_tf = ""
+    watch_tf = _normalize_watch_tf(watch_timeframe or "")
+
     for entry in layouts or []:
         stored = entry.get("vector") or []
         if not stored or len(stored) != len(snapshot_vec):
             continue
         cos = cosine_similarity(snapshot_vec, [float(x) for x in stored])
+        entry_tf = str(entry.get("timeframe_norm") or _normalize_watch_tf(entry.get("timeframe_resolution") or entry.get("strategy") or ""))
+        if watch_tf and entry_tf:
+            if entry_tf == watch_tf:
+                cos = min(1.0, cos * 1.04)
+            else:
+                cos *= 0.90
         if cos > best_cosine:
             best_cosine = cos
             nearest = str(entry.get("layout_id") or "LAYOUT")
+            nearest_strategy = str(entry.get("strategy") or "")
             structural_move = float(entry.get("structural_move_pct") or 0.0)
             best_ticker = str(entry.get("ticker") or "")
-            best_tf = str(entry.get("timeframe_resolution") or "")
+            best_tf = str(entry.get("timeframe_resolution") or entry_tf)
     return {
         "spatial_match_pct": int(round(best_cosine * 100)),
         "cosine_similarity": round(best_cosine, 4),
         "nearest_layout_id": nearest,
+        "nearest_strategy": nearest_strategy,
         "structural_move_pct": structural_move,
         "layout_ticker": best_ticker,
         "layout_timeframe": best_tf,
     }
+
+
+def _normalize_watch_tf(raw: str) -> str:
+    t = str(raw or "").lower()
+    if t in ("1m", "5m", "15m"):
+        return t
+    if "15" in t:
+        return "15m"
+    if "5" in t:
+        return "5m"
+    if "1" in t:
+        return "1m"
+    return t
 
 
 def strategy_for_layout(layout_id: str, repertoire: dict[str, Any]) -> str:
@@ -148,7 +177,7 @@ def score_line_against_repertoire(
             "vector_ready": False,
         }
 
-    spatial = match_spatial(vec, layouts)
+    spatial = match_spatial(vec, layouts, watch_timeframe=str(line.get("timeframe") or "1m"))
     pct = int(spatial.get("spatial_match_pct") or 0)
     warmth = min(1.0, len(line.get("slices") or []) / 24.0)
     display = min(1.0, (pct / 100.0) * 0.75 + warmth * 0.15 + (0.10 if repertoire.get("ready") else 0))
@@ -229,6 +258,7 @@ def maybe_queue_matrix_signals(
     match = score_line_against_repertoire(line, repertoire)
     line["match_pct"] = int(match.get("spatial_match_pct") or 0)
     line["nearest_layout"] = str(match.get("nearest_layout_id") or "—")
+    line["nearest_strategy"] = str(match.get("nearest_strategy") or "—")
     line["score"] = float(match.get("display_score") or 0)
 
     layouts = list(repertoire.get("layouts") or [])
@@ -284,7 +314,7 @@ def maybe_queue_matrix_signals(
     if layout_id in PLACEHOLDER_LAYOUTS:
         return
 
-    strategy = strategy_for_layout(layout_id, repertoire)
+    strategy = str(match.get("nearest_strategy") or "") or strategy_for_layout(layout_id, repertoire)
     qty, notional = _compute_entry_qty(price=last_px, session_state=session_state)
     room3_watcher.queue_entry_signal(
         book,
@@ -306,3 +336,5 @@ def maybe_queue_matrix_signals(
     stamped["entry_signal"]["notional"] = notional
     stamped["entry_signal"]["match_pct"] = stamped["entry_match_pct"]
     stamped["entry_signal"]["layout_id"] = layout_id
+    stamped["entry_signal"]["strategy"] = strategy
+    line["nearest_strategy"] = strategy
