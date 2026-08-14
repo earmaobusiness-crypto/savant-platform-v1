@@ -23,6 +23,8 @@ import requests
 ROOM2_OBSERVE_KEYS = (
     "layout_master_matrix_index",
     "room2_deploy_registry",
+    "room2_master_signature",
+    "room2_last_successful_deploy",
     "matrix_active_pattern_count",
     "matrix_active_save_count",
     "market_weather_snapshot",
@@ -135,6 +137,34 @@ def _layout_entry(
     }
 
 
+def _layouts_from_last_deploy(session_state: Any) -> list[dict[str, Any]]:
+    """Fallback — DNA minted on the most recent Room 2 deploy in this session."""
+    sig = _session_get(session_state, "room2_master_signature") or {}
+    vec = sig.get("master_signature") or []
+    if not isinstance(vec, list) or len(vec) < 8:
+        return []
+    layout_id = str(sig.get("layout_id") or "").strip()
+    last = _session_get(session_state, "room2_last_successful_deploy") or {}
+    if not layout_id or layout_id in PLACEHOLDER_LAYOUT_IDS:
+        layout_id = str(last.get("layout") or last.get("macro_weather_layout") or "").strip()
+    if not layout_id or layout_id in PLACEHOLDER_LAYOUT_IDS:
+        return []
+    strategy = ""
+    for row in reversed(list(_session_get(session_state, "room2_deploy_registry") or [])):
+        if str(row.get("layout") or "") == layout_id:
+            strategy = str(row.get("strategy") or "")
+            break
+    entry = _layout_entry(
+        layout_id=layout_id,
+        vector=[float(x) for x in vec[:8]],
+        ticker=str(last.get("ticker") or ""),
+        timeframe_resolution=str(last.get("timeframe") or ""),
+        structural_move_pct=float(last.get("structural_move") or 0.0),
+        strategy=strategy,
+    )
+    return [entry] if entry else []
+
+
 def _layouts_from_session(session_state: Any) -> list[dict[str, Any]]:
     raw = _session_get(session_state, "layout_master_matrix_index") or []
     out: list[dict[str, Any]] = []
@@ -155,7 +185,9 @@ def _layouts_from_session(session_state: Any) -> list[dict[str, Any]]:
         )
         if row:
             out.append(row)
-    return out
+    if out:
+        return out
+    return _layouts_from_last_deploy(session_state)
 
 
 def _layouts_from_local_cache() -> list[dict[str, Any]]:
@@ -314,16 +346,27 @@ def matrix_repertoire(session_state: Any) -> dict[str, Any]:
 
     layout_n = len(layouts)
     deploy_n = len(deploy_registry)
+    dna_ready = layout_n > 0
     return {
         "layouts": layouts,
         "deploy_registry": deploy_registry,
         "layout_count": layout_n,
         "deploy_count": deploy_n,
-        "pattern_count": pattern_count or layout_n,
+        "pattern_count": pattern_count or deploy_n,
         "save_count": save_count,
         "weather": weather_name or "—",
-        "ready": bool(layout_n),
-        "source": "session" if _layouts_from_session(session_state) else ("cache/cloud" if layout_n else "empty"),
+        "ready": dna_ready,
+        "source": (
+            "session"
+            if _layouts_from_session(session_state)
+            else ("last_deploy" if layouts else ("cache/cloud" if layout_n else "empty"))
+        ),
+        "dna_note": (
+            "DNA vectors loaded — matching enabled."
+            if dna_ready
+            else f"{pattern_count or deploy_n} vault pattern(s) but 0 DNA vectors — "
+            "Archive once in Room 2 (same tab, no refresh) then return here."
+        ),
     }
 
 
@@ -338,6 +381,7 @@ def matrix_snapshot(session_state: Any) -> dict[str, Any]:
         "weather": rep.get("weather") or "—",
         "ready": bool(rep.get("ready")),
         "source": rep.get("source") or "empty",
+        "dna_note": rep.get("dna_note") or "",
     }
 
 

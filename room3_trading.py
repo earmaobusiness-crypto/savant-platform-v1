@@ -2659,6 +2659,9 @@ def _render_execution_posture(mode: str) -> None:
             "Matrix DNA empty — deploy/save patterns in **Room 2**, or set Supabase secrets "
             "so layouts hydrate from vault on startup."
         )
+        note = str(hs.get("dna_note") or "")
+        if note:
+            st.caption(note)
     else:
         src = hs.get("source") or "session"
         st.caption(
