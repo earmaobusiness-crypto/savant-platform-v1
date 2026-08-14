@@ -23,6 +23,7 @@ import room3_engine
 import room3_filters
 import room3_ibkr
 import room3_matrix
+import room3_screener
 import room3_watcher
 
 ROOM3_MODE_PAPER = "paper"
