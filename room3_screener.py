@@ -26,7 +26,8 @@ BATCH_SIZE = 120
 UNIVERSE_CAP = 20000  # safety ceiling only — do NOT truncate mid-list (drops WETO/CAPR/etc.)
 YF_PERIOD = "2mo"  # deep history for HMA + 30d vol (Pass B shortlist only)
 YF_PRESCREEN_PERIOD = "5d"  # Pass A — cheap liquidity on the full list
-YF_BATCH_WORKERS = 8
+YF_BATCH_WORKERS = 4  # Streamlit Cloud has a tight thread ceiling
+SHARE_STATS_WORKERS = 4
 DEEP_SCAN_CAP = 200  # Pass B: max names that get full 2mo HMA/vol (not Job 2 maps)
 BELT_MAX = 15  # Job 1 output cap → Job 2 maps only these
 
@@ -491,6 +492,50 @@ def fetch_share_stats(sym: str) -> dict[str, float | None]:
         return {"float_shares": None, "market_cap": None, "quote_type": None}
 
 
+def _map_share_stats(
+    symbols: list[str],
+) -> dict[str, dict[str, float | None]]:
+    """
+    Fetch float/mcap for many symbols without blowing Streamlit Cloud's thread limit.
+    Tries a small pool; falls back to sequential on RuntimeError (can't start new thread).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    out: dict[str, dict[str, float | None]] = {}
+    syms = [str(s).upper() for s in symbols if str(s).strip()]
+    if not syms:
+        return out
+
+    def _one(sym: str) -> tuple[str, dict[str, float | None]]:
+        try:
+            return sym, fetch_share_stats(sym)
+        except Exception:
+            return sym, {
+                "float_shares": None,
+                "market_cap": None,
+                "quote_type": None,
+            }
+
+    try:
+        with ThreadPoolExecutor(max_workers=SHARE_STATS_WORKERS) as pool:
+            futs = [pool.submit(_one, sym) for sym in syms]
+            for fut in as_completed(futs):
+                try:
+                    sym, stats = fut.result()
+                except Exception:
+                    continue
+                out[sym] = stats
+        return out
+    except RuntimeError:
+        # Cloud / container thread exhaustion — finish sequentially
+        for sym in syms:
+            if sym in out:
+                continue
+            _, stats = _one(sym)
+            out[sym] = stats
+        return out
+
+
 def _pick_deep_symbols(
     liquid: list[tuple[str, float]],
     *,
@@ -503,8 +548,6 @@ def _pick_deep_symbols(
     Must NOT keep unknown mcap — that refilled the belt with NVDA/AAPL whenever Yahoo
     omitted marketCap on the mega-liquid names.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     if cap <= 0:
         return [], {}, 0
     max_mcap = float(rules.get("max_market_cap") or 0)
@@ -516,38 +559,33 @@ def _pick_deep_symbols(
     selected: list[str] = []
     stats_cache: dict[str, dict[str, float | None]] = {}
     mcap_skipped = 0
-    wave = 60
+    wave = 40
     i = 0
     # Bound how far we walk so a broken Yahoo session can't spin forever
     max_inspect = min(len(liquid), max(cap * 25, 800))
     while len(selected) < cap and i < max_inspect:
         chunk = liquid[i : i + wave]
         i += wave
-        with ThreadPoolExecutor(max_workers=16) as pool:
-            futs = {pool.submit(fetch_share_stats, sym): (sym, score) for sym, score in chunk}
-            kept: list[tuple[str, float]] = []
-            for fut in as_completed(futs):
-                sym, score = futs[fut]
-                try:
-                    stats = fut.result()
-                except Exception:
-                    stats = {
-                        "float_shares": None,
-                        "market_cap": None,
-                        "quote_type": None,
-                    }
-                stats_cache[sym] = stats
-                qt = str(stats.get("quote_type") or "").upper()
-                if exclude_etfs and qt in {"ETF", "ETN", "MUTUALFUND", "FUND"}:
+        batch_stats = _map_share_stats([sym for sym, _ in chunk])
+        stats_cache.update(batch_stats)
+        kept: list[tuple[str, float]] = []
+        for sym, score in chunk:
+            stats = batch_stats.get(sym) or {
+                "float_shares": None,
+                "market_cap": None,
+                "quote_type": None,
+            }
+            qt = str(stats.get("quote_type") or "").upper()
+            if exclude_etfs and qt in {"ETF", "ETN", "MUTUALFUND", "FUND"}:
+                mcap_skipped += 1
+                continue
+            mcap = stats.get("market_cap")
+            if max_mcap > 0:
+                # Strict: need a known mcap under the ceiling
+                if mcap is None or float(mcap) <= 0 or float(mcap) > max_mcap:
                     mcap_skipped += 1
                     continue
-                mcap = stats.get("market_cap")
-                if max_mcap > 0:
-                    # Strict: need a known mcap under the ceiling
-                    if mcap is None or float(mcap) <= 0 or float(mcap) > max_mcap:
-                        mcap_skipped += 1
-                        continue
-                kept.append((sym, score))
+            kept.append((sym, score))
         kept.sort(key=lambda x: x[1], reverse=True)
         for sym, _score in kept:
             if len(selected) >= cap:
@@ -636,29 +674,43 @@ def _download_daily_batches(
             group_by="ticker",
             auto_adjust=True,
             progress=False,
-            threads=True,
+            threads=False,  # we already parallelize batches; Cloud thread limit is tight
         )
         return batch, data
 
-    with ThreadPoolExecutor(max_workers=YF_BATCH_WORKERS) as pool:
-        futures = [pool.submit(_one, b) for b in batches]
-        for fut in as_completed(futures):
+    def _ingest(batch: list[str], data) -> None:
+        nonlocal scanned, errors
+        if data is None or getattr(data, "empty", True):
+            errors += len(batch)
+            return
+        for sym in batch:
+            scanned += 1
             try:
-                batch, data = fut.result()
+                hist = _extract_symbol_frame(data, sym, batch_len=len(batch))
+                if hist is not None and not getattr(hist, "empty", True):
+                    by_sym[sym] = hist
             except Exception:
-                errors += BATCH_SIZE
-                continue
-            if data is None or getattr(data, "empty", True):
+                errors += 1
+
+    try:
+        with ThreadPoolExecutor(max_workers=YF_BATCH_WORKERS) as pool:
+            futures = [pool.submit(_one, b) for b in batches]
+            for fut in as_completed(futures):
+                try:
+                    batch, data = fut.result()
+                except Exception:
+                    errors += BATCH_SIZE
+                    continue
+                _ingest(batch, data)
+    except RuntimeError:
+        # Streamlit Cloud: can't start new thread — run batches one-by-one
+        for batch in batches:
+            try:
+                batch, data = _one(batch)
+            except Exception:
                 errors += len(batch)
                 continue
-            for sym in batch:
-                scanned += 1
-                try:
-                    hist = _extract_symbol_frame(data, sym, batch_len=len(batch))
-                    if hist is not None and not getattr(hist, "empty", True):
-                        by_sym[sym] = hist
-                except Exception:
-                    errors += 1
+            _ingest(batch, data)
     return by_sym, scanned, errors
 
 
@@ -695,8 +747,6 @@ def scan_universe(
       Pass B — 2mo history only on top liquid shortlist → HMA / vol / float / mcap
       Output  — small belt for Job 2
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     rules = {**default_rules(), **(rules or {})}
     # Guard: 0 / missing ceiling must not disable the $1B small-cap belt
     if float(rules.get("max_market_cap") or 0) <= 0:
@@ -752,18 +802,7 @@ def scan_universe(
         stats_by_sym: dict[str, dict[str, float | None]] = dict(stats_cache)
         need = [sym for sym, _ in stage1 if sym not in stats_by_sym]
         if need:
-            with ThreadPoolExecutor(max_workers=12) as pool:
-                futures = {pool.submit(fetch_share_stats, sym): sym for sym in need}
-                for fut in as_completed(futures):
-                    sym = futures[fut]
-                    try:
-                        stats_by_sym[sym] = fut.result()
-                    except Exception:
-                        stats_by_sym[sym] = {
-                            "float_shares": None,
-                            "market_cap": None,
-                            "quote_type": None,
-                        }
+            stats_by_sym.update(_map_share_stats(need))
 
         for sym, m in stage1:
             stats = stats_by_sym.get(sym) or {
