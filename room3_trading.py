@@ -2911,6 +2911,16 @@ def _render_rth_filter_attach() -> None:
 
     last = st.session_state.get("room3_screener_last") or {}
     names = list(last.get("tickers") or [])
+    window = room3_engine.detect_session_window()
+    if window != room3_engine.SESSION_RTH:
+        st.info(
+            f"**Regular market hours are closed** "
+            f"(now: {room3_engine.session_label(window)}). "
+            "This list is a **market-hours filter review** — the names that fit your "
+            "RTH rules on today’s session print (same idea as TradingView after 4:00). "
+            "**No auto trading** from this review: Post-market is off for trading, "
+            "and orders still need the engine armed + an open session gate."
+        )
     if names:
         st.success(f"{len(names)} names on the belt: " + ", ".join(names))
     elif last.get("error"):
