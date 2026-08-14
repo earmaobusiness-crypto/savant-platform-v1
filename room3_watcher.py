@@ -330,6 +330,14 @@ def tick_watcher(
         book["last_note"] = "Scan paused — no ticker universe."
         return book, signals
 
+    # Outside an enabled trade window: Job 1 list only — no 1m/5m/15m maps,
+    # no matrix compare, no orders (e.g. Market hours only after the close).
+    if not session_allowed:
+        book["last_note"] = (
+            "Session not tradeable — filter list only; maps / compare / orders paused."
+        )
+        return book, signals
+
     if book.get("awaiting_filters") or not (book.get("universe") or []):
         book["last_note"] = "Eyes ready · waiting for filter names (screener or paste)."
         return book, signals
@@ -365,7 +373,7 @@ def tick_watcher(
 
     n_lines = len(book.get("lines") or {})
     layouts = int(repertoire.get("layout_count") or 0)
-    trade_note = "trading ON" if trade_ok else "maps only (arm + session to trade)"
+    trade_note = "trading ON" if trade_ok else "maps on · arm engine to trade"
     book["last_note"] = (
         f"Scanned {n_lines} TF maps · universe {len(book.get('universe') or [])} · "
         f"{layouts} matrix buckets · {trade_note} · "

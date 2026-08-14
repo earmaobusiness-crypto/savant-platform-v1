@@ -2618,6 +2618,12 @@ def _render_execution_posture(mode: str) -> None:
         )
 
     st.markdown("#### Session filters (when engine may trade)")
+    st.caption(
+        "Each box you enable: while that window is open → scan every ~18 min and full path "
+        "(maps → compare → trade when armed). While that window is closed → Scan still gives "
+        "the end-of-session filter list only (like TV after that session ends) — no maps/orders. "
+        "Post on also means open positions may continue past 4:00 instead of flattening."
+    )
     allowed = set(st.session_state.get("room3_allowed_sessions") or [])
     f1, f2, f3 = st.columns(3)
     with f1:
@@ -2743,7 +2749,13 @@ def _apply_active_filter_universe() -> list[str]:
 
 
 def _run_screener_pass() -> dict:
-    """Job 1 — light NASDAQ/NYSE scan; survivors feed the watch book."""
+    """
+    Job 1 — light NASDAQ/NYSE scan.
+
+    Inside an enabled trade window: survivors feed the watch book (maps → compare → trade).
+    Outside that window but with a session enabled: still scan the end-of-session print,
+    show the list, and stop (no maps / compare / orders).
+    """
     mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
     paper = mode != ROOM3_MODE_LIVE
     saved = dict(st.session_state.get("room3_filter_rules") or {})
@@ -2766,16 +2778,32 @@ def _run_screener_pass() -> dict:
         rules=rules,
         max_pass=room3_watcher.MAX_NAMES,
     )
+    trade_window = _session_trading_allowed()
+    review_slot = _session_review_target()
+    result["pipeline"] = "full" if trade_window else "list_only"
+    result["session_slot"] = (
+        room3_engine.detect_session_window() if trade_window else review_slot
+    )
     st.session_state.room3_screener_last = result
-    if result.get("tickers"):
-        ingest_filter_slot(room3_filters.SLOT_RTH, list(result["tickers"]))
+    tickers = list(result.get("tickers") or [])
+    if trade_window and tickers:
+        # Full path: attach survivors to the *current* enabled window's belt.
+        slot = room3_engine.detect_session_window()
+        ingest_filter_slot(slot, tickers)
     else:
+        # List-only: remember end-of-session names; do not start maps.
+        if tickers and review_slot:
+            st.session_state.room3_filter_slots = room3_filters.set_slot(
+                st.session_state.get("room3_filter_slots"),
+                review_slot,
+                tickers,
+            )
         _apply_active_filter_universe()
     return result
 
 
-def _session_scan_allowed() -> bool:
-    """Auto path may run only in operator-enabled session windows."""
+def _session_trading_allowed() -> bool:
+    """True only when the clock is inside an operator-enabled trade window."""
     window = room3_engine.detect_session_window()
     if window == room3_engine.SESSION_CLOSED:
         return False
@@ -2783,32 +2811,122 @@ def _session_scan_allowed() -> bool:
     return window in allowed
 
 
-def _manual_rth_filter_review_allowed() -> bool:
-    """
-    Manual Job 1 click — show what the *market-hours* filter would list.
+def _any_session_enabled() -> bool:
+    allowed = set(st.session_state.get("room3_allowed_sessions") or [])
+    return bool(
+        allowed
+        & {
+            room3_engine.SESSION_PRE,
+            room3_engine.SESSION_RTH,
+            room3_engine.SESSION_POST,
+        }
+    )
 
-    Does NOT require Post-market. Session checkboxes only gate auto trading /
-    auto screener, not this after-close review. Same filter rules; daily bar is
-    the RTH session print TradingView still shows after 4:00.
+
+def _session_review_target() -> str:
     """
-    return _broker_is_connected()
+    Which enabled session's end-of-window list a closed-clock scan is for.
+    Prefer the most recently finished enabled session (post → rth → pre).
+    """
+    allowed = set(st.session_state.get("room3_allowed_sessions") or [])
+    window = room3_engine.detect_session_window()
+    # Chronological session order in a day
+    order = [
+        room3_engine.SESSION_PRE,
+        room3_engine.SESSION_RTH,
+        room3_engine.SESSION_POST,
+    ]
+    if window in order:
+        idx = order.index(window)
+        # Sessions that already finished before *now*
+        prior = [s for s in order[:idx] if s in allowed]
+        if prior:
+            return prior[-1]
+        if window in allowed:
+            return window
+    # Fully closed (after 20:00 or weekend): latest enabled session of the day
+    for s in reversed(order):
+        if s in allowed:
+            return s
+    return room3_engine.SESSION_RTH
+
+
+def _session_scan_allowed() -> bool:
+    """Auto screener pulse — only while the clock sits in an enabled window."""
+    return _session_trading_allowed()
+
+
+def _manual_screener_allowed() -> bool:
+    """Scan anytime — needs broker + at least one session checkbox enabled."""
+    if not _broker_is_connected():
+        return False
+    return _any_session_enabled()
+
+
+def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
+    """
+    If Post-market is OFF and the clock left RTH, flatten open positions once.
+    If Post-market is ON, leave positions alone (may continue into post).
+    """
+    now = datetime.now(ET)
+    if now.weekday() >= 5:
+        return ""
+    window = room3_engine.detect_session_window()
+    if window == room3_engine.SESSION_RTH:
+        return ""
+    # Pre-market next day — don't flatten overnight leftovers here
+    if window == room3_engine.SESSION_PRE:
+        return ""
+    allowed = set(st.session_state.get("room3_allowed_sessions") or [])
+    if room3_engine.SESSION_POST in allowed:
+        return ""
+    day_key = now.date().isoformat()
+    if st.session_state.get("room3_rth_end_flat_day") == day_key:
+        return ""
+    positions = list(st.session_state.get("room3_open_positions") or [])
+    if not positions:
+        st.session_state.room3_rth_end_flat_day = day_key
+        return ""
+    ok_n = 0
+    errs: list[str] = []
+    for pos in positions:
+        sym = str(pos.get("symbol") or pos.get("ticker") or "").upper()
+        if not sym:
+            continue
+        try:
+            result = room3_alpaca.close_position_now(sym, paper=paper)
+            if result.get("ok"):
+                ok_n += 1
+            else:
+                errs.append(f"{sym}:{result.get('error') or 'fail'}")
+        except Exception as exc:
+            errs.append(f"{sym}:{exc}")
+    _sync_alpaca_account_into_session(paper=paper)
+    remaining = list(st.session_state.get("room3_open_positions") or [])
+    if not remaining and not errs:
+        st.session_state.room3_rth_end_flat_day = day_key
+    elif not remaining and ok_n:
+        st.session_state.room3_rth_end_flat_day = day_key
+    if ok_n:
+        return f"RTH end · flattened {ok_n} (Post-market off)"
+    if errs:
+        return "RTH end flatten errors · " + "; ".join(errs[:3])
+    return ""
 
 
 @st.fragment(run_every=timedelta(minutes=room3_screener.SCAN_INTERVAL_MINUTES))
 def _room3_screener_fragment() -> None:
-    """Job 1 — periodic light filter on NYSE/NASDAQ (every ~18 min in RTH)."""
+    """Job 1 — every ~18 min while the clock is inside an enabled session."""
     if not _broker_is_connected():
         return
     if not _session_scan_allowed():
-        return
-    if room3_engine.detect_session_window() != room3_engine.SESSION_RTH:
         return
     result = _run_screener_pass()
     if result.get("ok"):
         st.caption(
             f"Screener · {result.get('at') or '—'} · "
             f"{result.get('passed', 0)} passed / {result.get('scanned', 0)} scanned · "
-            f"{result.get('elapsed_sec', 0)}s"
+            f"{result.get('elapsed_sec', 0)}s · {result.get('pipeline') or 'full'}"
         )
     elif result.get("error"):
         st.caption(f"Screener error · {result.get('error')}")
@@ -2824,12 +2942,16 @@ def _room3_heartbeat_fragment() -> None:
     if str(st.session_state.get("room3_broker") or "") == "alpaca":
         paper = mode != ROOM3_MODE_LIVE
         _sync_alpaca_account_into_session(paper=paper)
+        flat_note = _maybe_flatten_when_rth_ends(paper=paper)
+        if flat_note:
+            st.session_state.room3_last_session_flat_note = flat_note
 
     _apply_active_filter_universe()
+    trade_ok = _session_trading_allowed()
     book, signals = room3_watcher.tick_watcher(
         st.session_state.room3_watch_book,
         session_state=st.session_state,
-        session_allowed=_session_scan_allowed(),
+        session_allowed=trade_ok,
         engine_armed=bool(st.session_state.get("room3_engine_armed")),
     )
     st.session_state.room3_watch_book = book
@@ -2855,12 +2977,15 @@ def _room3_heartbeat_fragment() -> None:
     gates = _current_gates("entry")
     sync_t = st.session_state.get("room3_last_broker_sync") or "—"
     note = str(book.get("last_note") or "")
+    flat_note = str(st.session_state.get("room3_last_session_flat_note") or "")
+    extra = f" · {flat_note}" if flat_note else ""
     st.caption(
         f"Heartbeat · {datetime.now(ET).strftime('%H:%M:%S ET')} · "
         f"{room3_engine.session_label(window)} · "
         f"broker sync {sync_t} · "
         f"gates={'OPEN' if gates.get('ok') else 'CLOSED'} · "
-        f"{note}"
+        f"trade_session={'YES' if trade_ok else 'NO'} · "
+        f"{note}{extra}"
     )
 
 
@@ -2874,18 +2999,14 @@ def _render_watch_book_panel() -> None:
     screener = st.session_state.get("room3_screener_last") or {}
     screener_names = list(screener.get("tickers") or [])
     if book.get("awaiting_filters"):
-        if window != room3_engine.SESSION_RTH:
+        if not screener_names and not rth_saved:
             st.info(
-                f"Screener runs in **Market hours** only. "
-                f"Now: {room3_engine.session_label(window)}."
-            )
-        elif not screener_names and not rth_saved:
-            st.info(
-                "Built-in screener will run every ~18 min in RTH, or click **Run screener now**. "
-                "Each survivor gets **1m + 5m + 15m** maps."
+                "Click **Run screener now** (or wait for the ~18 min timer while an "
+                "enabled session is open). Survivors get **1m + 5m + 15m** maps; "
+                "trades only when that window is open and the engine is armed."
             )
         else:
-            st.info("Session filter closed — enable **Market hours** under session filters.")
+            st.info("Enable a session under filters, then scan while that window is open for the full path.")
     else:
         st.caption(
             f"Universe: {', '.join(book.get('universe') or [])} · "
@@ -2899,30 +3020,30 @@ def _render_watch_book_panel() -> None:
 
 
 def _render_rth_filter_attach() -> None:
-    st.markdown("#### Filter · Market hours (built-in screener)")
+    st.markdown("#### Filter · built-in screener")
     st.caption(
-        "Job 1 (filter): cheap liquidity pass → HMA/vol/float on a shortlist → "
-        f"belt max **{room3_watcher.MAX_NAMES}**. "
-        "**Run screener now** always uses your market-hours filter rules "
-        "(works after 4:00 to review the RTH close list — you do **not** need "
-        "Post-market for that). Post-market only unlocks *auto trading* in that window. "
-        "Job 2 maps survivors; Job 3 trades only when armed."
+        "Enabled session **open** → scan (~18 min) → maps → compare → trade if armed. "
+        "Enabled session **closed** → same Scan gives that session’s end list only "
+        f"(no maps / compare / orders). Belt max **{room3_watcher.MAX_NAMES}**."
     )
 
     last = st.session_state.get("room3_screener_last") or {}
     names = list(last.get("tickers") or [])
     window = room3_engine.detect_session_window()
-    if window != room3_engine.SESSION_RTH:
-        st.info(
-            f"**Regular market hours are closed** "
+    trading_now = _session_trading_allowed()
+    list_only = (not trading_now) and _any_session_enabled()
+    review_slot = str(last.get("session_slot") or _session_review_target())
+    review_label = room3_engine.session_label(review_slot)
+    if names and list_only:
+        st.warning(
+            f"**Not trading** — {review_label} is enabled, but that window is not open "
             f"(now: {room3_engine.session_label(window)}). "
-            "This list is a **market-hours filter review** — the names that fit your "
-            "RTH rules on today’s session print (same idea as TradingView after 4:00). "
-            "**No auto trading** from this review: Post-market is off for trading, "
-            "and orders still need the engine armed + an open session gate."
+            f"Showing the **{review_label} end-of-session** filter list only. "
+            "No maps, no matrix compare, no orders until that window opens again."
         )
     if names:
-        st.success(f"{len(names)} names on the belt: " + ", ".join(names))
+        label = f"{review_label} end list" if list_only else "on the belt"
+        st.success(f"{len(names)} names {label}: " + ", ".join(names))
     elif last.get("error"):
         st.warning(str(last.get("error")))
     elif last.get("scanned") or last.get("stage1_passed") is not None:
@@ -2934,14 +3055,19 @@ def _render_rth_filter_attach() -> None:
             f"Rules may be too tight for this tape, or structure data failed."
         )
     else:
-        st.info("No screener pass yet — connect Alpaca and run once, or wait for the ~18 min timer.")
+        st.info(
+            "No screener pass yet — connect Alpaca, enable a session, and run once "
+            "(or wait for the ~18 min timer while that window is open)."
+        )
 
     if last:
         extra = ""
         if last.get("stage1_passed") is not None:
             extra = f" · stage1 {last.get('stage1_passed', 0)} · float/mcap cut {last.get('structure_rejected', 0)}"
+        pipe = str(last.get("pipeline") or ("list_only" if list_only else "full"))
         st.caption(
             f"Last pass {last.get('at') or '—'} · "
+            f"{pipe} · {review_label} · "
             f"universe {last.get('universe_size', '—')} · "
             f"scanned {last.get('scanned', 0)} · "
             f"deep {last.get('deep_scanned', '—')} · "
@@ -2950,24 +3076,22 @@ def _render_rth_filter_attach() -> None:
         )
 
     if st.button("Run screener now", type="primary", key="room3_screener_run_now"):
-        if not _manual_rth_filter_review_allowed():
-            st.error("Connect Alpaca first.")
+        if not _manual_screener_allowed():
+            st.error("Connect Alpaca and enable at least one session (Pre / Market hours / Post).")
         else:
-            window = room3_engine.detect_session_window()
-            review_note = ""
-            if window != room3_engine.SESSION_RTH:
-                review_note = (
-                    f" · RTH-close review (now {room3_engine.session_label(window)}; "
-                    "Post-market not required to list names)"
-                )
-            with st.spinner(
-                "Scanning NYSE/NASDAQ with market-hours filter rules…"
-            ):
+            with st.spinner("Scanning NYSE/NASDAQ…"):
                 result = _run_screener_pass()
             if result.get("tickers"):
-                st.success(
-                    f"Found {len(result['tickers'])} names{review_note}."
-                )
+                if result.get("pipeline") == "list_only":
+                    slot_lbl = room3_engine.session_label(
+                        str(result.get("session_slot") or _session_review_target())
+                    )
+                    st.success(
+                        f"Found {len(result['tickers'])} names "
+                        f"({slot_lbl} end list — not trading)."
+                    )
+                else:
+                    st.success(f"Found {len(result['tickers'])} names — feeding the belt.")
             else:
                 st.warning(
                     result.get("error")
