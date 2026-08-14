@@ -280,8 +280,9 @@ def passes_volume_vs_float(
     now_et: datetime | None = None,
     rules: dict[str, Any] | None = None,
 ) -> bool:
+    # Unknown / missing float (common on TV too) → keep the name; other rules still apply.
     if float_shares is None or float_shares <= 0:
-        return False
+        return True
     ratio = required_volume_float_ratio(float_shares, now_et=now_et, rules=rules)
     return volume_shares >= float_shares * ratio
 
@@ -314,13 +315,16 @@ def fetch_share_stats(sym: str) -> dict[str, float | None]:
             float_shares = None
         if market_cap is not None and market_cap <= 0:
             market_cap = None
-        # Sanity: float that implies ridiculous share count vs mcap → drop float
+        # Sanity: absurd float vs tiny mcap (bad Yahoo sharesOutstanding) → treat as unknown
         if (
             float_shares
             and market_cap
             and float_shares > 0
-            and market_cap / float_shares < 0.0001
+            and market_cap / float_shares < 0.01
         ):
+            float_shares = None
+        # Also drop floats that are impossibly large vs price×shares for microcaps
+        if float_shares and float_shares >= 1_000_000_000 and (not market_cap or market_cap < 50_000_000):
             float_shares = None
         return {
             "float_shares": float_shares,

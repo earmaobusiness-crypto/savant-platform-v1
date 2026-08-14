@@ -2999,9 +2999,9 @@ def _render_rth_filter_attach() -> None:
             value=bool(rules.get("require_volume_vs_float", True)),
             key="room3_rule_float",
             help=(
-                "Default: today's share volume must exceed float. "
-                "Mega-float (≥90M): 50% pre-9:30 → 80% by noon. "
-                "Low float (≤2M): stricter — need clear headroom above float."
+                "When float is known: today's volume must clear the float rule "
+                "(mega-float time-of-day ratios, low-float stricter). "
+                "When float is missing/unknown (like some names on TradingView) → keep the stock."
             ),
         )
         if st.button("Save filter rules", key="room3_rule_save"):
