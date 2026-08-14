@@ -3181,23 +3181,6 @@ def _render_rth_filter_attach() -> None:
             st.session_state.room3_filter_rules = rules
             st.success("Rules saved — next screener pass uses these.")
 
-    with st.expander("Manual paste backup", expanded=False):
-        st.caption(
-            "Works **now** (pre-market too) — paste tickers to test maps + matrix Match% "
-            "against all layout·strategy·TF buckets. No orders unless armed + session open."
-        )
-        raw = st.text_area(
-            "Paste tickers if screener is offline",
-            key="room3_filter_rth_paste",
-            height=80,
-            placeholder="AAPL\nNVDA",
-        )
-        parsed = room3_filters.parse_screener_paste(raw)
-        if st.button("Apply paste backup", key="room3_filter_rth_save"):
-            ingest_filter_slot(room3_filters.SLOT_RTH, parsed["tickers"])
-            st.session_state.pop("room3_repertoire_cache", None)
-            st.rerun()
-
 
 def _render_trading_workspace(mode: str) -> None:
     frame_open = False
