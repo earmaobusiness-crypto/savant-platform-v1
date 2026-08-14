@@ -413,26 +413,60 @@ def passes_market_cap(market_cap: float | None, rules: dict[str, Any] | None = N
     cap_max = float(rules.get("max_market_cap") or 0)
     if cap_max <= 0:
         return True
-    # Unknown / missing mcap (Yahoo gaps) → keep; only reject when known and over the ceiling.
+    # Ceiling is on → must have a usable mcap. Unknown used to "keep" and let
+    # NVDA/AAPL onto the belt whenever Yahoo omitted marketCap.
     if market_cap is None or market_cap <= 0:
-        return True
+        return False
     return market_cap <= cap_max
 
 
 def fetch_share_stats(sym: str) -> dict[str, float | None]:
-    """Float + market cap + quote type (stage-2 only — called on survivors)."""
+    """Float + market cap + quote type (used for deep-pick + structure)."""
     import yfinance as yf
 
     try:
-        info = yf.Ticker(sym).info or {}
+        t = yf.Ticker(sym)
+        info = {}
+        try:
+            info = t.info or {}
+        except Exception:
+            info = {}
         quote_type = str(info.get("quoteType") or info.get("quote_type") or "").upper()
         # Prefer real float only — sharesOutstanding can be absurd vs tiny mcap.
         raw_float = info.get("floatShares")
         if raw_float is None:
             raw_float = info.get("sharesOutstanding")
         raw_cap = info.get("marketCap")
+        # fast_info often has market_cap when .info is rate-limited / empty
+        if not raw_cap:
+            try:
+                fi = getattr(t, "fast_info", None)
+                if fi is not None:
+                    raw_cap = getattr(fi, "market_cap", None) or (fi.get("market_cap") if hasattr(fi, "get") else None)
+                    if not quote_type:
+                        quote_type = str(
+                            getattr(fi, "quote_type", None)
+                            or (fi.get("quote_type") if hasattr(fi, "get") else "")
+                            or ""
+                        ).upper()
+            except Exception:
+                pass
         float_shares = float(raw_float) if raw_float else None
         market_cap = float(raw_cap) if raw_cap else None
+        # Proxy mcap from price × shares when Yahoo omits marketCap
+        if market_cap is None or market_cap <= 0:
+            price = (
+                info.get("regularMarketPrice")
+                or info.get("currentPrice")
+                or info.get("previousClose")
+                or info.get("lastPrice")
+            )
+            shares = info.get("sharesOutstanding") or raw_float
+            try:
+                if price and shares and float(price) > 0 and float(shares) > 0:
+                    market_cap = float(price) * float(shares)
+            except (TypeError, ValueError):
+                market_cap = None
         if float_shares is not None and float_shares <= 0:
             float_shares = None
         if market_cap is not None and market_cap <= 0:
@@ -464,10 +498,10 @@ def _pick_deep_symbols(
     cap: int = DEEP_SCAN_CAP,
 ) -> tuple[list[str], dict[str, dict[str, float | None]], int]:
     """
-    Walk liquid names (highest DV first), skip known mega-caps / ETFs, fill deep slots.
+    Walk liquid names (highest DV first), keep only known sub-ceiling mcaps / non-ETFs.
 
-    Without this, top-N by dollar volume is almost all >$1B names — then structure
-    rejects them and the belt is empty while real TV-style names never got a deep look.
+    Must NOT keep unknown mcap — that refilled the belt with NVDA/AAPL whenever Yahoo
+    omitted marketCap on the mega-liquid names.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -475,7 +509,7 @@ def _pick_deep_symbols(
         return [], {}, 0
     max_mcap = float(rules.get("max_market_cap") or 0)
     exclude_etfs = bool(rules.get("exclude_etfs", True))
-    # No mcap ceiling → old behavior
+    # No mcap ceiling → old behavior (top liquid by DV)
     if max_mcap <= 0 and not exclude_etfs:
         return [s for s, _ in liquid[:cap]], {}, 0
 
@@ -484,7 +518,9 @@ def _pick_deep_symbols(
     mcap_skipped = 0
     wave = 60
     i = 0
-    while len(selected) < cap and i < len(liquid):
+    # Bound how far we walk so a broken Yahoo session can't spin forever
+    max_inspect = min(len(liquid), max(cap * 25, 800))
+    while len(selected) < cap and i < max_inspect:
         chunk = liquid[i : i + wave]
         i += wave
         with ThreadPoolExecutor(max_workers=16) as pool:
@@ -506,13 +542,11 @@ def _pick_deep_symbols(
                     mcap_skipped += 1
                     continue
                 mcap = stats.get("market_cap")
-                if (
-                    max_mcap > 0
-                    and mcap is not None
-                    and float(mcap) > max_mcap
-                ):
-                    mcap_skipped += 1
-                    continue
+                if max_mcap > 0:
+                    # Strict: need a known mcap under the ceiling
+                    if mcap is None or float(mcap) <= 0 or float(mcap) > max_mcap:
+                        mcap_skipped += 1
+                        continue
                 kept.append((sym, score))
         kept.sort(key=lambda x: x[1], reverse=True)
         for sym, _score in kept:
@@ -663,7 +697,10 @@ def scan_universe(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    rules = rules or default_rules()
+    rules = {**default_rules(), **(rules or {})}
+    # Guard: 0 / missing ceiling must not disable the $1B small-cap belt
+    if float(rules.get("max_market_cap") or 0) <= 0:
+        rules["max_market_cap"] = float(DEFAULT_RULES["max_market_cap"])
     started = datetime.now(ET)
     syms = [str(s).upper() for s in symbols if str(s).strip()]
     min_dv = float(rules.get("min_dollar_volume") or 0)

@@ -2760,6 +2760,8 @@ def _run_screener_pass() -> dict:
     paper = mode != ROOM3_MODE_LIVE
     saved = dict(st.session_state.get("room3_filter_rules") or {})
     rules = {**room3_screener.default_rules(), **saved}
+    if float(rules.get("max_market_cap") or 0) <= 0:
+        rules["max_market_cap"] = float(room3_screener.DEFAULT_RULES["max_market_cap"])
     # Always strip leveraged ETFs unless operator explicitly disabled it.
     rules["exclude_etfs"] = bool(saved.get("exclude_etfs", True))
     # Old default was $1 and killed sub-$1 TV names — migrate once.
