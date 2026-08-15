@@ -3207,21 +3207,8 @@ def _render_rth_filter_attach() -> None:
             _persist_screener_to_disk()
             st.rerun()
 
-    belt = list(st.session_state.get("room3_filter_universe") or [])
-    if not belt:
-        belt = list((st.session_state.get("room3_screener_last") or {}).get("tickers") or [])
-    if belt:
-        st.success(f"{len(belt)} on the belt: " + ", ".join(belt))
-    else:
-        st.caption("Empty belt — paste symbols and hit **Drop on belt**.")
-
     if room3_screener.BUILTIN_SCREENER_ENABLED:
         _render_builtin_screener_panel()
-    else:
-        st.caption(
-            "Built-in Yahoo screener is parked. "
-            "To bring it back: `BUILTIN_SCREENER_ENABLED = True` in `room3_screener.py`."
-        )
 
 
 def _render_builtin_screener_panel() -> None:
