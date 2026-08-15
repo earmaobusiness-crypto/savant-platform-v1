@@ -259,6 +259,7 @@ def init_room3_session_state() -> None:
         st.session_state.room3_screener_day_cache = {}
     if "room3_filter_rules" not in st.session_state:
         st.session_state.room3_filter_rules = room3_screener.default_rules()
+    _hydrate_screener_from_disk()
     if "room3_broker_day_pl" not in st.session_state:
         st.session_state.room3_broker_day_pl = None
     if "room3_broker_day_pl_pct" not in st.session_state:
@@ -2750,6 +2751,47 @@ def _apply_active_filter_universe() -> list[str]:
     return names
 
 
+def _hydrate_screener_from_disk() -> None:
+    """Restore last screener list after Streamlit refresh / Cloud reconnect."""
+    if st.session_state.get("room3_screener_disk_hydrated"):
+        return
+    st.session_state.room3_screener_disk_hydrated = True
+    snap = room3_screener.load_screener_snapshot()
+    if not snap:
+        return
+    last = snap.get("last") or {}
+    if last and not (st.session_state.get("room3_screener_last") or {}).get("tickers"):
+        st.session_state.room3_screener_last = dict(last)
+    day_cache = snap.get("day_cache") or {}
+    if isinstance(day_cache, dict) and day_cache:
+        merged = dict(day_cache)
+        merged.update(st.session_state.get("room3_screener_day_cache") or {})
+        st.session_state.room3_screener_day_cache = merged
+    slots = snap.get("filter_slots")
+    if slots and not any(
+        (st.session_state.get("room3_filter_slots") or {}).get(k) for k in room3_filters.SLOTS
+    ):
+        st.session_state.room3_filter_slots = slots
+    uni = list(snap.get("filter_universe") or [])
+    if uni and not (st.session_state.get("room3_filter_universe") or []):
+        st.session_state.room3_filter_universe = uni
+        st.session_state.room3_watch_book = room3_watcher.set_filter_universe(
+            st.session_state.get("room3_watch_book") or room3_watcher.empty_book(),
+            uni,
+        )
+
+
+def _persist_screener_to_disk() -> None:
+    room3_screener.save_screener_snapshot(
+        {
+            "last": st.session_state.get("room3_screener_last") or {},
+            "day_cache": st.session_state.get("room3_screener_day_cache") or {},
+            "filter_slots": st.session_state.get("room3_filter_slots") or {},
+            "filter_universe": st.session_state.get("room3_filter_universe") or [],
+        }
+    )
+
+
 def _screener_rules_for_scan() -> dict:
     saved = dict(st.session_state.get("room3_filter_rules") or {})
     rules = {**room3_screener.default_rules(), **saved}
@@ -2829,6 +2871,7 @@ def _run_screener_pass(*, force: bool = False) -> dict:
                 tickers,
             )
         _apply_active_filter_universe()
+        _persist_screener_to_disk()
         return result
 
     result = room3_screener.run_rth_scan(
@@ -2877,6 +2920,7 @@ def _run_screener_pass(*, force: bool = False) -> dict:
                 for old in list(cache.keys())[:-6]:
                     cache.pop(old, None)
             st.session_state.room3_screener_day_cache = cache
+    _persist_screener_to_disk()
     return result
 
 
@@ -3139,6 +3183,7 @@ def _render_rth_filter_attach() -> None:
                 )
             }
             st.session_state.room3_screener_day_cache = cache
+            _persist_screener_to_disk()
     if names and list_only:
         st.warning(
             f"**Not trading** — {review_label} is enabled, but that window is not open "

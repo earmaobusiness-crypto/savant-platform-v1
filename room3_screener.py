@@ -12,14 +12,18 @@ filter fields (HMA / vol) on a short liquid shortlist — never on all ~8k.
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import room3_alpaca
 
 ET = ZoneInfo("America/New_York")
+
+_SNAPSHOT_PATH = Path(__file__).resolve().parent / "room3_data" / "screener_snapshot.json"
 
 SCAN_INTERVAL_MINUTES = 18
 BATCH_SIZE = 120
@@ -859,3 +863,24 @@ def run_rth_scan(
     result = scan_universe(universe, rules=rules, max_pass=max_pass)
     result["universe_size"] = len(universe)
     return result
+
+
+def save_screener_snapshot(payload: dict[str, Any]) -> None:
+    """Disk backup so Streamlit refresh / tab sleep does not wipe the last list."""
+    try:
+        _SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        blob = dict(payload or {})
+        blob["saved_at"] = datetime.now(ET).isoformat()
+        _SNAPSHOT_PATH.write_text(json.dumps(blob, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def load_screener_snapshot() -> dict[str, Any]:
+    try:
+        if not _SNAPSHOT_PATH.is_file():
+            return {}
+        raw = json.loads(_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}

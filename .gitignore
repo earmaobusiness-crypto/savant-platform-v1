@@ -1,3 +1,4 @@
+room3_data/
 .streamlit/secrets.toml
 .streamlit/matrix_vault_cache.json
 vault_backups/
