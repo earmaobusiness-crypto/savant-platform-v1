@@ -219,7 +219,7 @@ def _layout_entry(
         return None
     tf_norm = _normalize_tf(timeframe_resolution or strategy)
     bkey = bucket_key or f"{layout_id}|{strategy}|{tf_norm}"
-    return {
+    entry = {
         "layout_id": layout_id,
         "bucket_key": bkey,
         "vector": vector[:VECTOR_DIM],
@@ -231,6 +231,12 @@ def _layout_entry(
         "pattern_count": int(pattern_count or 0),
         "vector_source": source or "unknown",
     }
+    try:
+        import room3_recipes
+
+        return room3_recipes.attach_recipe(entry)
+    except Exception:
+        return entry
 
 
 def _aggregate_rows_into_layouts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -277,8 +277,24 @@ def maybe_queue_matrix_signals(
         structural = float(line.get("entry_structural_move_pct") or 0.0)
         pnl_pct = ((last_px - entry_px) / entry_px * 100.0) if entry_px > 0 and last_px > 0 else 0.0
 
+        # Patience: stock may lag the pattern — don't panic-exit on mild fade
+        # while DNA still warm and structural target not yet reached.
+        patience = True
         exit_reason = ""
-        if cur_match < EXIT_MATCH_FLOOR_PCT and cur_match < entry_match - 10:
+        hard_fade = cur_match < EXIT_MATCH_FLOOR_PCT and cur_match < entry_match - 15
+        soft_fade = cur_match < EXIT_MATCH_FLOOR_PCT and cur_match < entry_match - 10
+        if hard_fade:
+            exit_reason = f"match faded {cur_match}%"
+        elif soft_fade and not patience:
+            exit_reason = f"match faded {cur_match}%"
+        elif soft_fade and patience and structural > 0 and pnl_pct < structural * 0.25:
+            line["patience"] = True
+            line["patience_note"] = (
+                f"holding · match {cur_match}% · waiting for move "
+                f"(target ~{structural:.1f}%)"
+            )
+            exit_reason = ""
+        elif soft_fade:
             exit_reason = f"match faded {cur_match}%"
         elif pnl_pct <= -STOP_LOSS_PCT:
             exit_reason = f"stop {pnl_pct:.1f}%"
@@ -299,14 +315,26 @@ def maybe_queue_matrix_signals(
                 strategy=strat,
             )
             line["last_exit_reason"] = exit_reason
+            line["patience"] = False
         return
 
     if line.get("entry_signal") or line.get("state") not in ("watching", "committed"):
         return
     if not match.get("vector_ready"):
         return
-    if int(match.get("spatial_match_pct") or 0) < MATCH_THRESHOLD_PCT:
+
+    cur_match = int(match.get("spatial_match_pct") or 0)
+    # Warm DNA but not full signal yet — keep mapping; stock may still fill the puzzle.
+    if cur_match < MATCH_THRESHOLD_PCT:
+        if cur_match >= 70:
+            line["patience"] = True
+            line["patience_note"] = (
+                f"warming {cur_match}% · need ≥{MATCH_THRESHOLD_PCT}% · "
+                f"30s snaps continue"
+            )
         return
+    line["patience"] = False
+    line.pop("patience_note", None)
     if _ticker_already_engaged(book, ticker):
         return
 

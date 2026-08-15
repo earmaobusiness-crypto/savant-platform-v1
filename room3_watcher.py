@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import room3_bridge
 import room3_engine
 import room3_matrix
+import room3_recipes
 
 ET = ZoneInfo("America/New_York")
 
@@ -152,9 +153,16 @@ def _sticky_alive(line: dict[str, Any]) -> bool:
         return False
 
 
-def _fetch_bar_snapshot(ticker: str, tf: str) -> dict[str, Any] | None:
-    """Pull a lean closed-bar fingerprint for this TF diet."""
+def _fetch_bar_snapshot(
+    ticker: str,
+    tf: str,
+    *,
+    bars_keep: int | None = None,
+) -> dict[str, Any] | None:
+    """Pull a lean closed-bar fingerprint for this TF diet / strategy plan."""
     diet = TF_DIET.get(tf) or TF_DIET["1m"]
+    keep = int(bars_keep if bars_keep is not None else diet["bars_keep"])
+    keep = max(3, min(120, keep))
     try:
         import yfinance as yf
 
@@ -165,7 +173,6 @@ def _fetch_bar_snapshot(ticker: str, tf: str) -> dict[str, Any] | None:
         )
         if hist is None or hist.empty:
             return None
-        keep = int(diet["bars_keep"])
         tail = hist.tail(keep)
         last = tail.iloc[-1]
         prev = tail.iloc[-2] if len(tail) > 1 else last
@@ -178,6 +185,12 @@ def _fetch_bar_snapshot(ticker: str, tf: str) -> dict[str, Any] | None:
         prev_c = float(prev["Close"])
         ret = ((c - prev_c) / prev_c) if prev_c else 0.0
         rng = ((h - l) / c) if c else 0.0
+        # Session VWAP proxy from the lookback window (shared sensor).
+        typ = (tail["High"] + tail["Low"] + tail["Close"]) / 3.0
+        vol_s = tail["Volume"] if "Volume" in tail.columns else None
+        vwap = None
+        if vol_s is not None and float(vol_s.sum() or 0) > 0:
+            vwap = float((typ * vol_s).sum() / vol_s.sum())
         slice_body: dict[str, Any] = {
             "ts": ts,
             "o": round(o, 4),
@@ -188,6 +201,8 @@ def _fetch_bar_snapshot(ticker: str, tf: str) -> dict[str, Any] | None:
             "ret": round(ret, 6),
             "range": round(rng, 6),
             "extras": diet["extras"],
+            "vwap": round(vwap, 4) if vwap is not None else None,
+            "lookback_bars": keep,
         }
         # Richer TFs get a little more context without dumping full history
         if diet["extras"] in ("light", "rich"):
@@ -203,6 +218,103 @@ def _fetch_bar_snapshot(ticker: str, tf: str) -> dict[str, Any] | None:
         return slice_body
     except Exception as exc:
         return {"error": str(exc).strip() or type(exc).__name__}
+
+
+def _seed_line_from_history(line: dict[str, Any], *, bars_keep: int) -> int:
+    """
+    On first touch: load strategy-sized lookback as slices so the puzzle can
+    complete immediately if DNA already matches — then 30s snaps continue.
+    """
+    if line.get("seeded"):
+        return 0
+    ticker = str(line.get("ticker") or "")
+    tf = str(line.get("timeframe") or "1m")
+    diet = TF_DIET.get(tf) or TF_DIET["1m"]
+    keep = max(3, min(120, int(bars_keep)))
+    try:
+        import yfinance as yf
+
+        hist = yf.Ticker(ticker).history(
+            period=str(diet["yf_period"]),
+            interval=str(diet["yf_interval"]),
+            auto_adjust=True,
+        )
+        if hist is None or hist.empty:
+            line["seeded"] = True
+            return 0
+        tail = hist.tail(keep)
+        added = 0
+        prev_c = None
+        for idx, row in tail.iterrows():
+            c = float(row["Close"])
+            o = float(row["Open"])
+            h = float(row["High"])
+            l = float(row["Low"])
+            v = float(row["Volume"]) if "Volume" in row else 0.0
+            ret = ((c - prev_c) / prev_c) if prev_c and prev_c > 0 else 0.0
+            prev_c = c
+            snap = {
+                "ts": str(idx),
+                "o": round(o, 4),
+                "h": round(h, 4),
+                "l": round(l, 4),
+                "c": round(c, 4),
+                "v": round(v, 2),
+                "ret": round(ret, 6),
+                "range": round(((h - l) / c) if c else 0.0, 6),
+                "extras": diet["extras"],
+                "seed": True,
+            }
+            if _append_slice(line, snap):
+                added += 1
+        line["seeded"] = True
+        line["seed_bars"] = added
+        line["recipe_bars_keep"] = keep
+        return added
+    except Exception as exc:
+        line["seeded"] = True
+        line["last_error"] = str(exc).strip() or type(exc).__name__
+        return 0
+
+
+def _update_shared_sensors(
+    book: dict[str, Any],
+    ticker: str,
+    *,
+    plan: dict[str, Any],
+    last_snap: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """One shared sensor pack per ticker — recipes reuse it."""
+    packs = book.setdefault("sensor_packs", {})
+    pack = packs.get(ticker) or room3_recipes.empty_sensor_pack(ticker)
+    sensors = list(plan.get("sensors") or ["charts", "vwap"])
+    if last_snap and not last_snap.get("error"):
+        pack["charts"] = {
+            "ok": True,
+            "note": f"lookback {plan.get('lookback_minutes')}m · bars {plan.get('bars_keep')}",
+            "last_ts": str(last_snap.get("ts") or ""),
+            "last_c": last_snap.get("c"),
+        }
+        vwap = last_snap.get("vwap")
+        pack["vwap"] = {
+            "ok": vwap is not None,
+            "value": vwap,
+            "note": "from lookback window" if vwap is not None else "unavailable",
+        }
+    # Optional sensors: stubs until wired (structure ready for SEC/news/social).
+    for name in ("sec", "news", "social"):
+        if name in sensors:
+            cur = pack.get(name) or {}
+            if cur.get("ok") is None:
+                pack[name] = {
+                    "ok": None,
+                    "note": "stub — recipe asked for it; feed not wired yet",
+                    "required": True,
+                }
+        elif name in pack and not (pack.get(name) or {}).get("required"):
+            pack[name] = {"ok": None, "note": "not required by active recipes"}
+    packs[ticker] = pack
+    return pack
 
 
 def _append_slice(line: dict[str, Any], snap: dict[str, Any]) -> bool:
@@ -223,6 +335,9 @@ def _append_slice(line: dict[str, Any], snap: dict[str, Any]) -> bool:
         }
     )
     max_n = int(diet["max_slices"])
+    recipe_n = int(line.get("recipe_bars_keep") or 0)
+    if recipe_n > max_n:
+        max_n = recipe_n
     line["slices"] = slices[-max_n:]
     line["last_bar_ts"] = ts
     line["last_error"] = ""
@@ -346,14 +461,35 @@ def tick_watcher(
 
     _ensure_lines_for_universe(book)
     repertoire = room3_bridge.matrix_repertoire(session_state)
+    layouts = list(repertoire.get("layouts") or [])
+    # Precompute TF plans once — max lookback + shared sensors across strategies.
+    tf_plans = {
+        tf: room3_recipes.plan_for_timeframe(layouts, tf) for tf in TIMEFRAMES
+    }
+
     for key, line in list((book.get("lines") or {}).items()):
         if line.get("state") == "flat_day":
             continue
         # Still scan sticky / in-filter / in-trade
         if not line.get("in_filter") and not line.get("sticky") and line.get("state") != "in":
             continue
-        snap = _fetch_bar_snapshot(str(line["ticker"]), str(line["timeframe"]))
+        tf = str(line.get("timeframe") or "1m")
+        ticker = str(line.get("ticker") or "").upper()
+        plan = tf_plans.get(tf) or room3_recipes.plan_for_timeframe(layouts, tf)
+        bars_keep = int(plan.get("bars_keep") or (TF_DIET.get(tf) or {}).get("bars_keep") or 8)
+        line["recipe_bars_keep"] = bars_keep
+        line["recipe_lookback_min"] = int(plan.get("lookback_minutes") or 0)
+        line["recipe_sensors"] = list(plan.get("sensors") or [])
+
+        # First touch: seed strategy-sized lookback, then 30s snaps continue.
+        if not line.get("seeded"):
+            _seed_line_from_history(line, bars_keep=bars_keep)
+
+        snap = _fetch_bar_snapshot(ticker, tf, bars_keep=bars_keep)
         _append_slice(line, snap or {})
+        _update_shared_sensors(book, ticker, plan=plan, last_snap=snap if isinstance(snap, dict) else None)
+        line["sensor_pack"] = (book.get("sensor_packs") or {}).get(ticker) or {}
+
         room3_matrix.maybe_queue_matrix_signals(
             book,
             line,
@@ -372,11 +508,14 @@ def tick_watcher(
                 signals.append(sig)
 
     n_lines = len(book.get("lines") or {})
-    layouts = int(repertoire.get("layout_count") or 0)
+    n_layouts = int(repertoire.get("layout_count") or 0)
     trade_note = "trading ON" if trade_ok else "maps on · arm engine to trade"
+    lb_note = ", ".join(
+        f"{tf}≤{tf_plans[tf].get('lookback_minutes')}m" for tf in TIMEFRAMES
+    )
     book["last_note"] = (
         f"Scanned {n_lines} TF maps · universe {len(book.get('universe') or [])} · "
-        f"{layouts} matrix buckets · {trade_note} · "
+        f"{n_layouts} matrix buckets · recipes [{lb_note}] · {trade_note} · "
         f"DNA ≥{room3_matrix.MATCH_THRESHOLD_PCT}%"
     )
     return book, signals
@@ -416,11 +555,15 @@ def book_status_rows(book: dict[str, Any]) -> list[dict[str, Any]]:
                 "Match%": int(line.get("match_pct") or 0),
                 "Layout": str(line.get("nearest_layout") or "—")[:16],
                 "Strategy": str(line.get("nearest_strategy") or "—")[:12],
+                "Lookback": f"{int(line.get('recipe_lookback_min') or 0)}m"
+                if line.get("recipe_lookback_min")
+                else "—",
                 "Slices": len(line.get("slices") or []),
+                "Patience": "yes" if line.get("patience") else "",
                 "Score": f"{float(line.get('score') or 0):.2f}",
                 "Filter": "in" if line.get("in_filter") else ("sticky" if line.get("sticky") else "out"),
                 "Last bar": str(line.get("last_bar_ts") or "—")[-19:],
-                "Err": (line.get("last_error") or "")[:40],
+                "Err": (line.get("last_error") or line.get("patience_note") or "")[:40],
             }
         )
     return rows
