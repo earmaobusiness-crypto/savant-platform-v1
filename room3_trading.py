@@ -2622,10 +2622,9 @@ def _render_execution_posture(mode: str) -> None:
 
     st.markdown("#### Session filters (when engine may trade)")
     st.caption(
-        "Each box you enable: while that window is open → scan every ~18 min and full path "
-        "(maps → compare → trade when armed). While that window is closed → Scan still gives "
-        "the end-of-session filter list only (like TV after that session ends) — no maps/orders. "
-        "Post on also means open positions may continue past 4:00 instead of flattening."
+        "Drop tickers on the belt below. While an enabled window is open → maps → compare → "
+        "trade when armed. Window closed → list can sit, but no new trades. "
+        "Post on = positions may continue past 4:00 instead of flattening."
     )
     allowed = set(st.session_state.get("room3_allowed_sessions") or [])
     f1, f2, f3 = st.columns(3)
@@ -3038,7 +3037,9 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
 
 @st.fragment(run_every=timedelta(minutes=room3_screener.SCAN_INTERVAL_MINUTES))
 def _room3_screener_fragment() -> None:
-    """Job 1 — every ~18 min while the clock is inside an enabled session."""
+    """Parked Yahoo Job 1 auto-scan — only when BUILTIN_SCREENER_ENABLED."""
+    if not room3_screener.BUILTIN_SCREENER_ENABLED:
+        return
     if not _broker_is_connected():
         return
     if not _session_scan_allowed():
@@ -3115,20 +3116,11 @@ def _render_watch_book_panel() -> None:
     st.markdown("### Eyes · watch book")
     _render_rth_filter_attach()
     book = st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
-    window = room3_engine.detect_session_window()
-    slots = st.session_state.get("room3_filter_slots") or room3_filters.empty_slots()
-    rth_saved = list(slots.get(room3_filters.SLOT_RTH) or [])
-    screener = st.session_state.get("room3_screener_last") or {}
-    screener_names = list(screener.get("tickers") or [])
     if book.get("awaiting_filters"):
-        if not screener_names and not rth_saved:
-            st.info(
-                "Click **Run screener now** (or wait for the ~18 min timer while an "
-                "enabled session is open). Survivors get **1m + 5m + 15m** maps; "
-                "trades only when that window is open and the engine is armed."
-            )
-        else:
-            st.info("Enable a session under filters, then scan while that window is open for the full path.")
+        st.info(
+            "Drop tickers above → they land on the belt. "
+            "Open session + armed → maps / compare / trades."
+        )
     else:
         st.caption(
             f"Universe: {', '.join(book.get('universe') or [])} · "
@@ -3142,216 +3134,111 @@ def _render_watch_book_panel() -> None:
 
 
 def _render_rth_filter_attach() -> None:
-    st.markdown("#### Filter · built-in screener")
-    st.caption(
-        "Enabled session **open** → scan (~18 min) → maps → compare → trade if armed. "
-        "Enabled session **closed** → same Scan gives that session’s end list only "
-        f"(no maps / compare / orders). Belt max **{room3_watcher.MAX_NAMES}**."
-    )
-
-    last = st.session_state.get("room3_screener_last") or {}
-    names = list(last.get("tickers") or [])
-    window = room3_engine.detect_session_window()
+    """Job 1 feed — paste tickers. Built-in Yahoo screener is parked (flag off)."""
+    st.markdown("#### Belt · drop tickers")
     trading_now = _session_trading_allowed()
-    list_only = (not trading_now) and _any_session_enabled()
-    review_slot = str(last.get("session_slot") or _session_review_target())
-    review_label = room3_engine.session_label(review_slot)
-    # Seed today's freeze from the list already on screen (avoids another long pull
-    # just to populate the cache after deploy).
-    if list_only and names and not last.get("cached"):
-        rules = _screener_rules_for_scan()
-        key = _screener_cache_key(rules, slot=review_slot)
-        cache = dict(st.session_state.get("room3_screener_day_cache") or {})
-        if key not in cache:
-            cache[key] = {
-                k: last.get(k)
-                for k in (
-                    "ok",
-                    "tickers",
-                    "passed",
-                    "stage1_passed",
-                    "structure_rejected",
-                    "scanned",
-                    "hist_ok",
-                    "deep_scanned",
-                    "prescreen_liquid",
-                    "mcap_skipped",
-                    "errors",
-                    "at",
-                    "error",
-                    "universe_size",
-                )
-            }
-            st.session_state.room3_screener_day_cache = cache
-            _persist_screener_to_disk()
-    if names and list_only:
-        st.warning(
-            f"**Not trading** — {review_label} is enabled, but that window is not open "
-            f"(now: {room3_engine.session_label(window)}). "
-            f"Showing the **{review_label} end-of-session** filter list only. "
-            "No maps, no matrix compare, no orders until that window opens again."
-        )
-    if names:
-        label = f"{review_label} end list" if list_only else "on the belt"
-        st.success(f"{len(names)} names {label}: " + ", ".join(names))
-    elif last.get("error"):
-        st.warning(str(last.get("error")))
-    elif last.get("scanned") or last.get("stage1_passed") is not None:
-        st.warning(
-            f"Screener finished — **0 names** passed full filters "
-            f"(stage1 {last.get('stage1_passed', 0)} · "
-            f"float/mcap cut {last.get('structure_rejected', 0)} · "
-            f"scanned {last.get('scanned', 0)}). "
-            f"Rules may be too tight for this tape, or structure data failed."
-        )
-    else:
-        st.info(
-            "No screener pass yet — connect Alpaca, enable a session, and run once "
-            "(or wait for the ~18 min timer while that window is open)."
-        )
+    window = room3_engine.detect_session_window()
+    belt = list(st.session_state.get("room3_filter_universe") or [])
+    if not belt:
+        belt = list((st.session_state.get("room3_screener_last") or {}).get("tickers") or [])
 
-    if last:
-        extra = ""
-        if last.get("stage1_passed") is not None:
-            extra = f" · stage1 {last.get('stage1_passed', 0)} · float/mcap cut {last.get('structure_rejected', 0)}"
-        pipe = str(last.get("pipeline") or ("list_only" if list_only else "full"))
-        cached_note = " · cached" if last.get("cached") else ""
+    if belt and not trading_now and _any_session_enabled():
         st.caption(
-            f"Last pass {last.get('at') or '—'} · "
-            f"{pipe}{cached_note} · {review_label} · "
-            f"universe {last.get('universe_size', '—')} · "
-            f"scanned {last.get('scanned', 0)} · "
-            f"bars {last.get('hist_ok', '—')} · "
-            f"liquid {last.get('prescreen_liquid', '—')} · "
-            f"mcap-skip {last.get('mcap_skipped', '—')} · "
-            f"deep {last.get('deep_scanned', '—')} · "
-            f"passed {last.get('passed', 0)}{extra} · "
-            f"{last.get('elapsed_sec', 0)}s"
+            f"Belt loaded · not trading now "
+            f"({room3_engine.session_label(window)} — enable that window or wait until it opens)."
         )
+    elif belt and trading_now:
+        st.caption("Belt live — maps running; trades when armed.")
 
-    force = st.checkbox(
-        "Force fresh scan (ignore today's cached end list)",
-        value=False,
-        key="room3_screener_force_fresh",
-        help="After the close, Run screener now reuses today's list instantly. "
-        "Check this only if you really want a full Yahoo re-pull.",
+    # Compact drop: one field + one click. Accepts spaces, commas, newlines, NASDAQ:XYZ.
+    raw = st.text_input(
+        "Tickers",
+        value="",
+        key="room3_belt_paste",
+        placeholder="ONFO WETO CAPR   or   ONFO, WETO, CAPR",
+        label_visibility="collapsed",
     )
-    if st.button("Run screener now", type="primary", key="room3_screener_run_now"):
-        if not _manual_screener_allowed():
-            st.error("Connect Alpaca and enable at least one session (Pre / Market hours / Post).")
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        drop = st.button("Drop on belt", type="primary", key="room3_belt_drop", use_container_width=True)
+    with c2:
+        clear = st.button("Clear", key="room3_belt_clear", use_container_width=True)
+    with c3:
+        st.caption(f"max {room3_watcher.MAX_NAMES}")
+
+    if clear:
+        ingest_filter_universe([])
+        st.session_state.room3_screener_last = {
+            "ok": True,
+            "tickers": [],
+            "passed": 0,
+            "at": datetime.now(ET).strftime("%H:%M:%S ET"),
+            "pipeline": "paste",
+            "source": "manual",
+        }
+        _persist_screener_to_disk()
+        st.rerun()
+
+    if drop:
+        parsed = room3_filters.parse_screener_paste(raw)
+        names = list(parsed.get("tickers") or [])
+        if not names:
+            st.warning("No tickers found — try `ONFO WETO CAPR`.")
         else:
-            use_force = bool(force) or _session_trading_allowed()
-            spin = (
-                "Scanning NYSE/NASDAQ…"
-                if use_force or force
-                else "Loading today's end list (or scanning if first run)…"
+            # Active window if trading; else park on RTH slot for the end-list feel.
+            slot = (
+                room3_engine.detect_session_window()
+                if trading_now
+                else room3_filters.SLOT_RTH
             )
-            with st.spinner(spin):
-                result = _run_screener_pass(force=bool(force))
-            if result.get("cached"):
-                st.info(
-                    f"Same list as earlier today ({len(result.get('tickers') or [])} names) — "
-                    "cached end-of-session snapshot. Check **Force fresh scan** to re-pull Yahoo."
-                )
-            elif result.get("tickers"):
-                if result.get("pipeline") == "list_only":
-                    slot_lbl = room3_engine.session_label(
-                        str(result.get("session_slot") or _session_review_target())
-                    )
-                    st.success(
-                        f"Found {len(result['tickers'])} names "
-                        f"({slot_lbl} end list — not trading)."
-                    )
-                else:
-                    st.success(f"Found {len(result['tickers'])} names — feeding the belt.")
-            else:
-                st.warning(
-                    result.get("error")
-                    or (
-                        f"No names passed — stage1 {result.get('stage1_passed', 0)} · "
-                        f"float/mcap cut {result.get('structure_rejected', 0)} · "
-                        f"scanned {result.get('scanned', 0)}. "
-                        "Tune filter rules if this stays at 0."
-                    )
-                )
+            if slot not in room3_filters.SLOTS:
+                slot = room3_filters.SLOT_RTH
+            ingest_filter_slot(slot, names)
+            st.session_state.room3_screener_last = {
+                "ok": True,
+                "tickers": names[: room3_watcher.MAX_NAMES],
+                "passed": len(names[: room3_watcher.MAX_NAMES]),
+                "at": datetime.now(ET).strftime("%H:%M:%S ET"),
+                "pipeline": "full" if trading_now else "list_only",
+                "session_slot": slot,
+                "source": "manual",
+                "cached": False,
+            }
+            _persist_screener_to_disk()
             st.rerun()
 
-    with st.expander("Filter rules (tune to match TradingView)", expanded=False):
-        rules = dict(st.session_state.get("room3_filter_rules") or room3_screener.default_rules())
-        rules["min_volatility_pct"] = st.number_input(
-            "Min volatility % (30-day)",
-            value=float(rules.get("min_volatility_pct") or 30),
-            min_value=0.0,
-            step=1.0,
-            key="room3_rule_vol",
+    belt = list(st.session_state.get("room3_filter_universe") or [])
+    if not belt:
+        belt = list((st.session_state.get("room3_screener_last") or {}).get("tickers") or [])
+    if belt:
+        st.success(f"{len(belt)} on the belt: " + ", ".join(belt))
+    else:
+        st.caption("Empty belt — paste symbols and hit **Drop on belt**.")
+
+    if room3_screener.BUILTIN_SCREENER_ENABLED:
+        _render_builtin_screener_panel()
+    else:
+        st.caption(
+            "Built-in Yahoo screener is parked. "
+            "To bring it back: `BUILTIN_SCREENER_ENABLED = True` in `room3_screener.py`."
         )
-        rules["require_price_above_hma9"] = st.checkbox(
-            "Price above Hull MA 9 (daily)",
-            value=bool(rules.get("require_price_above_hma9", True)),
-            key="room3_rule_hma",
-            help=(
-                "1-day HMA9 like TradingView. Split-adjusted history. "
-                "Allows 1% slack by default so near-misses (e.g. STKH) match TV noise."
-            ),
-        )
-        rules["hma_tolerance_pct"] = st.number_input(
-            "HMA slack % (0 = strict)",
-            value=float(rules.get("hma_tolerance_pct") if rules.get("hma_tolerance_pct") is not None else 1.0),
-            min_value=0.0,
-            max_value=5.0,
-            step=0.25,
-            key="room3_rule_hma_tol",
-            help="Price may sit this % under HMA and still pass. Bridges Yahoo vs TradingView.",
-        )
-        rules["min_dollar_volume"] = st.number_input(
-            "Min price × volume (today $)",
-            value=float(rules.get("min_dollar_volume") or 10_000_000),
-            min_value=0.0,
-            step=1_000_000.0,
-            key="room3_rule_dv",
-        )
-        rules["min_dollar_avg_vol_10d"] = st.number_input(
-            "Min price × avg volume 10d ($)",
-            value=float(rules.get("min_dollar_avg_vol_10d") or 10_000_000),
-            min_value=0.0,
-            step=1_000_000.0,
-            key="room3_rule_avg",
-        )
-        rules["max_market_cap"] = st.number_input(
-            "Max market cap ($)",
-            value=float(rules.get("max_market_cap") or 1_000_000_000),
-            min_value=0.0,
-            step=100_000_000.0,
-            key="room3_rule_mcap",
-            help="Exclude names above this market cap (default $1B).",
-        )
-        rules["min_price"] = st.number_input(
-            "Min price ($)",
-            value=float(rules.get("min_price") or 0.01),
-            min_value=0.0,
-            step=0.01,
-            key="room3_rule_min_px",
-            help="Use 0.01 to keep sub-$1 names (TradingView-style). Old default $1 hid them.",
-        )
-        rules["exclude_etfs"] = st.checkbox(
-            "Exclude ETFs / leveraged products",
-            value=bool(rules.get("exclude_etfs", True)),
-            key="room3_rule_no_etf",
-            help="Drops SQQQ, TSLL, NVDL, 2x/3x single-stock funds, etc.",
-        )
-        rules["require_volume_vs_float"] = st.checkbox(
-            "Volume vs float filter",
-            value=bool(rules.get("require_volume_vs_float", True)),
-            key="room3_rule_float",
-            help=(
-                "When float is known: today's volume must clear the float rule "
-                "(mega-float time-of-day ratios, low-float stricter). "
-                "When float is missing/unknown (like some names on TradingView) → keep the stock."
-            ),
-        )
-        if st.button("Save filter rules", key="room3_rule_save"):
-            st.session_state.room3_filter_rules = rules
-            st.success("Rules saved — next screener pass uses these.")
+
+
+def _render_builtin_screener_panel() -> None:
+    """Full Yahoo Job 1 UI — only when BUILTIN_SCREENER_ENABLED."""
+    st.markdown("#### Filter · built-in screener")
+    last = st.session_state.get("room3_screener_last") or {}
+    names = list(last.get("tickers") or [])
+    if names:
+        st.success(f"{len(names)} names: " + ", ".join(names))
+    if st.button("Run screener now", type="primary", key="room3_screener_run_now"):
+        with st.spinner("Scanning NYSE/NASDAQ…"):
+            result = _run_screener_pass(force=True)
+        if result.get("tickers"):
+            st.success(f"Found {len(result['tickers'])} names.")
+        else:
+            st.warning(result.get("error") or "No names passed.")
+        st.rerun()
 
 
 def _render_trading_workspace(mode: str) -> None:
@@ -3372,7 +3259,8 @@ def _render_trading_workspace(mode: str) -> None:
     _render_live_dashboard(mode)
     _render_execution_posture(mode)
     _render_watch_book_panel()
-    _room3_screener_fragment()
+    if room3_screener.BUILTIN_SCREENER_ENABLED:
+        _room3_screener_fragment()
     _room3_heartbeat_fragment()
     left, right = st.columns([1, 1])
     with left:

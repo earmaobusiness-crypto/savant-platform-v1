@@ -26,6 +26,9 @@ ET = ZoneInfo("America/New_York")
 _SNAPSHOT_PATH = Path(__file__).resolve().parent / "room3_data" / "screener_snapshot.json"
 
 SCAN_INTERVAL_MINUTES = 18
+# Parked: set True to restore Yahoo universe Job 1 UI + ~18 min auto-scan.
+# Code paths in room3_screener / _run_screener_pass stay intact for bring-back.
+BUILTIN_SCREENER_ENABLED = False
 BATCH_SIZE = 120
 UNIVERSE_CAP = 20000  # safety ceiling only — do NOT truncate mid-list (drops WETO/CAPR/etc.)
 YF_PERIOD = "2mo"  # deep history for HMA + 30d vol (Pass B shortlist only)
