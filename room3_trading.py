@@ -1380,13 +1380,14 @@ def _broker_connection_subtitle(mode: str) -> str:
         if status == "connected":
             equity = float(st.session_state.get("room3_account_equity") or 0)
             acct = str(st.session_state.get("room3_alpaca_account") or "").strip()
-            core = f"<strong>Alpaca {lane}</strong> · connected"
+            # Handshake always hits paper endpoint today — label truthfully.
+            core = "<strong>Alpaca PAPER</strong> · connected"
             if equity > 0:
                 core += f" · account <strong>${equity:,.2f}</strong>"
             if acct:
                 core += f" · {acct.split('·')[0].strip()}"
             if mode == ROOM3_MODE_LIVE:
-                core += " · <em>live lane idle until funded Alpaca or IBKR Pro</em>"
+                core += " · <em>Live tab open, but still paper hose (live orders hard-off)</em>"
             return core
         if status == "waiting":
             return f"<strong>Alpaca {lane}</strong> · waiting for handshake"
@@ -2166,7 +2167,13 @@ def _render_alpaca_connection_panel(mode: str) -> None:
     st.markdown("### Alpaca")
     if status == "connected":
         acct = st.session_state.room3_alpaca_account or "paper"
-        st.success(f"Connected · {'PAPER' if is_paper else 'LIVE'} · {acct}")
+        # Connection probe is paper-only today — never imply live brokerage is hooked up.
+        st.success(f"Connected · PAPER account · {acct}")
+        if not is_paper:
+            st.warning(
+                "You’re in the **Live** tab, but this handshake is still **Alpaca paper**. "
+                "Live auto-orders are hard-off. Stay on Paper for trading."
+            )
         if st.button("Disconnect Alpaca", key="room3_alpaca_disconnect"):
             st.session_state.room3_alpaca_status = "disconnected"
             st.session_state.room3_alpaca_account = ""
@@ -2178,8 +2185,8 @@ def _render_alpaca_connection_panel(mode: str) -> None:
 
     if not is_paper:
         st.warning(
-            "Alpaca **live** needs a funded brokerage account + KYC. "
-            "Stay on **Paper** in Room 3 for now, or switch broker to IBKR when Pro is available."
+            "Live tab is for later. Connection check still uses **paper** keys. "
+            "Live auto-orders are hard-disabled. Use **Paper** for Room 3 trading."
         )
 
     st.markdown(
