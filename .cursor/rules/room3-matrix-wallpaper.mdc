@@ -1,0 +1,17 @@
+---
+description: Room 3 backlog — bring up when matrix/paper trading progresses
+alwaysApply: true
+---
+
+# Room 3 — deferred matrix upgrade
+
+**Idea (user approved):** Matrix compare should downweight “wallpaper” features — traits that appear in almost every pattern (common background) — and weight distinctive / rare signal features more. Not built yet.
+
+**When to bring this up again:**
+- After paper trading is actually firing (fills + logs working), OR
+- When matching feels muddy / too many false matches, OR
+- When operator review / strategy reinforce work starts
+
+**Do not prioritize before:** first clean Alpaca paper round-trips.
+
+**Related:** Room 3 maps use strategy recipes (lookback + sensors); Job 1 Yahoo screener is parked (`BUILTIN_SCREENER_ENABLED = False`).
