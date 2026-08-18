@@ -22,6 +22,7 @@ TF_PROJECTED_PRIOR: dict[str, int] = {"15m": 4, "5m": 8, "1m": 6}
 TF_PROJECTED_CAP: dict[str, int] = {"15m": 8, "5m": 16, "1m": 12}
 SCALE_IN_MAX = 1  # one add onto a live winner
 SCALE_IN_TARGET_FRAC = 0.50  # add only while P/L is still under half the layout move
+SIZE_AT_THRESHOLD = 0.55  # 85% match → 55% of that TF's slot
 
 
 def size_explain(session_state: Any | None = None) -> str:
@@ -33,16 +34,17 @@ def size_explain(session_state: Any | None = None) -> str:
         else "Trading today is the day’s deployable cash. "
     )
     p = (snap or {}).get("projected") or TF_PROJECTED_PRIOR
+    n15 = max(1, int(p.get("15m") or 4))
+    slot_frac = 1.0 / n15
     return (
         f"{book_txt}"
         "That cash is split into timeframe buckets that add to 100%: "
         f"15m {TF_BUCKET_FRAC['15m']:.0%} · 5m {TF_BUCKET_FRAC['5m']:.0%} · "
         f"1m {TF_BUCKET_FRAC['1m']:.0%}. "
-        "A trade only draws from its own bucket. "
         f"Layouts project about {p.get('15m', 4)} fifteen-minute fills, "
         f"{p.get('5m', 8)} five-minute, {p.get('1m', 6)} one-minute today — "
-        "each full-match 15m therefore starts at 1 / projected of the 15m bucket "
-        "(4 projected → 25% of the 15m bucket). "
+        f"each full-match 15m therefore starts at 1/{n15} of the 15m bucket "
+        f"({slot_frac:.0%} of that 50%). "
         "Those percents are the opening reservation, not walls. "
         "If a TF prints more than expected, it collects leftover from buckets that are "
         "not hot (live < projected). A live 15m that is still in the move can add once "
@@ -478,14 +480,19 @@ def tf_budget_snapshot(session_state: Any | None = None) -> dict[str, Any]:
 
 def _match_size_scale(match_pct: float) -> float:
     """85% (entry floor) → 55% of that TF's slot; 100% → full slot."""
+    at_floor = 0.55
+    try:
+        at_floor = float(SIZE_AT_THRESHOLD)
+    except (NameError, TypeError, ValueError):
+        at_floor = 0.55
     pct = max(0.0, min(100.0, float(match_pct or 0)))
     floor = float(MATCH_THRESHOLD_PCT)
     if pct <= 0:
         return 0.0
     if pct < floor:
-        return SIZE_AT_THRESHOLD * (pct / floor)
+        return at_floor * (pct / floor)
     span = max(1.0, 100.0 - floor)
-    return SIZE_AT_THRESHOLD + (1.0 - SIZE_AT_THRESHOLD) * ((pct - floor) / span)
+    return at_floor + (1.0 - at_floor) * ((pct - floor) / span)
 
 
 def _distinctiveness(best_cosine: float, second_cosine: float) -> float:
