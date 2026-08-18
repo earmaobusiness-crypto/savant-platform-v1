@@ -272,6 +272,7 @@ def init_room3_session_state() -> None:
         room3_bridge.ensure_layout_library(st.session_state)
         st.session_state.pop("room3_repertoire_cache", None)
         st.session_state.room3_layout_hydrated_once = True
+    _maybe_reconnect_alpaca()
 
 
 def _inject_room3_css() -> None:
@@ -945,6 +946,7 @@ def _maybe_roll_trading_session() -> None:
         st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
     )
     st.session_state.room3_filter_universe = []
+    st.session_state.pop("room3_tf_projection", None)
     log = list(st.session_state.room3_matrix_sync_log or [])
     log.append(f"Session rolled · new trading day {key} (4 AM ET) · watch maps purged")
     st.session_state.room3_matrix_sync_log = log[-12:]
@@ -1107,6 +1109,70 @@ def _set_tradable_pct(pct: float, equity: float) -> None:
     pct = max(0.0, min(100.0, float(pct)))
     st.session_state.room3_tradable_pct_ui = pct
     st.session_state.room3_tradable_today = round(equity * (pct / 100.0), 2)
+
+
+def _stamp_position_timeframes() -> None:
+    """Alpaca positions don't know 1m/5m/15m — copy TF from the watch book / tape."""
+    rows = list(st.session_state.get("room3_open_positions") or [])
+    if not rows:
+        return
+    by_ticker: dict[str, str] = {}
+    book = st.session_state.get("room3_watch_book") or {}
+    for line in (book.get("lines") or {}).values():
+        ticker = str(line.get("ticker") or "").upper()
+        tf = str(line.get("timeframe") or "")
+        if ticker and tf in ("1m", "5m", "15m") and str(line.get("state") or "") in ("in", "committed"):
+            by_ticker[ticker] = tf
+    for row in list(st.session_state.get("room3_trade_history") or []):
+        ticker = str(row.get("ticker") or "").upper()
+        tf = str(row.get("timeframe") or "")
+        if ticker and tf in ("1m", "5m", "15m") and ticker not in by_ticker:
+            by_ticker[ticker] = tf
+    for row in rows:
+        cur = str(row.get("timeframe") or "")
+        if cur in ("1m", "5m", "15m"):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker in by_ticker:
+            row["timeframe"] = by_ticker[ticker]
+    st.session_state.room3_open_positions = rows
+
+
+def _render_tf_budget_panel() -> None:
+    snap = room3_matrix.tf_budget_snapshot(st.session_state)
+    st.markdown("**Timeframe buckets**")
+    st.caption(
+        "50% of Trading today is reserved for 15m, 30% for 5m, 20% for 1m. "
+        "Projected fills come from how many layout·strategy recipes exist on that TF "
+        f"(priors {room3_matrix.TF_PROJECTED_PRIOR['15m']} / "
+        f"{room3_matrix.TF_PROJECTED_PRIOR['5m']} / "
+        f"{room3_matrix.TF_PROJECTED_PRIOR['1m']} if DNA is empty). "
+        "A full-match trade takes 1 / projected of its bucket. "
+        "Buckets are the opening reservation, not walls: extra fills collect leftover "
+        "from quiet books (Heat = quiet). A live 15m still in its layout move can add "
+        "once from that idle cash. A hot 5m/1m keeps its pot and can pull quiet 15m leftover."
+    )
+    if snap.get("dna_empty"):
+        st.caption("Layout library empty right now — using the default projected counts until DNA hydrates.")
+    rows = list(snap.get("rows") or [])
+    if rows:
+        pretty = []
+        for r in rows:
+            pretty.append(
+                {
+                    "TF": r["TF"],
+                    "Bucket": r["Bucket %"],
+                    "Bucket $": f"${r['Bucket $']:,.0f}",
+                    "Projected": r["Projected"],
+                    "Live": r["Live"],
+                    "In use": f"${r['In use $']:,.0f}",
+                    "Left": f"${r['Left $']:,.0f}",
+                    "Full-match slot": f"${r['Full-match slot $']:,.0f}",
+                    "Heat": r.get("Heat") or "—",
+                    "Layouts": r["Layouts"],
+                }
+            )
+        st.dataframe(pretty, use_container_width=True, hide_index=True)
 
 
 def _record_operator_review(trade_id: str, vote: str) -> None:
@@ -1683,6 +1749,8 @@ def _render_live_dashboard(mode: str) -> None:
                     )
                     st.rerun()
 
+    _render_tf_budget_panel()
+
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         st.metric(
@@ -2155,6 +2223,35 @@ def _broker_is_connected() -> bool:
     return str(st.session_state.get("room3_alpaca_status") or "") == "connected"
 
 
+def _maybe_reconnect_alpaca() -> None:
+    """After a Streamlit remount, secrets are still there — don't make the operator re-click."""
+    if st.session_state.get("room3_alpaca_autoprobed"):
+        return
+    st.session_state.room3_alpaca_autoprobed = True
+    if str(st.session_state.get("room3_broker") or "alpaca") != "alpaca":
+        return
+    if str(st.session_state.get("room3_alpaca_status") or "") == "connected":
+        return
+    creds = room3_alpaca.load_alpaca_credentials(paper=True)
+    if not (creds.get("key") and creds.get("secret")):
+        return
+    result = _sync_alpaca_account_into_session(paper=True)
+    if not result.get("ok"):
+        return
+    equity = float(result.get("equity") or 0)
+    cash = float(result.get("cash") or 0)
+    buying_power = float(result.get("buying_power") or 0)
+    st.session_state.room3_alpaca_status = "connected"
+    if float(st.session_state.get("room3_starting_equity") or 0) <= 0:
+        st.session_state.room3_starting_equity = equity
+    if float(st.session_state.get("room3_tradable_today") or 0) <= 0:
+        st.session_state.room3_tradable_today = round(equity * 0.5, 2)
+    st.session_state.room3_alpaca_last_check = (
+        f"Handshake OK · equity ${equity:,.2f} · cash ${cash:,.2f} · "
+        f"buying power ${buying_power:,.2f} · status {result.get('status')}"
+    )
+
+
 def _ibkr_is_connected() -> bool:
     return str(st.session_state.get("room3_ibkr_status") or "") == "connected"
 
@@ -2466,6 +2563,7 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     )
     # Open = still open at broker. Flat account ⇒ empty open table.
     st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(paper=paper) or []
+    _stamp_position_timeframes()
     # Closed today stays in the log even after the position is gone (manual EH included).
     dbg = room3_alpaca.fetch_closed_trades_today_debug(paper=paper)
     closed = dbg.get("closed") or []
@@ -2693,6 +2791,7 @@ def _render_execution_posture(mode: str) -> None:
             f"entry when map match ≥ **{room3_matrix.MATCH_THRESHOLD_PCT}%** · "
             f"arm engine to fire Alpaca orders."
         )
+        st.warning(room3_matrix.size_explain(st.session_state))
 
     if mode == ROOM3_MODE_LIVE and not room3_engine.LIVE_ORDERS_ENABLED:
         st.info("Live orders are hard-disabled. Auto path is paper-only until you enable live.")
@@ -2745,6 +2844,15 @@ def ingest_filter_slot(slot: str, tickers: list[str] | None) -> None:
 
 
 def _apply_active_filter_universe() -> list[str]:
+    # Manual belt is sticky. Session checkboxes gate *trades*, not which names stay mapped.
+    if not room3_screener.BUILTIN_SCREENER_ENABLED:
+        pasted = list(st.session_state.get("room3_filter_universe") or [])
+        if not pasted:
+            pasted = list((st.session_state.get("room3_screener_last") or {}).get("tickers") or [])
+        if pasted:
+            ingest_filter_universe(pasted)
+            return pasted
+        return []
     window = room3_engine.detect_session_window()
     screener = list((st.session_state.get("room3_screener_last") or {}).get("tickers") or [])
     names = room3_filters.active_universe(
@@ -2763,24 +2871,43 @@ def _hydrate_screener_from_disk() -> None:
         return
     st.session_state.room3_screener_disk_hydrated = True
     snap = room3_screener.load_screener_snapshot()
-    if not snap:
-        return
-    last = snap.get("last") or {}
+    last = (snap.get("last") or {}) if snap else {}
     if last and not (st.session_state.get("room3_screener_last") or {}).get("tickers"):
         st.session_state.room3_screener_last = dict(last)
-    day_cache = snap.get("day_cache") or {}
+    day_cache = (snap.get("day_cache") or {}) if snap else {}
     if isinstance(day_cache, dict) and day_cache:
         merged = dict(day_cache)
         merged.update(st.session_state.get("room3_screener_day_cache") or {})
         st.session_state.room3_screener_day_cache = merged
-    slots = snap.get("filter_slots")
+    slots = snap.get("filter_slots") if snap else None
     if slots and not any(
         (st.session_state.get("room3_filter_slots") or {}).get(k) for k in room3_filters.SLOTS
     ):
         st.session_state.room3_filter_slots = slots
-    uni = list(snap.get("filter_universe") or [])
+    uni = list((snap.get("filter_universe") or []) if snap else [])
+    q_belt = ""
+    try:
+        q_belt = str(st.query_params.get("belt") or "")
+    except Exception:
+        q_belt = ""
+    if q_belt:
+        from_url = list(room3_filters.parse_screener_paste(q_belt).get("tickers") or [])
+        if from_url:
+            uni = from_url
     if uni and not (st.session_state.get("room3_filter_universe") or []):
         st.session_state.room3_filter_universe = uni
+        st.session_state.room3_screener_last = {
+            **dict(st.session_state.get("room3_screener_last") or {}),
+            "ok": True,
+            "tickers": uni,
+            "passed": len(uni),
+            "source": "restore",
+        }
+    restored_book = snap.get("watch_book") if snap else None
+    if isinstance(restored_book, dict) and (restored_book.get("lines") or restored_book.get("universe")):
+        if not ((st.session_state.get("room3_watch_book") or {}).get("lines") or {}):
+            st.session_state.room3_watch_book = restored_book
+    if uni:
         st.session_state.room3_watch_book = room3_watcher.set_filter_universe(
             st.session_state.get("room3_watch_book") or room3_watcher.empty_book(),
             uni,
@@ -2794,8 +2921,25 @@ def _persist_screener_to_disk() -> None:
             "day_cache": st.session_state.get("room3_screener_day_cache") or {},
             "filter_slots": st.session_state.get("room3_filter_slots") or {},
             "filter_universe": st.session_state.get("room3_filter_universe") or [],
+            "watch_book": st.session_state.get("room3_watch_book") or {},
+            "last_hub": str(st.session_state.get("terminal_hub") or ""),
         }
     )
+
+
+def _sync_belt_query(names: list[str] | None) -> None:
+    """Keep tickers in the URL so a Streamlit remount can restore the belt."""
+    wanted = ",".join(list(names or [])[: room3_watcher.MAX_NAMES])
+    try:
+        current = str(st.query_params.get("belt") or "")
+        if current == wanted:
+            return
+        if wanted:
+            st.query_params["belt"] = wanted
+        elif "belt" in st.query_params:
+            del st.query_params["belt"]
+    except Exception:
+        pass
 
 
 def _screener_rules_for_scan() -> dict:
@@ -3098,10 +3242,18 @@ def _room3_heartbeat_fragment() -> None:
             if line:
                 if str(sig.get("intent")) == "entry":
                     line["state"] = "in"
-                    line["trades_today"] = int(line.get("trades_today") or 0) + 1
+                    if not sig.get("scale_in"):
+                        line["trades_today"] = int(line.get("trades_today") or 0) + 1
+                    else:
+                        line["scale_ins"] = max(
+                            int(line.get("scale_ins") or 0),
+                            1,
+                        )
                 elif str(sig.get("intent")) == "exit":
                     line["state"] = "watching"
                     line["trades_today"] = int(line.get("trades_today") or 0) + 1
+
+    _persist_screener_to_disk()
 
     window = room3_engine.detect_session_window()
     gates = _current_gates("entry")
@@ -3149,6 +3301,10 @@ def _render_rth_filter_attach() -> None:
     if not belt:
         belt = list((st.session_state.get("room3_screener_last") or {}).get("tickers") or [])
 
+    flash = st.session_state.pop("room3_belt_flash", None)
+    if flash:
+        st.success(flash)
+
     if belt and not trading_now and _any_session_enabled():
         st.caption(
             f"Belt loaded · not trading now "
@@ -3157,12 +3313,17 @@ def _render_rth_filter_attach() -> None:
     elif belt and trading_now:
         st.caption("Belt live — maps running; trades when armed.")
 
+    st.caption(
+        "Paste every ticker, then Drop once. Spaces, commas, or periods between names are fine "
+        "(`ONFO. WETO. CAPR.`). Drop **replaces** the belt — it does not add to it."
+    )
+
     # Compact drop: one field + one click. Accepts spaces, commas, newlines, NASDAQ:XYZ.
     raw = st.text_input(
         "Tickers",
         value="",
         key="room3_belt_paste",
-        placeholder="ONFO WETO CAPR   or   ONFO, WETO, CAPR",
+        placeholder="ONFO WETO CAPR   or   ONFO. WETO. CAPR.",
         label_visibility="collapsed",
     )
     c1, c2, c3 = st.columns([2, 1, 1])
@@ -3183,7 +3344,9 @@ def _render_rth_filter_attach() -> None:
             "pipeline": "paste",
             "source": "manual",
         }
+        st.session_state.room3_belt_flash = "Belt cleared."
         _persist_screener_to_disk()
+        _sync_belt_query([])
         st.rerun()
 
     if drop:
@@ -3192,7 +3355,6 @@ def _render_rth_filter_attach() -> None:
         if not names:
             st.warning("No tickers found — try `ONFO WETO CAPR`.")
         else:
-            # Active window if trading; else park on RTH slot for the end-list feel.
             slot = (
                 room3_engine.detect_session_window()
                 if trading_now
@@ -3200,7 +3362,7 @@ def _render_rth_filter_attach() -> None:
             )
             if slot not in room3_filters.SLOTS:
                 slot = room3_filters.SLOT_RTH
-            ingest_filter_slot(slot, names)
+            ingest_filter_universe(names)
             st.session_state.room3_screener_last = {
                 "ok": True,
                 "tickers": names[: room3_watcher.MAX_NAMES],
@@ -3211,7 +3373,15 @@ def _render_rth_filter_attach() -> None:
                 "source": "manual",
                 "cached": False,
             }
+            kept = names[: room3_watcher.MAX_NAMES]
+            extra = ""
+            if int(parsed.get("truncated") or 0) > 0:
+                extra = f" (capped at {room3_watcher.MAX_NAMES})"
+            st.session_state.room3_belt_flash = (
+                f"Registered {len(kept)} ticker(s){extra}: " + ", ".join(kept)
+            )
             _persist_screener_to_disk()
+            _sync_belt_query(kept)
             st.rerun()
 
     if room3_screener.BUILTIN_SCREENER_ENABLED:

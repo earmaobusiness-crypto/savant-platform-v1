@@ -91,8 +91,16 @@ def set_filter_universe(book: dict[str, Any], tickers: list[str] | None) -> dict
     book["awaiting_filters"] = len(cleaned) == 0
     if cleaned:
         book["last_note"] = f"Filter feed · {len(cleaned)} name(s) · tracking 1m/5m/15m"
+        ensure_maps(book)
     else:
         book["last_note"] = "Awaiting TradingView / session filter feed."
+        book["lines"] = {}
+    return book
+
+
+def ensure_maps(book: dict[str, Any]) -> dict[str, Any]:
+    """Open 1m/5m/15m lines as soon as names land — don't wait for a heartbeat."""
+    _ensure_lines_for_universe(book)
     return book
 
 
@@ -114,8 +122,8 @@ def _ensure_lines_for_universe(book: dict[str, Any]) -> None:
             line["in_filter"] = True
             continue
         line["in_filter"] = False
-        if line.get("state") == "in":
-            # still in a trade — keep until exit path closes it
+        if line.get("state") in ("in", "committed"):
+            # still in a trade or entry queued — keep until exit path closes it
             continue
         if line.get("sticky") and _sticky_alive(line):
             continue
@@ -140,6 +148,7 @@ def _new_line(ticker: str, tf: str) -> dict[str, Any]:
         "exit_signal": None,
         "last_error": "",
         "trades_today": 0,
+        "scale_ins": 0,
     }
 
 
@@ -362,8 +371,10 @@ def evaluate_line_signals(line: dict[str, Any]) -> dict[str, Any] | None:
         sig = dict(line["exit_signal"])
         line["exit_signal"] = None
         return sig
-    # Optional queued entry from filter/matrix adapter
-    if line.get("state") in ("watching", "committed") and line.get("entry_signal"):
+    if line.get("entry_signal") and (
+        line.get("state") in ("watching", "committed")
+        or (line.get("state") == "in" and (line.get("entry_signal") or {}).get("scale_in"))
+    ):
         sig = dict(line["entry_signal"])
         line["entry_signal"] = None
         return sig
@@ -378,6 +389,8 @@ def queue_entry_signal(
     side: str = "buy",
     qty: float = 1.0,
     strategy: str = "matrix",
+    keep_in: bool = False,
+    scale_in: bool = False,
 ) -> bool:
     """External adapter (filters/matrix) stamps an entry onto a TF line."""
     key = line_key(ticker, timeframe)
@@ -391,8 +404,10 @@ def queue_entry_signal(
         "qty": float(qty),
         "strategy": strategy,
         "timeframe": timeframe,
+        "scale_in": bool(scale_in),
     }
-    line["state"] = "committed"
+    if not keep_in:
+        line["state"] = "committed"
     return True
 
 
@@ -439,6 +454,10 @@ def tick_watcher(
     book = dict(book or empty_book())
     signals: list[dict[str, Any]] = []
     book["ticks"] = int(book.get("ticks") or 0) + 1
+    try:
+        session_state["room3_cash_claimed"] = 0.0
+    except Exception:
+        pass
     book["last_tick"] = datetime.now(ET).strftime("%H:%M:%S ET")
 
     if not scan_allowed:
@@ -558,6 +577,11 @@ def book_status_rows(book: dict[str, Any]) -> list[dict[str, Any]]:
                 "Lookback": f"{int(line.get('recipe_lookback_min') or 0)}m"
                 if line.get("recipe_lookback_min")
                 else "—",
+                "Size $": (
+                    f"${float(line.get('size_usd') or 0):,.0f}"
+                    if float(line.get("size_usd") or 0) > 0
+                    else "—"
+                ),
                 "Slices": len(line.get("slices") or []),
                 "Patience": "yes" if line.get("patience") else "",
                 "Score": f"{float(line.get('score') or 0):.2f}",

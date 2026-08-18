@@ -14,4 +14,6 @@ alwaysApply: true
 
 **Do not prioritize before:** first clean Alpaca paper round-trips.
 
+**Partial now:** trade *size* already cuts when two strategies are almost equally close (not a unique hit). Full wallpaper-downweight inside the DNA vector is still later.
+
 **Related:** Room 3 maps use strategy recipes (lookback + sensors); Job 1 Yahoo screener is parked (`BUILTIN_SCREENER_ENABLED = False`).

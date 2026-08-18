@@ -22,7 +22,7 @@ _EXCHANGE_PREFIX = re.compile(
     r"^(NASDAQ|NYSE|AMEX|CBOE|OTC|OTCMKTS|ARCA|BATS|NYSEARCA|NYSEAMERICAN|NASDAQGS|NASDAQGM|NASDAQCM):",
     re.IGNORECASE,
 )
-_TICKER_RE = re.compile(r"^[A-Z]{1,5}(?:[.-][A-Z])?$")
+_TICKER_RE = re.compile(r"^[A-Z]{1,5}(?:[.-][A-Z0-9]{1,2})?$")
 _SKIP_TOKENS = {
     "SYMBOL",
     "TICKER",
@@ -65,34 +65,27 @@ def empty_slots() -> dict[str, list[str]]:
 
 def parse_screener_paste(raw: str, *, cap: int | None = None) -> dict[str, Any]:
     """
-    Accept TradingView screener copy: commas, newlines, tabs, NASDAQ:AAPL, table rows.
-    Returns parsed names plus how many were dropped as junk / over cap.
+    Accept spaces, commas, newlines, trailing periods (ONFO. WETO.), NASDAQ:AAPL.
     """
     limit = int(cap if cap is not None else room3_watcher.MAX_NAMES)
     text = str(raw or "").replace("\r\n", "\n").replace("\r", "\n")
+    # Periods used as list punctuation: "AAPL. MSFT." — keep BRK.B
+    text = re.sub(r"\.(?=\s|$)", " ", text)
     found: list[str] = []
     seen: set[str] = set()
     junk = 0
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line or line.startswith("#"):
+    for chunk in re.split(r"[\n\t,;| ]+", text):
+        token = chunk.strip()
+        if not token or token.startswith("#"):
             continue
-        if "\t" in line:
-            cells = [line.split("\t")[0]]
-        else:
-            cells = [c.strip() for c in re.split(r"[,;|]+", line) if c.strip()]
-        for cell in cells:
-            # Table leftover like "AAPL Apple Inc" → first word
-            token = cell.split()[0] if cell.split() else cell
-            ticker = _normalize_token(token)
-            if not ticker:
-                if token and _normalize_token(token) == "":
-                    junk += 1
-                continue
-            if ticker in seen:
-                continue
-            seen.add(ticker)
-            found.append(ticker)
+        ticker = _normalize_token(token)
+        if not ticker:
+            junk += 1
+            continue
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        found.append(ticker)
     kept = found[:limit]
     return {
         "tickers": kept,
@@ -109,7 +102,7 @@ def _normalize_token(raw: str) -> str:
         return ""
     token = token.lstrip("$")
     token = _EXCHANGE_PREFIX.sub("", token)
-    token = token.strip()
+    token = token.strip().rstrip(".,;:")
     if token in _SKIP_TOKENS:
         return ""
     if not _TICKER_RE.match(token):

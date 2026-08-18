@@ -887,3 +887,9 @@ def load_screener_snapshot() -> dict[str, Any]:
         return raw if isinstance(raw, dict) else {}
     except Exception:
         return {}
+
+
+def merge_screener_snapshot(updates: dict[str, Any]) -> None:
+    blob = load_screener_snapshot()
+    blob.update(dict(updates or {}))
+    save_screener_snapshot(blob)

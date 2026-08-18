@@ -13,6 +13,7 @@ from xml.etree import ElementTree
 
 import cloud_offload
 import core_quantum
+import room3_screener
 import room3_trading
 import self_surgery
 import vault_bridge
@@ -55,6 +56,8 @@ ROOM_SHORT_MAP = {
     ROOM2_SHORT: ROOM2_LABEL,
     ROOM3_SHORT: ROOM3_LABEL,
 }
+_HUB_CODE_TO_LABEL = {"1": ROOM1_LABEL, "2": ROOM2_LABEL, "3": ROOM3_LABEL}
+_HUB_LABEL_TO_CODE = {label: code for code, label in _HUB_CODE_TO_LABEL.items()}
 
 SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
 SECTOR_ETFS = [
@@ -861,7 +864,18 @@ if "matrix_vault_probe_ok" not in st.session_state:
 if "matrix_vault_fetch_error" not in st.session_state:
     st.session_state.matrix_vault_fetch_error = None
 if "sidebar_collapsed" not in st.session_state: st.session_state.sidebar_collapsed = False
-if "terminal_hub" not in st.session_state: st.session_state.terminal_hub = ROOM1_LABEL
+if "terminal_hub" not in st.session_state:
+    st.session_state.terminal_hub = ROOM1_LABEL
+    try:
+        _q_hub = str(st.query_params.get("hub") or "").strip()
+        if _q_hub in _HUB_CODE_TO_LABEL:
+            st.session_state.terminal_hub = _HUB_CODE_TO_LABEL[_q_hub]
+        else:
+            _hub = (room3_screener.load_screener_snapshot() or {}).get("last_hub") or ""
+            if _hub in (ROOM1_LABEL, ROOM2_LABEL, ROOM3_LABEL):
+                st.session_state.terminal_hub = _hub
+    except Exception:
+        pass
 
 def _room1_readonly_layout_context() -> str:
     """Read-only Supabase layout lens — comparison math only, zero cloud writes."""
@@ -7799,6 +7813,15 @@ if st.session_state.pop("_pending_chat_submit", False):
 
 terminal_hub = render_terminal_nav()
 _render_hub_recovery_strip()
+try:
+    _hub_code = _HUB_LABEL_TO_CODE.get(terminal_hub, "1")
+    if str(st.query_params.get("hub") or "") != _hub_code:
+        st.query_params["hub"] = _hub_code
+    if st.session_state.get("_persisted_hub") != terminal_hub:
+        st.session_state._persisted_hub = terminal_hub
+        room3_screener.merge_screener_snapshot({"last_hub": terminal_hub})
+except Exception:
+    pass
 
 if terminal_hub == ROOM1_LABEL:
     _render_room1_forensic_front_desk()
