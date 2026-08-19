@@ -1166,7 +1166,6 @@ def _release_watch_book_queues() -> int:
 def _kill_go_flat() -> str:
     """Operator kill: disarm, wipe the belt/maps, close whatever Alpaca still has open."""
     st.session_state.room3_engine_armed = False
-    st.session_state.room3_toggle_engine_armed = False
     mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
     paper = mode != ROOM3_MODE_LIVE
     closed = 0
@@ -2716,6 +2715,10 @@ def _render_execution_posture(mode: str) -> None:
     broker = _active_broker_name()
     window = room3_engine.detect_session_window()
     hs = room3_engine.matrix_handshake(st.session_state)
+    if st.session_state.get("room3_kill_disarm_arm"):
+        st.session_state.room3_toggle_engine_armed = False
+        st.session_state.room3_engine_armed = False
+        st.session_state.room3_kill_disarm_arm = False
     gates = _current_gates("entry")
     armed = bool(st.session_state.get("room3_engine_armed"))
     flat = bool(st.session_state.get("room3_kill_flat"))
@@ -2760,6 +2763,7 @@ def _render_execution_posture(mode: str) -> None:
         )
     if st.session_state.room3_kill_flat and not st.session_state.get("room3_kill_did_flat"):
         st.session_state.room3_kill_did_flat = True
+        st.session_state.room3_kill_disarm_arm = True
         st.session_state.room3_kill_note = _kill_go_flat()
         st.rerun()
     if not st.session_state.room3_kill_flat:
@@ -2772,7 +2776,8 @@ def _render_execution_posture(mode: str) -> None:
     st.caption(
         "Drop tickers on the belt below. While an enabled window is open → maps → compare → "
         "trade when armed. Window closed → list can sit, but no new trades. "
-        "Post on = positions may continue past 4:00 instead of flattening."
+        "Post off = flatten after 4:00. Post on = may hold until 8:00, then flatten. "
+        "Nothing is meant to sit overnight."
     )
     allowed = set(st.session_state.get("room3_allowed_sessions") or [])
     f1, f2, f3 = st.columns(3)
@@ -3179,28 +3184,33 @@ def _manual_screener_allowed() -> bool:
 
 def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
     """
-    If Post-market is OFF and the clock left RTH, flatten open positions once.
-    If Post-market is ON, leave positions alone (may continue into post).
+    Close real positions when the last enabled session of the day is over.
+    Post off → flatten after 4:00. Post on → hold through post, flatten after 8:00.
+    Always drop stuck committed map rows so they don't sit overnight.
     """
     now = datetime.now(ET)
-    if now.weekday() >= 5:
-        return ""
     window = room3_engine.detect_session_window()
-    if window == room3_engine.SESSION_RTH:
-        return ""
-    # Pre-market next day — don't flatten overnight leftovers here
-    if window == room3_engine.SESSION_PRE:
+    if window in (room3_engine.SESSION_RTH, room3_engine.SESSION_PRE):
         return ""
     allowed = set(st.session_state.get("room3_allowed_sessions") or [])
-    if room3_engine.SESSION_POST in allowed:
+    post_on = room3_engine.SESSION_POST in allowed
+    if window == room3_engine.SESSION_POST and post_on:
         return ""
     day_key = now.date().isoformat()
+    if window == room3_engine.SESSION_CLOSED and now.weekday() >= 5:
+        day_key = f"{day_key}-we"
     if st.session_state.get("room3_rth_end_flat_day") == day_key:
+        _release_watch_book_queues()
         return ""
+    released = _release_watch_book_queues()
     positions = list(st.session_state.get("room3_open_positions") or [])
     if not positions:
         st.session_state.room3_rth_end_flat_day = day_key
+        if released:
+            return f"Session end · released {released} stuck map line(s)"
         return ""
+    if now.weekday() >= 5 and window == room3_engine.SESSION_CLOSED:
+        pass
     ok_n = 0
     errs: list[str] = []
     for pos in positions:
@@ -3221,11 +3231,15 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
         st.session_state.room3_rth_end_flat_day = day_key
     elif not remaining and ok_n:
         st.session_state.room3_rth_end_flat_day = day_key
+    bits = []
     if ok_n:
-        return f"RTH end · flattened {ok_n} (Post-market off)"
+        when = "8:00 ET" if post_on else "4:00 ET"
+        bits.append(f"session end flatten {ok_n} (after {when})")
+    if released:
+        bits.append(f"released {released} stuck map line(s)")
     if errs:
-        return "RTH end flatten errors · " + "; ".join(errs[:3])
-    return ""
+        bits.append("flatten errors · " + "; ".join(errs[:3]))
+    return " · ".join(bits)
 
 
 @st.fragment(run_every=timedelta(minutes=room3_screener.SCAN_INTERVAL_MINUTES))
