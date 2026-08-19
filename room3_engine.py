@@ -137,8 +137,10 @@ def evaluate_execution_gates(
     allowed = set(allowed_sessions or [])
     if session_window == SESSION_CLOSED:
         reasons.append("market session closed")
-    elif session_window not in allowed:
+    elif intent_l == "entry" and session_window not in allowed:
         reasons.append(f"{session_label(session_window)} filter is off")
+    # Exits: a live trade may continue pre → RTH → post the same day.
+    # Overnight (closed) still blocks.
 
     if intent_l == "entry":
         if pause_entries:
@@ -203,13 +205,24 @@ def execute_matrix_signal(
         except (TypeError, ValueError):
             return None
 
+    alpaca_px = room3_alpaca.fetch_latest_price(symbol, paper=paper)
+    ref = alpaca_px or _opt_float("ref_price") or _opt_float("entry_price")
+    tf = str(signal.get("timeframe") or "")
+    prefer_limit = str(signal.get("order_style") or "").lower() == "limit"
+    if not prefer_limit and not str(signal.get("order_style") or ""):
+        # 1m RTH pops: market. 5m/15m and anything outside RTH: limit on Alpaca's last.
+        prefer_limit = not (
+            tf.replace(" ", "").lower() in ("1m", "1min", "1")
+            and not room3_alpaca.session_needs_extended_hours()
+        )
     result = room3_alpaca.place_market_order(
         symbol,
         side,
         qty,
         paper=paper,
         limit_price=_opt_float("limit_price"),
-        ref_price=_opt_float("ref_price") or _opt_float("entry_price"),
+        ref_price=ref,
+        prefer_limit=prefer_limit,
     )
     result = dict(result)
     result["intent"] = intent

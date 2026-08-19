@@ -633,10 +633,12 @@ def place_market_order(
     limit_price: float | None = None,
     ref_price: float | None = None,
     extended_hours: bool | None = None,
+    prefer_limit: bool = False,
 ) -> dict[str, Any]:
     """
-    Submit equity order. RTH → market; outside RTH → limit + extended_hours
-    (Alpaca will not fill market orders in pre/post — they queue until 9:30 ET).
+    Submit equity order.
+    RTH 1m → market. 5m/15m and anything outside RTH → limit using Alpaca last
+    (Yahoo map can lag; the limit is the broker's print ± a small fill offset).
     """
     ticker = str(symbol or "").strip().upper()
     side_l = str(side or "").strip().lower()
@@ -658,22 +660,22 @@ def place_market_order(
         return {"ok": False, "error": "alpaca-py not installed — run: pip install alpaca-py"}
 
     use_eh = bool(extended_hours) if extended_hours is not None else session_needs_extended_hours()
+    use_limit = bool(prefer_limit) or use_eh
     order_side = OrderSide.BUY if side_l == "buy" else OrderSide.SELL
 
     try:
         client = _trading_client(paper=paper)
-        if use_eh:
+        if use_limit:
             px = float(limit_price or 0) or float(ref_price or 0) or (fetch_latest_price(ticker, paper=paper) or 0.0)
             if px <= 0:
                 return {
                     "ok": False,
                     "error": (
-                        "Extended-hours needs a limit price — no last quote available. "
-                        "Pass limit_price / ref_price, or retry in market hours."
+                        "Limit order needs Alpaca's last price — no quote. "
+                        "Retry, or wait for regular hours."
                     ),
                 }
-            # Slightly aggressive so thin EH books still have a chance to fill
-            slip = 0.01
+            slip = 0.012 if use_eh else 0.0015
             if side_l == "buy":
                 limit_px = round(px * (1.0 + slip), 2)
             else:
@@ -686,9 +688,9 @@ def place_market_order(
                 side=order_side,
                 time_in_force=TimeInForce.DAY,
                 limit_price=limit_px,
-                extended_hours=True,
+                extended_hours=bool(use_eh),
             )
-            order_kind = "limit+extended_hours"
+            order_kind = "limit+extended_hours" if use_eh else "limit"
         else:
             req = MarketOrderRequest(
                 symbol=ticker,
@@ -719,6 +721,7 @@ def place_market_order(
             "extended_hours": use_eh,
             "paper": paper,
             "error": "",
+            "ref_price": float(ref_price or 0) or None,
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc).strip() or type(exc).__name__}
@@ -752,4 +755,6 @@ def close_position_now(
     # Long → sell; short → buy
     side = "sell" if raw_qty > 0 else "buy"
     ref = float(getattr(pos, "current_price", 0) or 0) or None
-    return place_market_order(ticker, side, shares, paper=paper, ref_price=ref)
+    return place_market_order(
+        ticker, side, shares, paper=paper, ref_price=ref, prefer_limit=True
+    )

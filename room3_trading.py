@@ -2774,10 +2774,9 @@ def _render_execution_posture(mode: str) -> None:
 
     st.markdown("#### Session filters (when engine may trade)")
     st.caption(
-        "Drop tickers on the belt below. While an enabled window is open → maps → compare → "
-        "trade when armed. Window closed → list can sit, but no new trades. "
-        "Post off = flatten after 4:00. Post on = may hold until 8:00, then flatten. "
-        "Nothing is meant to sit overnight."
+        "Checkboxes = new entries only. An open trade can ride pre → market → post "
+        "the same calendar day. Flat by ~8:00 ET (if the best exit never prints, take "
+        "second-best in the last minutes of post). Nothing overnight."
     )
     allowed = set(st.session_state.get("room3_allowed_sessions") or [])
     f1, f2, f3 = st.columns(3)
@@ -3182,22 +3181,32 @@ def _manual_screener_allowed() -> bool:
     return _any_session_enabled()
 
 
+def _has_intraday_risk() -> bool:
+    for pos in st.session_state.get("room3_open_positions") or []:
+        try:
+            qty = abs(float(pos.get("qty") or pos.get("qty_available") or 0))
+        except (TypeError, ValueError):
+            qty = 0.0
+        if qty > 0 or str(pos.get("symbol") or pos.get("ticker") or ""):
+            return True
+    book = st.session_state.get("room3_watch_book") or {}
+    for line in (book.get("lines") or {}).values():
+        if line.get("state") in ("in", "committed"):
+            return True
+    return False
+
+
 def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
     """
-    Close real positions when the last enabled session of the day is over.
-    Post off → flatten after 4:00. Post on → hold through post, flatten after 8:00.
-    Always drop stuck committed map rows so they don't sit overnight.
+    Overnight flat: flatten only after the US session is fully closed (~8:00 ET).
+    Open trades may continue through post even if the Post checkbox is off.
     """
     now = datetime.now(ET)
     window = room3_engine.detect_session_window()
-    if window in (room3_engine.SESSION_RTH, room3_engine.SESSION_PRE):
-        return ""
-    allowed = set(st.session_state.get("room3_allowed_sessions") or [])
-    post_on = room3_engine.SESSION_POST in allowed
-    if window == room3_engine.SESSION_POST and post_on:
+    if window != room3_engine.SESSION_CLOSED:
         return ""
     day_key = now.date().isoformat()
-    if window == room3_engine.SESSION_CLOSED and now.weekday() >= 5:
+    if now.weekday() >= 5:
         day_key = f"{day_key}-we"
     if st.session_state.get("room3_rth_end_flat_day") == day_key:
         _release_watch_book_queues()
@@ -3209,8 +3218,6 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
         if released:
             return f"Session end · released {released} stuck map line(s)"
         return ""
-    if now.weekday() >= 5 and window == room3_engine.SESSION_CLOSED:
-        pass
     ok_n = 0
     errs: list[str] = []
     for pos in positions:
@@ -3233,8 +3240,7 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
         st.session_state.room3_rth_end_flat_day = day_key
     bits = []
     if ok_n:
-        when = "8:00 ET" if post_on else "4:00 ET"
-        bits.append(f"session end flatten {ok_n} (after {when})")
+        bits.append(f"day-end flatten {ok_n} (after 8:00 ET)")
     if released:
         bits.append(f"released {released} stuck map line(s)")
     if errs:
@@ -3277,16 +3283,26 @@ def _room3_heartbeat_fragment() -> None:
             st.session_state.room3_last_session_flat_note = flat_note
 
     _apply_active_filter_universe()
-    trade_ok = _session_trading_allowed()
+    window = room3_engine.detect_session_window()
+    new_ok = _session_trading_allowed()
+    intraday = window in (
+        room3_engine.SESSION_PRE,
+        room3_engine.SESSION_RTH,
+        room3_engine.SESSION_POST,
+    )
+    manage = bool(intraday and (new_ok or _has_intraday_risk()))
     book, signals = room3_watcher.tick_watcher(
         st.session_state.room3_watch_book,
         session_state=st.session_state,
-        session_allowed=trade_ok,
+        session_allowed=manage,
         engine_armed=bool(st.session_state.get("room3_engine_armed")),
+        entries_allowed=new_ok,
     )
     st.session_state.room3_watch_book = book
 
     for sig in signals:
+        if str(sig.get("intent") or "") == "entry" and not new_ok:
+            continue
         result = execute_matrix_signal(sig)
         # Mark TF line if fill ok
         if result.get("ok"):
@@ -3322,7 +3338,8 @@ def _room3_heartbeat_fragment() -> None:
         f"{room3_engine.session_label(window)} · "
         f"broker sync {sync_t} · "
         f"gates={'OPEN' if gates.get('ok') else 'CLOSED'} · "
-        f"trade_session={'YES' if trade_ok else 'NO'} · "
+        f"trade_session={'YES' if new_ok else 'NO'} · "
+        f"manage={'YES' if manage else 'NO'} · "
         f"{note}{extra}"
     )
 

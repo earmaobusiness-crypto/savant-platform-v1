@@ -64,15 +64,42 @@ SIZE_EXPLAIN = (
 )
 
 
-def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+def cosine_similarity(vec_a: list[float], vec_b: list[float], weights: list[float] | None = None) -> float:
     if not vec_a or not vec_b or len(vec_a) != len(vec_b):
         return 0.0
-    dot = sum(a * b for a, b in zip(vec_a, vec_b))
-    norm_a = math.sqrt(sum(a * a for a in vec_a))
-    norm_b = math.sqrt(sum(b * b for b in vec_b))
+    w = weights if weights and len(weights) == len(vec_a) else [1.0] * len(vec_a)
+    dot = sum(wa * a * b for wa, a, b in zip(w, vec_a, vec_b))
+    norm_a = math.sqrt(sum(wa * a * a for wa, a in zip(w, vec_a)))
+    norm_b = math.sqrt(sum(wa * b * b for wa, b in zip(w, vec_b)))
     if norm_a <= 0 or norm_b <= 0:
         return 0.0
     return max(0.0, min(1.0, dot / (norm_a * norm_b)))
+
+
+def _wallpaper_weights(layouts: list[dict[str, Any]], dim: int) -> list[float]:
+    """
+    Downweight dimensions that look the same in almost every saved pattern
+    (wallpaper). Distinct / high-spread traits weigh more.
+    """
+    rows: list[list[float]] = []
+    for entry in layouts or []:
+        stored = entry.get("vector") or []
+        if not stored or len(stored) != dim:
+            continue
+        rows.append([float(x) for x in stored])
+    if len(rows) < 3:
+        return [1.0] * dim
+    n = float(len(rows))
+    weights: list[float] = []
+    for i in range(dim):
+        vals = [r[i] for r in rows]
+        mean = sum(vals) / n
+        var = sum((x - mean) ** 2 for x in vals) / n
+        std = math.sqrt(var)
+        # High spread → distinctive. Near-zero spread → wallpaper.
+        w = math.log(1.0 + (std / (abs(mean) + 0.12)))
+        weights.append(max(0.20, min(2.4, 0.35 + w * 1.8)))
+    return weights
 
 
 def _pearson_r(values: list[float]) -> float:
@@ -145,12 +172,16 @@ def match_spatial(
     best_ticker = ""
     best_tf = ""
     watch_tf = _normalize_watch_tf(watch_timeframe or "")
+    usable = [
+        e
+        for e in (layouts or [])
+        if (e.get("vector") or []) and len(e.get("vector") or []) == len(snapshot_vec)
+    ]
+    weights = _wallpaper_weights(usable, len(snapshot_vec))
 
-    for entry in layouts or []:
-        stored = entry.get("vector") or []
-        if not stored or len(stored) != len(snapshot_vec):
-            continue
-        cos = cosine_similarity(snapshot_vec, [float(x) for x in stored])
+    for entry in usable:
+        stored = [float(x) for x in (entry.get("vector") or [])]
+        cos = cosine_similarity(snapshot_vec, stored, weights)
         entry_tf = str(entry.get("timeframe_norm") or _normalize_watch_tf(entry.get("timeframe_resolution") or entry.get("strategy") or ""))
         if watch_tf and entry_tf:
             if entry_tf == watch_tf:
@@ -241,6 +272,21 @@ def score_line_against_repertoire(
     }
 
 
+def _approaching_day_close() -> bool:
+    """Last ~20 minutes of post — take the second-best exit rather than hold overnight."""
+    try:
+        from datetime import datetime, time as dtime
+
+        import room3_engine
+
+        now = datetime.now(room3_engine.ET)
+        if room3_engine.detect_session_window(now) != room3_engine.SESSION_POST:
+            return False
+        return now.time() >= dtime(19, 40)
+    except Exception:
+        return False
+
+
 def _ticker_already_engaged(book: dict[str, Any], ticker: str) -> bool:
     sym = str(ticker).upper()
     for line in (book.get("lines") or {}).values():
@@ -294,13 +340,23 @@ def _tf_layout_counts(layouts: list[dict[str, Any]] | None) -> dict[str, int]:
     return counts
 
 
-def project_tf_counts(layouts: list[dict[str, Any]] | None) -> dict[str, int]:
+def project_tf_counts(
+    layouts: list[dict[str, Any]] | None,
+    n_names: int | None = None,
+) -> dict[str, int]:
     """
-    Expected fills per TF today from layout richness, not a tape forecast.
+    Expected fills per TF today from layout richness + how many names are on the belt.
     sqrt(recipe_count / prior) so a fat 15m library does not claim 20 fills.
     Empty DNA uses the prior (4 / 8 / 6) until layouts hydrate.
     """
     n = _tf_layout_counts(layouts)
+    name_scale = 1.0
+    try:
+        nn = int(n_names or 0)
+    except (TypeError, ValueError):
+        nn = 0
+    if nn > 0:
+        name_scale = min(1.5, max(0.75, math.sqrt(nn / 8.0)))
     out: dict[str, int] = {}
     for tf in ("15m", "5m", "1m"):
         prior = int(TF_PROJECTED_PRIOR[tf])
@@ -311,7 +367,7 @@ def project_tf_counts(layouts: list[dict[str, Any]] | None) -> dict[str, int]:
         else:
             richness = math.sqrt(max(1.0, layouts_n) / max(1.0, prior))
             est = int(round(prior * richness))
-        out[tf] = max(1, min(cap, est))
+        out[tf] = max(1, min(cap, int(round(est * name_scale))))
     return out
 
 
@@ -392,7 +448,10 @@ def _idle_cash(
     for tf, left in remaining.items():
         if tf == taker:
             continue
-        if _heat(int(live.get(tf) or 0), int(projected.get(tf) or 1)) >= 1.0:
+        donor_live = int(live.get(tf) or 0)
+        donor_heat = _heat(donor_live, int(projected.get(tf) or 1))
+        # Quiet / empty books donate. Keep leftover only if this TF is actually printing.
+        if donor_live > 0 and donor_heat >= 0.5:
             continue
         idle += max(0.0, float(left or 0))
     return idle
@@ -421,6 +480,20 @@ def _layouts_from_session(session_state: Any) -> list[dict[str, Any]]:
         return []
 
 
+def _belt_name_count(session_state: Any) -> int:
+    book = _ss_get(session_state, "room3_watch_book") or {}
+    try:
+        n = len(list(book.get("universe") or []))
+        if n:
+            return n
+    except Exception:
+        pass
+    try:
+        return len(list(_ss_get(session_state, "room3_filter_universe") or []))
+    except Exception:
+        return 0
+
+
 def tf_budget_snapshot(session_state: Any | None = None) -> dict[str, Any]:
     tradable = 0.0
     try:
@@ -428,7 +501,7 @@ def tf_budget_snapshot(session_state: Any | None = None) -> dict[str, Any]:
     except (TypeError, ValueError):
         tradable = 0.0
     layouts = _layouts_from_session(session_state)
-    projected = project_tf_counts(layouts)
+    projected = project_tf_counts(layouts, n_names=_belt_name_count(session_state))
     usage = (
         _tf_live_usage(session_state)
         if session_state is not None
@@ -533,7 +606,7 @@ def compute_entry_plan(
         tradable = 0.0
     if layouts is None:
         layouts = _layouts_from_session(session_state)
-    projected = project_tf_counts(layouts)
+    projected = project_tf_counts(layouts, n_names=_belt_name_count(session_state))
     usage = _tf_live_usage(session_state, exclude_ticker=exclude_ticker)
     spent = usage["spent"]
     live = usage["live"]
@@ -670,6 +743,7 @@ def maybe_queue_matrix_signals(
     session_state: Any,
     *,
     engine_armed: bool = False,
+    entries_allowed: bool = True,
 ) -> None:
     """
     Stamp entry_signal or exit_signal on a line when DNA rules pass.
@@ -737,6 +811,8 @@ def maybe_queue_matrix_signals(
             exit_reason = f"stop {pnl_pct:.1f}%"
         elif structural > 0 and pnl_pct >= structural * 0.5:
             exit_reason = f"target {pnl_pct:.1f}%"
+        elif _approaching_day_close():
+            exit_reason = "day close · second-best exit"
 
         if exit_reason and not line.get("exit_signal"):
             qty = _open_qty(session_state, ticker)
@@ -753,10 +829,16 @@ def maybe_queue_matrix_signals(
             )
             line["last_exit_reason"] = exit_reason
             line["patience"] = False
+            es = line.get("exit_signal")
+            if isinstance(es, dict):
+                es["order_style"] = "market" if tf == "1m" else "limit"
+                es["ref_price"] = last_px
             return
 
         if (
-            tf == "15m"
+            entries_allowed
+            and not _approaching_day_close()
+            and tf == "15m"
             and not line.get("entry_signal")
             and int(line.get("scale_ins") or 0) < SCALE_IN_MAX
             and cur_match >= MATCH_THRESHOLD_PCT
@@ -800,8 +882,11 @@ def maybe_queue_matrix_signals(
                     sig["entry_signal"]["notional"] = add_usd
                     sig["entry_signal"]["ref_price"] = last_px
                     sig["entry_signal"]["scale_in"] = True
+                    sig["entry_signal"]["order_style"] = "limit"
         return
 
+    if not entries_allowed:
+        return
     if line.get("entry_signal") or line.get("state") not in ("watching", "committed"):
         return
     if not match.get("vector_ready"):
@@ -861,4 +946,5 @@ def maybe_queue_matrix_signals(
     stamped["entry_signal"]["match_pct"] = stamped["entry_match_pct"]
     stamped["entry_signal"]["layout_id"] = layout_id
     stamped["entry_signal"]["strategy"] = strategy
+    stamped["entry_signal"]["order_style"] = "market" if tf == "1m" else "limit"
     line["nearest_strategy"] = strategy

@@ -9,4 +9,10 @@ If a default decides **how much money**, **when orders fire**, **flatten/kill**,
 
 When adding execution logic: put the rule on the execution posture / watch book, and tell the user in plain language.
 
-**Size (current):** Engine-internal. Trading today opens 50% 15m / 30% 5m / 20% 1m; leftover is fluid across quiet vs hot TFs; a live 15m can add once. Do **not** dump this as a lecture on the operator screen. Kill switch FLAT now disarms, drops committed queues, and flattens open paper positions.
+**Size:** Engine-internal. Trading today opens **50% 15m / 30% 5m / 20% 1m**; leftover from quiet TFs diverts to whatever is actually printing. A live 15m can add once. Do **not** dump this as a lecture on the operator screen.
+
+**Same day:** Checkboxes gate **new entries**. An open trade may continue pre → RTH → post. Flatten after ~8:00 ET (second-best exit in late post). Overnight flat.
+
+**Orders:** Price off **Alpaca last**, not Yahoo close. 1m in regular hours → market (pops). 5m/15m and anything outside RTH → limit. Kill / day-end flatten uses limit.
+
+**Kill:** FLAT disarms, drops committed queues, and flattens open paper positions.

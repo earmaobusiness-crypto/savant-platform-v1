@@ -405,6 +405,7 @@ def queue_entry_signal(
         "strategy": strategy,
         "timeframe": timeframe,
         "scale_in": bool(scale_in),
+        "order_style": "market" if str(timeframe) == "1m" else "limit",
     }
     if not keep_in:
         line["state"] = "committed"
@@ -431,6 +432,7 @@ def queue_exit_signal(
         "qty": float(qty),
         "strategy": strategy,
         "timeframe": timeframe,
+        "order_style": "market" if str(timeframe) == "1m" else "limit",
     }
     return True
 
@@ -442,6 +444,7 @@ def tick_watcher(
     session_allowed: bool,
     engine_armed: bool,
     scan_allowed: bool = True,
+    entries_allowed: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """
     One heartbeat:
@@ -515,6 +518,7 @@ def tick_watcher(
             repertoire,
             session_state,
             engine_armed=trade_ok,
+            entries_allowed=bool(entries_allowed),
         )
         if line.get("in_filter") is False:
             _maybe_mark_sticky(line)
