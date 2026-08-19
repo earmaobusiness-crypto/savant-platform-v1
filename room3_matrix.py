@@ -9,6 +9,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import room3_recipes
+
 MATCH_THRESHOLD_PCT = 85
 EXIT_MATCH_FLOOR_PCT = 65
 STOP_LOSS_PCT = 2.5
@@ -826,12 +828,12 @@ def maybe_queue_matrix_signals(
                 side="sell",
                 qty=qty,
                 strategy=strat,
+                layout_id=str(line.get("entry_layout") or ""),
             )
             line["last_exit_reason"] = exit_reason
             line["patience"] = False
             es = line.get("exit_signal")
             if isinstance(es, dict):
-                es["order_style"] = "market" if tf == "1m" else "limit"
                 es["ref_price"] = last_px
             return
 
@@ -882,7 +884,7 @@ def maybe_queue_matrix_signals(
                     sig["entry_signal"]["notional"] = add_usd
                     sig["entry_signal"]["ref_price"] = last_px
                     sig["entry_signal"]["scale_in"] = True
-                    sig["entry_signal"]["order_style"] = "limit"
+                    sig["entry_signal"]["order_style"] = "limit"  # add-on, not a pop
         return
 
     if not entries_allowed:
@@ -946,5 +948,10 @@ def maybe_queue_matrix_signals(
     stamped["entry_signal"]["match_pct"] = stamped["entry_match_pct"]
     stamped["entry_signal"]["layout_id"] = layout_id
     stamped["entry_signal"]["strategy"] = strategy
-    stamped["entry_signal"]["order_style"] = "market" if tf == "1m" else "limit"
+    stamped["entry_signal"]["order_style"] = room3_recipes.order_style_for(
+        strategy,
+        tf,
+        layout_id=layout_id,
+        structural_move_pct=float(match.get("structural_move_pct") or 0.0),
+    )
     line["nearest_strategy"] = strategy

@@ -109,10 +109,64 @@ def recipe_for(
         "lookback_minutes": lookback,
         "bars_keep": bars,
         "sensors": sensors,
+        "order_style": order_style_for(
+            strat, tf, layout_id=layout, structural_move_pct=move
+        ),
         # If DNA is warm but incomplete — keep watching; stock may lag the pattern.
         "patience": True,
         "patience_match_floor": 70,
     }
+
+
+def order_style_for(
+    strategy: str = "",
+    timeframe: str = "5m",
+    *,
+    layout_id: str = "",
+    structural_move_pct: float = 0.0,
+) -> str:
+    """
+    Market only when waiting would miss the print. Otherwise limit (less slippage,
+    Yahoo/Alpaca lag). 1m is a prior for pops, not a hard rule — 5m/15m can pop too.
+    Outside RTH the broker still forces a limit.
+    """
+    tf = normalize_tf(timeframe)
+    blob = f"{strategy} {layout_id}".lower()
+    patient = (
+        "vwap",
+        "pullback",
+        "reversion",
+        "mean rev",
+        "fade",
+        "swing",
+        "range",
+        "dip",
+        "reclaim",
+        "flag",
+        "patient",
+        "limit",
+    )
+    pop = (
+        "scalp",
+        "sniper",
+        "pop",
+        "spike",
+        "burst",
+        "chase",
+        "impulse",
+        "flush",
+        "squeeze",
+        "blast",
+        "gap and go",
+        "gap&go",
+    )
+    if any(k in blob for k in patient):
+        return "limit"
+    if any(k in blob for k in pop):
+        return "market"
+    if tf == "1m" and abs(float(structural_move_pct or 0)) < 4.0:
+        return "market"
+    return "limit"
 
 
 def attach_recipe(layout_entry: dict[str, Any]) -> dict[str, Any]:

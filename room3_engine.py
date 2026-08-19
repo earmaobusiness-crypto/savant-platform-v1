@@ -208,13 +208,16 @@ def execute_matrix_signal(
     alpaca_px = room3_alpaca.fetch_latest_price(symbol, paper=paper)
     ref = alpaca_px or _opt_float("ref_price") or _opt_float("entry_price")
     tf = str(signal.get("timeframe") or "")
-    prefer_limit = str(signal.get("order_style") or "").lower() == "limit"
-    if not prefer_limit and not str(signal.get("order_style") or ""):
-        # 1m RTH pops: market. 5m/15m and anything outside RTH: limit on Alpaca's last.
-        prefer_limit = not (
-            tf.replace(" ", "").lower() in ("1m", "1min", "1")
-            and not room3_alpaca.session_needs_extended_hours()
+    style = str(signal.get("order_style") or "").strip().lower()
+    if style not in ("market", "limit"):
+        import room3_recipes
+
+        style = room3_recipes.order_style_for(
+            str(signal.get("strategy") or ""),
+            tf,
+            layout_id=str(signal.get("layout_id") or ""),
         )
+    prefer_limit = style == "limit"
     result = room3_alpaca.place_market_order(
         symbol,
         side,

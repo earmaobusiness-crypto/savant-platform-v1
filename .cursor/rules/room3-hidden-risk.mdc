@@ -13,6 +13,6 @@ When adding execution logic: put the rule on the execution posture / watch book,
 
 **Same day:** Checkboxes gate **new entries**. An open trade may continue pre → RTH → post. Flatten after ~8:00 ET (second-best exit in late post). Overnight flat.
 
-**Orders:** Price off **Alpaca last**, not Yahoo close. 1m in regular hours → market (pops). 5m/15m and anything outside RTH → limit. Kill / day-end flatten uses limit.
+**Orders:** Price off **Alpaca last**, not Yahoo close. Style is **per strategy**: pops (scalp/sniper/impulse, and unnamed 1m) → market; slower setups on any TF → limit. Outside RTH always limit. Kill / day-end flatten uses limit.
 
 **Kill:** FLAT disarms, drops committed queues, and flattens open paper positions.

@@ -391,12 +391,19 @@ def queue_entry_signal(
     strategy: str = "matrix",
     keep_in: bool = False,
     scale_in: bool = False,
+    order_style: str | None = None,
+    layout_id: str = "",
 ) -> bool:
     """External adapter (filters/matrix) stamps an entry onto a TF line."""
     key = line_key(ticker, timeframe)
     line = (book.get("lines") or {}).get(key)
     if not line:
         return False
+    style = str(order_style or "").strip().lower()
+    if style not in ("market", "limit"):
+        style = room3_recipes.order_style_for(
+            strategy, timeframe, layout_id=layout_id
+        )
     line["entry_signal"] = {
         "intent": "entry",
         "symbol": str(ticker).upper(),
@@ -405,7 +412,7 @@ def queue_entry_signal(
         "strategy": strategy,
         "timeframe": timeframe,
         "scale_in": bool(scale_in),
-        "order_style": "market" if str(timeframe) == "1m" else "limit",
+        "order_style": style,
     }
     if not keep_in:
         line["state"] = "committed"
@@ -420,11 +427,18 @@ def queue_exit_signal(
     side: str = "sell",
     qty: float = 1.0,
     strategy: str = "matrix",
+    order_style: str | None = None,
+    layout_id: str = "",
 ) -> bool:
     key = line_key(ticker, timeframe)
     line = (book.get("lines") or {}).get(key)
     if not line:
         return False
+    style = str(order_style or "").strip().lower()
+    if style not in ("market", "limit"):
+        style = room3_recipes.order_style_for(
+            strategy, timeframe, layout_id=layout_id
+        )
     line["exit_signal"] = {
         "intent": "exit",
         "symbol": str(ticker).upper(),
@@ -432,7 +446,7 @@ def queue_exit_signal(
         "qty": float(qty),
         "strategy": strategy,
         "timeframe": timeframe,
-        "order_style": "market" if str(timeframe) == "1m" else "limit",
+        "order_style": style,
     }
     return True
 
