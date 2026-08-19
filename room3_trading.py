@@ -1164,8 +1164,7 @@ def _release_watch_book_queues() -> int:
 
 
 def _kill_go_flat() -> str:
-    """Operator kill: no new auto, drop queues, close open paper positions."""
-    released = _release_watch_book_queues()
+    """Operator kill: disarm, wipe the belt/maps, close whatever Alpaca still has open."""
     st.session_state.room3_engine_armed = False
     st.session_state.room3_toggle_engine_armed = False
     mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
@@ -1187,13 +1186,26 @@ def _kill_go_flat() -> str:
             except Exception as exc:
                 errs.append(f"{sym}:{exc}")
         _sync_alpaca_account_into_session(paper=paper)
+    released = _release_watch_book_queues()
+    ingest_filter_universe([])
+    st.session_state.room3_screener_last = {
+        "ok": True,
+        "tickers": [],
+        "passed": 0,
+        "pipeline": "kill",
+        "source": "kill",
+    }
+    _persist_screener_to_disk()
+    _sync_belt_query([])
+    window = room3_engine.detect_session_window()
     bits = []
     if closed:
-        bits.append(f"flattened {closed}")
+        bits.append(f"flatten submitted {closed}")
     if released:
-        bits.append(f"released {released} committed/in line(s)")
-    if not bits:
-        bits.append("no open trades · queues cleared")
+        bits.append(f"cleared {released} stuck map line(s)")
+    bits.append("belt emptied")
+    if window == room3_engine.SESSION_CLOSED:
+        bits.append("overnight — a broker close only fills if Alpaca still has a book; otherwise it waits until 4:00 ET")
     if errs:
         bits.append("flatten errors: " + "; ".join(errs[:3]))
     return "Kill FLAT · " + " · ".join(bits)
@@ -2744,7 +2756,7 @@ def _render_execution_posture(mode: str) -> None:
             "Kill switch FLAT",
             value=flat,
             key="room3_toggle_kill_flat",
-            help="Turns off auto orders, drops committed queues, and closes open paper positions.",
+            help="Wipes the belt and stuck committed rows, disarms, and tries to close open paper positions (extended-hours if the market is shut).",
         )
     if st.session_state.room3_kill_flat and not st.session_state.get("room3_kill_did_flat"):
         st.session_state.room3_kill_did_flat = True
