@@ -1138,41 +1138,65 @@ def _stamp_position_timeframes() -> None:
     st.session_state.room3_open_positions = rows
 
 
-def _render_tf_budget_panel() -> None:
-    snap = room3_matrix.tf_budget_snapshot(st.session_state)
-    st.markdown("**Timeframe buckets**")
-    st.caption(
-        "50% of Trading today is reserved for 15m, 30% for 5m, 20% for 1m. "
-        "Projected fills come from how many layout·strategy recipes exist on that TF "
-        f"(priors {room3_matrix.TF_PROJECTED_PRIOR['15m']} / "
-        f"{room3_matrix.TF_PROJECTED_PRIOR['5m']} / "
-        f"{room3_matrix.TF_PROJECTED_PRIOR['1m']} if DNA is empty). "
-        "A full-match trade takes 1 / projected of its bucket. "
-        "Buckets are the opening reservation, not walls: extra fills collect leftover "
-        "from quiet books (Heat = quiet). A live 15m still in its layout move can add "
-        "once from that idle cash. A hot 5m/1m keeps its pot and can pull quiet 15m leftover."
-    )
-    if snap.get("dna_empty"):
-        st.caption("Layout library empty right now — using the default projected counts until DNA hydrates.")
-    rows = list(snap.get("rows") or [])
-    if rows:
-        pretty = []
-        for r in rows:
-            pretty.append(
-                {
-                    "TF": r["TF"],
-                    "Bucket": r["Bucket %"],
-                    "Bucket $": f"${r['Bucket $']:,.0f}",
-                    "Projected": r["Projected"],
-                    "Live": r["Live"],
-                    "In use": f"${r['In use $']:,.0f}",
-                    "Left": f"${r['Left $']:,.0f}",
-                    "Full-match slot": f"${r['Full-match slot $']:,.0f}",
-                    "Heat": r.get("Heat") or "—",
-                    "Layouts": r["Layouts"],
-                }
-            )
-        st.dataframe(pretty, use_container_width=True, hide_index=True)
+def _release_watch_book_queues() -> int:
+    """Drop committed / in map lines back to watching. Does not touch Alpaca."""
+    book = st.session_state.get("room3_watch_book") or {}
+    lines = book.get("lines") or {}
+    n = 0
+    for line in lines.values():
+        if not isinstance(line, dict):
+            continue
+        dirty = False
+        if line.get("entry_signal") or line.get("exit_signal"):
+            line["entry_signal"] = None
+            line["exit_signal"] = None
+            dirty = True
+        if str(line.get("state") or "") in ("committed", "in"):
+            line["state"] = "watching"
+            dirty = True
+        if dirty:
+            line["patience"] = False
+            line.pop("patience_note", None)
+            line["scale_ins"] = 0
+            n += 1
+    st.session_state.room3_watch_book = book
+    return n
+
+
+def _kill_go_flat() -> str:
+    """Operator kill: no new auto, drop queues, close open paper positions."""
+    released = _release_watch_book_queues()
+    st.session_state.room3_engine_armed = False
+    st.session_state.room3_toggle_engine_armed = False
+    mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
+    paper = mode != ROOM3_MODE_LIVE
+    closed = 0
+    errs: list[str] = []
+    if _broker_is_connected() and str(st.session_state.get("room3_broker") or "") == "alpaca":
+        _sync_alpaca_account_into_session(paper=paper)
+        for pos in list(st.session_state.get("room3_open_positions") or []):
+            sym = str(pos.get("symbol") or pos.get("ticker") or "").upper()
+            if not sym:
+                continue
+            try:
+                result = room3_alpaca.close_position_now(sym, paper=paper)
+                if result.get("ok"):
+                    closed += 1
+                else:
+                    errs.append(f"{sym}:{result.get('error') or 'fail'}")
+            except Exception as exc:
+                errs.append(f"{sym}:{exc}")
+        _sync_alpaca_account_into_session(paper=paper)
+    bits = []
+    if closed:
+        bits.append(f"flattened {closed}")
+    if released:
+        bits.append(f"released {released} committed/in line(s)")
+    if not bits:
+        bits.append("no open trades · queues cleared")
+    if errs:
+        bits.append("flatten errors: " + "; ".join(errs[:3]))
+    return "Kill FLAT · " + " · ".join(bits)
 
 
 def _record_operator_review(trade_id: str, vote: str) -> None:
@@ -1749,8 +1773,6 @@ def _render_live_dashboard(mode: str) -> None:
                     )
                     st.rerun()
 
-    _render_tf_budget_panel()
-
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         st.metric(
@@ -1774,7 +1796,7 @@ def _render_live_dashboard(mode: str) -> None:
         )
     else:
         if st.session_state.get("room3_kill_flat"):
-            st.caption("Kill switch: **FLAT** — all auto orders blocked")
+            st.caption("Kill switch: **FLAT** — no auto orders · committed dropped · flatten sent")
         elif st.session_state.get("room3_pause_entries"):
             st.caption("Entries **paused** · exits still allowed when gates pass")
         elif st.session_state.get("room3_engine_armed") and _broker_is_connected():
@@ -2722,8 +2744,17 @@ def _render_execution_posture(mode: str) -> None:
             "Kill switch FLAT",
             value=flat,
             key="room3_toggle_kill_flat",
-            help="Blocks all auto orders (entries and exits).",
+            help="Turns off auto orders, drops committed queues, and closes open paper positions.",
         )
+    if st.session_state.room3_kill_flat and not st.session_state.get("room3_kill_did_flat"):
+        st.session_state.room3_kill_did_flat = True
+        st.session_state.room3_kill_note = _kill_go_flat()
+        st.rerun()
+    if not st.session_state.room3_kill_flat:
+        st.session_state.room3_kill_did_flat = False
+        st.session_state.pop("room3_kill_note", None)
+    elif st.session_state.get("room3_kill_note"):
+        st.warning(st.session_state.get("room3_kill_note"))
 
     st.markdown("#### Session filters (when engine may trade)")
     st.caption(
@@ -2791,7 +2822,6 @@ def _render_execution_posture(mode: str) -> None:
             f"entry when map match ≥ **{room3_matrix.MATCH_THRESHOLD_PCT}%** · "
             f"arm engine to fire Alpaca orders."
         )
-        st.warning(room3_matrix.size_explain(st.session_state))
 
     if mode == ROOM3_MODE_LIVE and not room3_engine.LIVE_ORDERS_ENABLED:
         st.info("Live orders are hard-disabled. Auto path is paper-only until you enable live.")

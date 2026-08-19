@@ -9,4 +9,4 @@ If a default decides **how much money**, **when orders fire**, **flatten/kill**,
 
 When adding execution logic: put the rule on the execution posture / watch book, and tell the user in plain language.
 
-**Size (current):** Trading today opens **50% 15m / 30% 5m / 20% 1m**. Those are starting reservations, not walls. Extra fills collect leftover from buckets that are not hot (live < projected). A live 15m still under half its layout move can add once from that idle cash. A hot 5m/1m keeps its pot and can pull quiet 15m leftover. Wallpaper/IDF is not in the formula yet. See `room3_matrix.size_explain()` and the Timeframe buckets table.
+**Size (current):** Engine-internal. Trading today opens 50% 15m / 30% 5m / 20% 1m; leftover is fluid across quiet vs hot TFs; a live 15m can add once. Do **not** dump this as a lecture on the operator screen. Kill switch FLAT now disarms, drops committed queues, and flattens open paper positions.
