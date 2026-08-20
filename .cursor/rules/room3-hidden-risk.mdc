@@ -15,4 +15,6 @@ When adding execution logic: put the rule on the execution posture / watch book,
 
 **Orders:** Price off **Alpaca last**, not Yahoo close. Style is **per strategy**: pops (scalp/sniper/impulse, and unnamed 1m) → market; slower setups on any TF → limit. Outside RTH always limit. Kill / day-end flatten uses limit.
 
+**Belt:** Drop **adds** names (they stay all day, including after an exit). Max **15**. × removes one; Clear wipes all. Several names can be in at once. One ticker = one open position at a time (Alpaca is one pile of shares); after that exit it can fire again the same day.
+
 **Kill:** FLAT disarms, drops committed queues, and flattens open paper positions.

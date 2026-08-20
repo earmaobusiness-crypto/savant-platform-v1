@@ -2864,6 +2864,32 @@ def _render_execution_posture(mode: str) -> None:
                 )
 
 
+def _merge_belt_names(existing: list[str], incoming: list[str]) -> tuple[list[str], list[str]]:
+    """Append unique names. Returns (kept, not_added because cap)."""
+    cap = int(room3_watcher.MAX_NAMES)
+    kept: list[str] = []
+    seen: set[str] = set()
+    for raw in list(existing or []) + list(incoming or []):
+        t = str(raw or "").strip().upper()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        if len(kept) >= cap:
+            continue
+        kept.append(t)
+    overflow = [
+        str(t).strip().upper()
+        for t in (incoming or [])
+        if str(t).strip().upper() and str(t).strip().upper() not in kept
+    ]
+    # de-dupe overflow
+    extra: list[str] = []
+    for t in overflow:
+        if t not in extra:
+            extra.append(t)
+    return kept, extra
+
+
 def ingest_filter_universe(tickers: list[str] | None) -> None:
     """
     Public hook — names currently inside the *active* filter.
@@ -3387,8 +3413,9 @@ def _render_rth_filter_attach() -> None:
         st.caption("Belt live — maps running; trades when armed.")
 
     st.caption(
-        "Paste every ticker, then Drop once. Spaces, commas, or periods between names are fine "
-        "(`ONFO. WETO. CAPR.`). Drop **replaces** the belt — it does not add to it."
+        "Drop **adds** names — they stay all day and keep mapping after a trade exits. "
+        "Several names can be in at once (same TF is fine). "
+        f"Max {room3_watcher.MAX_NAMES} on the belt; × removes one; Clear wipes all."
     )
 
     # Compact drop: one field + one click. Accepts spaces, commas, newlines, NASDAQ:XYZ.
@@ -3435,27 +3462,52 @@ def _render_rth_filter_attach() -> None:
             )
             if slot not in room3_filters.SLOTS:
                 slot = room3_filters.SLOT_RTH
-            ingest_filter_universe(names)
+            names = [str(t).strip().upper() for t in names if str(t).strip()]
+            already = list(st.session_state.get("room3_filter_universe") or [])
+            merged, skipped = _merge_belt_names(already, names)
+            added = [t for t in names if t in merged and t not in {x.upper() for x in already}]
+            ingest_filter_universe(merged)
             st.session_state.room3_screener_last = {
                 "ok": True,
-                "tickers": names[: room3_watcher.MAX_NAMES],
-                "passed": len(names[: room3_watcher.MAX_NAMES]),
+                "tickers": merged,
+                "passed": len(merged),
                 "at": datetime.now(ET).strftime("%H:%M:%S ET"),
                 "pipeline": "full" if trading_now else "list_only",
                 "session_slot": slot,
                 "source": "manual",
                 "cached": False,
             }
-            kept = names[: room3_watcher.MAX_NAMES]
-            extra = ""
-            if int(parsed.get("truncated") or 0) > 0:
-                extra = f" (capped at {room3_watcher.MAX_NAMES})"
-            st.session_state.room3_belt_flash = (
-                f"Registered {len(kept)} ticker(s){extra}: " + ", ".join(kept)
-            )
+            bits = []
+            if added:
+                bits.append("added " + ", ".join(added))
+            else:
+                bits.append("already on belt")
+            bits.append(f"{len(merged)}/{room3_watcher.MAX_NAMES} names")
+            if skipped:
+                bits.append("cap — not added: " + ", ".join(skipped[:8]))
+            st.session_state.room3_belt_flash = " · ".join(bits)
             _persist_screener_to_disk()
-            _sync_belt_query(kept)
+            _sync_belt_query(merged)
             st.rerun()
+
+    if belt:
+        st.caption("On belt now — × to drop one name (maps keep going if that name is still in a trade):")
+        n_cols = min(6, max(1, len(belt)))
+        cols = st.columns(n_cols)
+        for i, t in enumerate(belt):
+            with cols[i % n_cols]:
+                if st.button(f"× {t}", key=f"room3_belt_rm_{t}", use_container_width=True):
+                    remaining = [x for x in belt if x != t]
+                    ingest_filter_universe(remaining)
+                    last = dict(st.session_state.get("room3_screener_last") or {})
+                    last["tickers"] = remaining
+                    last["passed"] = len(remaining)
+                    last["at"] = datetime.now(ET).strftime("%H:%M:%S ET")
+                    st.session_state.room3_screener_last = last
+                    st.session_state.room3_belt_flash = f"Removed {t} · {len(remaining)} left"
+                    _persist_screener_to_disk()
+                    _sync_belt_query(remaining)
+                    st.rerun()
 
     if room3_screener.BUILTIN_SCREENER_ENABLED:
         _render_builtin_screener_panel()
