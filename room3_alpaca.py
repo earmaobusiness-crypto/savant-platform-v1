@@ -424,7 +424,7 @@ def _closed_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "pnl_usd": round(pnl, 2),
                     "pnl_pct": round(pnl_pct, 3),
                     "qty": entry_qty_acc,
-                    "reviewed": True,
+                    "reviewed": False,
                     "status": "closed · alpaca",
                     "broker_source": True,
                 }

@@ -1239,12 +1239,27 @@ def _merge_broker_closed_trades(closed: list) -> None:
     """Upsert Alpaca closed fills; keep real matrix strategy/TF over placeholders."""
     hist = list(st.session_state.get("room3_trade_history") or [])
     by_id = {str(r.get("id") or ""): i for i, r in enumerate(hist) if r.get("id")}
+    blocked = set(str(x) for x in (st.session_state.get("room3_review_block_ids") or []))
     for row in closed or []:
         rid = str(row.get("id") or "")
         enriched = _enrich_trade_row_meta(row)
+        # Broker never counts as an operator review.
+        enriched["reviewed"] = False
+        enriched.pop("operator_vote", None)
+        enriched.pop("reviewed_at", None)
         if rid and rid in by_id:
             old = hist[by_id[rid]]
             merged = {**old, **enriched}
+            # Preserve a real human review; never re-fake one after Undo.
+            if rid in blocked or not old.get("operator_vote"):
+                merged["reviewed"] = False
+                merged.pop("operator_vote", None)
+                merged.pop("reviewed_at", None)
+            elif old.get("operator_vote"):
+                merged["reviewed"] = True
+                merged["operator_vote"] = old.get("operator_vote")
+                if old.get("reviewed_at"):
+                    merged["reviewed_at"] = old.get("reviewed_at")
             old_s = str(old.get("strategy") or "").strip()
             new_s = str(enriched.get("strategy") or "").strip()
             if old_s and old_s not in _META_STRAT_PLACEHOLDER and (
@@ -1257,7 +1272,15 @@ def _merge_broker_closed_trades(closed: list) -> None:
                 merged["timeframe"] = old_tf
             hist[by_id[rid]] = _enrich_trade_row_meta(merged)
             continue
+        if rid and rid in blocked:
+            enriched["reviewed"] = False
         hist.insert(0, enriched)
+    # One-shot cleanup: broker rows that were wrongly stamped reviewed with no vote.
+    for i, r in enumerate(hist):
+        if r.get("broker_source") and r.get("reviewed") and not str(r.get("operator_vote") or "").strip():
+            row = dict(r)
+            row["reviewed"] = False
+            hist[i] = row
     st.session_state.room3_trade_history = hist[:200]
 
 
@@ -1382,7 +1405,16 @@ def _undo_operator_review(trade_id: str) -> None:
     history = list(st.session_state.room3_trade_history or [])
     match = next((t for t in reviewed if str(t.get("id")) == trade_id), None)
     if match is None:
-        match = next((t for t in history if str(t.get("id")) == trade_id and t.get("reviewed")), None)
+        match = next(
+            (
+                t
+                for t in history
+                if str(t.get("id")) == trade_id
+                and t.get("reviewed")
+                and str(t.get("operator_vote") or "").strip()
+            ),
+            None,
+        )
     if match is None:
         return
     restored = dict(match)
@@ -1392,12 +1424,26 @@ def _undo_operator_review(trade_id: str) -> None:
     st.session_state.room3_operator_reviews = [
         t for t in reviewed if str(t.get("id")) != trade_id
     ]
-    st.session_state.room3_trade_history = [
-        t for t in history if str(t.get("id")) != trade_id
-    ]
+    # Keep the closed row in the log, but clear the fake/real review flags.
+    new_hist = []
+    for t in history:
+        if str(t.get("id")) == trade_id:
+            row = dict(t)
+            row.pop("operator_vote", None)
+            row.pop("reviewed_at", None)
+            row["reviewed"] = False
+            new_hist.append(row)
+        else:
+            new_hist.append(t)
+    st.session_state.room3_trade_history = new_hist
     pending = list(st.session_state.room3_pending_reviews or [])
-    pending.append(restored)
+    if not any(str(t.get("id")) == trade_id for t in pending):
+        pending.append(restored)
     st.session_state.room3_pending_reviews = pending
+    # Broker sync must not re-stamp this as reviewed=True.
+    blocked = set(st.session_state.get("room3_review_block_ids") or [])
+    blocked.add(trade_id)
+    st.session_state.room3_review_block_ids = list(blocked)[-50:]
 
     if old_vote:
         strat = str(match.get("strategy") or "unknown")
@@ -1731,6 +1777,14 @@ def _render_open_positions() -> None:
     )
 
 
+def _trade_widget_key(prefix: str, trade: dict, index: int = 0) -> str:
+    """Stable unique Streamlit key — never collide on missing/duplicate trade ids."""
+    rid = str(trade.get("id") or "").strip() or "noid"
+    ticker = str(trade.get("ticker") or "X").upper()
+    exit_t = str(trade.get("exit_time") or trade.get("entry_time") or "")
+    return f"{prefix}_{index}_{rid}_{ticker}_{exit_t}"
+
+
 def _render_trade_history() -> None:
     st.markdown("### Today's trade log")
     pending = st.session_state.room3_pending_reviews or []
@@ -1815,23 +1869,25 @@ def _render_trade_history() -> None:
         st.caption("Operator votes today · " + " · ".join(detail_parts))
 
     reviewed_in_log = [
-        r for r in (st.session_state.room3_trade_history or [])
-        if r.get("reviewed")
+        r
+        for r in (st.session_state.room3_trade_history or [])
+        if r.get("reviewed") and str(r.get("operator_vote") or "").strip()
     ]
     if reviewed_in_log:
         with st.expander("Undo a review (move back to pending)", expanded=False):
-            for r in reviewed_in_log:
-                rid = str(r.get("id"))
+            for i, r in enumerate(reviewed_in_log):
+                rid = str(r.get("id") or "").strip()
                 label = (
                     f"{r.get('ticker')} · {r.get('strategy')} · "
                     f"voted {r.get('operator_vote', '?')}"
                 )
                 if st.button(
                     f"↩ Undo: {label}",
-                    key=f"room3_undo_{rid}",
+                    key=_trade_widget_key("room3_undo", r, i),
                     use_container_width=True,
                 ):
-                    _undo_operator_review(rid)
+                    if rid:
+                        _undo_operator_review(rid)
                     st.rerun()
 
 
@@ -2345,8 +2401,8 @@ def _render_operator_review_panel() -> None:
     if not pending:
         st.caption("No closed trades waiting for your vote.")
         return
-    for trade in pending:
-        tid = str(trade.get("id"))
+    for i, trade in enumerate(pending):
+        tid = str(trade.get("id") or "").strip()
         verdict = str(trade.get("system_verdict") or "neutral")
         verdict_class = "room3-verdict-good" if verdict == "good" else "room3-verdict-bad"
         st.markdown(
@@ -2364,12 +2420,22 @@ def _render_operator_review_panel() -> None:
         )
         b1, b2, _ = st.columns([1, 1, 2])
         with b1:
-            if st.button("✓ Good", key=f"room3_good_{tid}", use_container_width=True):
-                _record_operator_review(tid, "good")
+            if st.button(
+                "✓ Good",
+                key=_trade_widget_key("room3_good", trade, i),
+                use_container_width=True,
+            ):
+                if tid:
+                    _record_operator_review(tid, "good")
                 st.rerun()
         with b2:
-            if st.button("✗ Bad", key=f"room3_bad_{tid}", use_container_width=True):
-                _record_operator_review(tid, "bad")
+            if st.button(
+                "✗ Bad",
+                key=_trade_widget_key("room3_bad", trade, i),
+                use_container_width=True,
+            ):
+                if tid:
+                    _record_operator_review(tid, "bad")
                 st.rerun()
 
 
@@ -3555,6 +3621,10 @@ def _render_watch_book_panel() -> None:
 
 def _render_rth_filter_attach() -> None:
     """Job 1 feed — paste tickers. Built-in Yahoo screener is parked (flag off)."""
+    # Guard: Streamlit crashes if this mounts twice in one run (duplicate element key).
+    if st.session_state.get("_room3_belt_mounted"):
+        return
+    st.session_state._room3_belt_mounted = True
     st.markdown("#### Belt · drop tickers")
     trading_now = _session_trading_allowed()
     window = room3_engine.detect_session_window()
@@ -3737,6 +3807,7 @@ def _render_live_workspace() -> None:
 def render_room3_trading_center() -> None:
     """Main Room 3 entry — connection gate + trading shell."""
     init_room3_session_state()
+    st.session_state._room3_belt_mounted = False
     _inject_room3_css()
     _maybe_roll_trading_session()
 
