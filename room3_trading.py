@@ -1112,30 +1112,153 @@ def _set_tradable_pct(pct: float, equity: float) -> None:
 
 
 def _stamp_position_timeframes() -> None:
-    """Alpaca positions don't know 1m/5m/15m — copy TF from the watch book / tape."""
+    """Alpaca positions don't know 1m/5m/15m — copy TF + strategy from watch book / tape."""
     rows = list(st.session_state.get("room3_open_positions") or [])
     if not rows:
         return
-    by_ticker: dict[str, str] = {}
+    by_ticker_tf: dict[str, str] = {}
+    by_ticker_strat: dict[str, str] = {}
     book = st.session_state.get("room3_watch_book") or {}
     for line in (book.get("lines") or {}).values():
         ticker = str(line.get("ticker") or "").upper()
         tf = str(line.get("timeframe") or "")
-        if ticker and tf in ("1m", "5m", "15m") and str(line.get("state") or "") in ("in", "committed"):
-            by_ticker[ticker] = tf
+        if not ticker:
+            continue
+        if tf in ("1m", "5m", "15m") and str(line.get("state") or "") in (
+            "in",
+            "committed",
+        ):
+            by_ticker_tf[ticker] = tf
+        strat = str(
+            line.get("entry_strategy")
+            or line.get("nearest_strategy")
+            or ""
+        ).strip()
+        if strat and strat not in ("—", "-", "Alpaca", "matrix"):
+            by_ticker_strat[ticker] = strat
     for row in list(st.session_state.get("room3_trade_history") or []):
         ticker = str(row.get("ticker") or "").upper()
         tf = str(row.get("timeframe") or "")
-        if ticker and tf in ("1m", "5m", "15m") and ticker not in by_ticker:
-            by_ticker[ticker] = tf
+        strat = str(row.get("strategy") or "").strip()
+        if ticker and tf in ("1m", "5m", "15m") and ticker not in by_ticker_tf:
+            by_ticker_tf[ticker] = tf
+        if (
+            ticker
+            and strat
+            and strat not in ("—", "-", "Alpaca", "matrix")
+            and ticker not in by_ticker_strat
+        ):
+            by_ticker_strat[ticker] = strat
     for row in rows:
-        cur = str(row.get("timeframe") or "")
-        if cur in ("1m", "5m", "15m"):
-            continue
         ticker = str(row.get("ticker") or "").upper()
-        if ticker in by_ticker:
-            row["timeframe"] = by_ticker[ticker]
+        cur_tf = str(row.get("timeframe") or "")
+        if cur_tf not in ("1m", "5m", "15m") and ticker in by_ticker_tf:
+            row["timeframe"] = by_ticker_tf[ticker]
+        cur_s = str(row.get("strategy") or "").strip()
+        if (
+            (not cur_s or cur_s in ("—", "-", "Alpaca", "matrix"))
+            and ticker in by_ticker_strat
+        ):
+            row["strategy"] = by_ticker_strat[ticker]
     st.session_state.room3_open_positions = rows
+
+
+_META_TF_PLACEHOLDER = frozenset({"", "—", "-", "MKT", "Alpaca"})
+_META_STRAT_PLACEHOLDER = frozenset(
+    {"", "—", "-", "Alpaca", "matrix", "Alpaca BUY", "Alpaca SELL"}
+)
+
+
+def _matrix_meta_for_ticker(ticker: str) -> tuple[str, str]:
+    """Best TF + strategy from watch book / local history for a symbol."""
+    sym = str(ticker or "").upper()
+    if not sym:
+        return "", ""
+    tf = ""
+    strat = ""
+    book = st.session_state.get("room3_watch_book") or {}
+    prefer_states = ("in", "committed", "watching")
+    ranked: list[tuple[int, dict]] = []
+    for line in (book.get("lines") or {}).values():
+        if str(line.get("ticker") or "").upper() != sym:
+            continue
+        state = str(line.get("state") or "")
+        rank = prefer_states.index(state) if state in prefer_states else 9
+        ranked.append((rank, line))
+    ranked.sort(key=lambda x: x[0])
+    for _, line in ranked:
+        if not tf:
+            cand = str(line.get("timeframe") or "")
+            if cand in ("1m", "5m", "15m"):
+                tf = cand
+        if not strat:
+            cand = str(
+                line.get("entry_strategy")
+                or line.get("nearest_strategy")
+                or ""
+            ).strip()
+            if cand and cand not in _META_STRAT_PLACEHOLDER:
+                strat = cand
+        if tf and strat:
+            break
+    if not tf or not strat:
+        for row in list(st.session_state.get("room3_trade_history") or []):
+            if str(row.get("ticker") or "").upper() != sym:
+                continue
+            if not tf:
+                cand = str(row.get("timeframe") or "")
+                if cand in ("1m", "5m", "15m"):
+                    tf = cand
+            if not strat:
+                cand = str(row.get("strategy") or "").strip()
+                if cand and cand not in _META_STRAT_PLACEHOLDER:
+                    strat = cand
+            if tf and strat:
+                break
+    return tf, strat
+
+
+def _enrich_trade_row_meta(row: dict) -> dict:
+    """Fill placeholder Alpaca strategy/TF from matrix context when possible."""
+    out = dict(row or {})
+    cur_tf = str(out.get("timeframe") or "").strip()
+    cur_s = str(out.get("strategy") or "").strip()
+    need_tf = cur_tf in _META_TF_PLACEHOLDER or cur_tf.upper().startswith("ALPACA")
+    need_s = cur_s in _META_STRAT_PLACEHOLDER or cur_s.upper().startswith("ALPACA")
+    if not need_tf and not need_s:
+        return out
+    tf, strat = _matrix_meta_for_ticker(str(out.get("ticker") or ""))
+    if need_tf and tf:
+        out["timeframe"] = tf
+    if need_s and strat:
+        out["strategy"] = strat
+    return out
+
+
+def _merge_broker_closed_trades(closed: list) -> None:
+    """Upsert Alpaca closed fills; keep real matrix strategy/TF over placeholders."""
+    hist = list(st.session_state.get("room3_trade_history") or [])
+    by_id = {str(r.get("id") or ""): i for i, r in enumerate(hist) if r.get("id")}
+    for row in closed or []:
+        rid = str(row.get("id") or "")
+        enriched = _enrich_trade_row_meta(row)
+        if rid and rid in by_id:
+            old = hist[by_id[rid]]
+            merged = {**old, **enriched}
+            old_s = str(old.get("strategy") or "").strip()
+            new_s = str(enriched.get("strategy") or "").strip()
+            if old_s and old_s not in _META_STRAT_PLACEHOLDER and (
+                new_s in _META_STRAT_PLACEHOLDER or new_s.upper().startswith("ALPACA")
+            ):
+                merged["strategy"] = old_s
+            old_tf = str(old.get("timeframe") or "").strip()
+            new_tf = str(enriched.get("timeframe") or "").strip()
+            if old_tf in ("1m", "5m", "15m") and new_tf in _META_TF_PLACEHOLDER:
+                merged["timeframe"] = old_tf
+            hist[by_id[rid]] = _enrich_trade_row_meta(merged)
+            continue
+        hist.insert(0, enriched)
+    st.session_state.room3_trade_history = hist[:200]
 
 
 def _release_watch_book_queues() -> int:
@@ -2562,19 +2685,6 @@ Close **IB Gateway** first if it’s logged into the same account.
             st.caption(msg)
 
 
-def _merge_broker_closed_trades(closed: list) -> None:
-    """Upsert Alpaca closed fills into today's trade log; keep non-broker local rows."""
-    hist = list(st.session_state.get("room3_trade_history") or [])
-    by_id = {str(r.get("id") or ""): i for i, r in enumerate(hist) if r.get("id")}
-    for row in closed or []:
-        rid = str(row.get("id") or "")
-        if rid and rid in by_id:
-            hist[by_id[rid]] = {**hist[by_id[rid]], **row}
-            continue
-        hist.insert(0, dict(row))
-    st.session_state.room3_trade_history = hist[:200]
-
-
 def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     """Broker truth — equity, open positions, closed fills, day P/L from Alpaca."""
     result = room3_alpaca.probe_alpaca_connection(paper=paper)
@@ -2680,11 +2790,21 @@ def _log_alpaca_order_fill(result: dict) -> None:
     qty = float(result.get("qty") or 0)
     px = result.get("filled_avg_price")
     entry_px = float(px) if px not in (None, "") else 0.0
+    strat = str(result.get("strategy") or "").strip()
+    tf = str(result.get("timeframe") or "").strip()
+    if not strat or strat in _META_STRAT_PLACEHOLDER or strat.upper().startswith("ALPACA"):
+        _tf, _st = _matrix_meta_for_ticker(ticker)
+        if _st:
+            strat = _st
+    if not tf or tf in _META_TF_PLACEHOLDER:
+        _tf, _st = _matrix_meta_for_ticker(ticker)
+        if _tf:
+            tf = _tf
     row = {
         "id": f"alpaca-ord-{result.get('order_id') or now}",
         "ticker": ticker,
-        "strategy": str(result.get("strategy") or f"Alpaca {side.upper()}"),
-        "timeframe": str(result.get("timeframe") or "MKT"),
+        "strategy": strat or "matrix",
+        "timeframe": tf or "—",
         "entry_time": now,
         "entry_price": entry_px,
         "last_price": entry_px,
@@ -3384,15 +3504,37 @@ def _room3_heartbeat_fragment() -> None:
     note = str(book.get("last_note") or "")
     flat_note = str(st.session_state.get("room3_last_session_flat_note") or "")
     extra = f" · {flat_note}" if flat_note else ""
+    armed = bool(st.session_state.get("room3_engine_armed"))
+    kill = bool(st.session_state.get("room3_kill_flat"))
+    if kill:
+        posture = "Kill FLAT · no auto orders"
+    elif armed and gates.get("ok"):
+        posture = "ARMED · gates OPEN"
+    elif armed:
+        reasons = "; ".join(gates.get("reasons") or []) or "gates closed"
+        posture = f"ARMED · gates CLOSED · {reasons}"
+    else:
+        posture = "DISARMED · maps only"
     st.caption(
-        f"Heartbeat · {datetime.now(ET).strftime('%H:%M:%S ET')} · "
+        f"Live · {posture} · "
+        f"Heartbeat {datetime.now(ET).strftime('%H:%M:%S ET')} · "
         f"{room3_engine.session_label(window)} · "
         f"broker sync {sync_t} · "
-        f"gates={'OPEN' if gates.get('ok') else 'CLOSED'} · "
         f"trade_session={'YES' if new_ok else 'NO'} · "
         f"manage={'YES' if manage else 'NO'} · "
         f"{note}{extra}"
     )
+    # Watch table + ticks live here so they don't freeze outside the 30s fragment.
+    uni = ", ".join(book.get("universe") or []) or "—"
+    st.caption(
+        f"Universe: {uni} · last tick {book.get('last_tick') or '—'} · "
+        f"ticks {book.get('ticks') or 0}"
+    )
+    rows = room3_watcher.book_status_rows(book)
+    if rows:
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No TF maps open yet.")
 
 
 def _render_watch_book_panel() -> None:
@@ -3406,14 +3548,9 @@ def _render_watch_book_panel() -> None:
         )
     else:
         st.caption(
-            f"Universe: {', '.join(book.get('universe') or [])} · "
-            f"last tick {book.get('last_tick') or '—'} · ticks {book.get('ticks') or 0}"
+            "Maps / Match% / ticks refresh in the **Live** pulse below "
+            "(every ~30s) — belt controls stay here."
         )
-    rows = room3_watcher.book_status_rows(book)
-    if rows:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
-    else:
-        st.caption("No TF maps open yet.")
 
 
 def _render_rth_filter_attach() -> None:

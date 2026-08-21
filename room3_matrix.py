@@ -19,12 +19,13 @@ PLACEHOLDER_LAYOUTS = frozenset({"NEW_LAYOUT", "PURGATORY_PENDING", "—", "-", 
 
 # Day book split — these three add to 100% of Trading today.
 TF_BUCKET_FRAC: dict[str, float] = {"15m": 0.50, "5m": 0.30, "1m": 0.20}
-# Layout-based fill estimate starts here, then scales with how many recipes exist.
-TF_PROJECTED_PRIOR: dict[str, int] = {"15m": 4, "5m": 8, "1m": 6}
-TF_PROJECTED_CAP: dict[str, int] = {"15m": 8, "5m": 16, "1m": 12}
+# Expected fills (opening reservation). Caps stay under ~50 combined max.
+TF_PROJECTED_PRIOR: dict[str, int] = {"15m": 3, "5m": 6, "1m": 5}
+TF_PROJECTED_CAP: dict[str, int] = {"15m": 6, "5m": 12, "1m": 10}
 SCALE_IN_MAX = 1  # one add onto a live winner
 SCALE_IN_TARGET_FRAC = 0.50  # add only while P/L is still under half the layout move
-SIZE_AT_THRESHOLD = 0.55  # 85% match → 55% of that TF's slot
+SIZE_AT_THRESHOLD = 0.80  # 85% match → 80% of that TF's slot
+WARMING_MATCH_PCT = 70  # sticky / warming Err floor (not an entry)
 
 
 def size_explain(session_state: Any | None = None) -> str:
@@ -43,8 +44,8 @@ def size_explain(session_state: Any | None = None) -> str:
         "That cash is split into timeframe buckets that add to 100%: "
         f"15m {TF_BUCKET_FRAC['15m']:.0%} · 5m {TF_BUCKET_FRAC['5m']:.0%} · "
         f"1m {TF_BUCKET_FRAC['1m']:.0%}. "
-        f"Layouts project about {p.get('15m', 4)} fifteen-minute fills, "
-        f"{p.get('5m', 8)} five-minute, {p.get('1m', 6)} one-minute today — "
+        f"Layouts project about {p.get('15m', 3)} fifteen-minute fills, "
+        f"{p.get('5m', 6)} five-minute, {p.get('1m', 5)} one-minute today — "
         f"each full-match 15m therefore starts at 1/{n15} of the 15m bucket "
         f"({slot_frac:.0%} of that 50%). "
         "Those percents are the opening reservation, not walls. "
@@ -174,22 +175,36 @@ def match_spatial(
     best_ticker = ""
     best_tf = ""
     watch_tf = _normalize_watch_tf(watch_timeframe or "")
-    usable = [
+    dim_ok = [
         e
         for e in (layouts or [])
         if (e.get("vector") or []) and len(e.get("vector") or []) == len(snapshot_vec)
     ]
+    # Hard TF gate: 15m lanes only rhyme with 15m DNA (never borrow a 1m label).
+    usable: list[dict[str, Any]] = []
+    for e in dim_ok:
+        entry_tf = str(
+            e.get("timeframe_norm")
+            or _normalize_watch_tf(
+                e.get("timeframe_resolution") or e.get("strategy") or ""
+            )
+        )
+        if watch_tf and entry_tf and entry_tf != watch_tf:
+            continue
+        if watch_tf and not entry_tf:
+            continue
+        usable.append(e)
     weights = _wallpaper_weights(usable, len(snapshot_vec))
 
     for entry in usable:
         stored = [float(x) for x in (entry.get("vector") or [])]
         cos = cosine_similarity(snapshot_vec, stored, weights)
-        entry_tf = str(entry.get("timeframe_norm") or _normalize_watch_tf(entry.get("timeframe_resolution") or entry.get("strategy") or ""))
-        if watch_tf and entry_tf:
-            if entry_tf == watch_tf:
-                cos = min(1.0, cos * 1.04)
-            else:
-                cos *= 0.90
+        entry_tf = str(
+            entry.get("timeframe_norm")
+            or _normalize_watch_tf(
+                entry.get("timeframe_resolution") or entry.get("strategy") or ""
+            )
+        )
         if cos > best_cosine:
             second_cosine = best_cosine
             best_cosine = cos
@@ -375,7 +390,7 @@ def project_tf_counts(
     """
     Expected fills per TF today from layout richness + how many names are on the belt.
     sqrt(recipe_count / prior) so a fat 15m library does not claim 20 fills.
-    Empty DNA uses the prior (4 / 8 / 6) until layouts hydrate.
+    Empty DNA uses the prior (3 / 6 / 5) until layouts hydrate.
     """
     n = _tf_layout_counts(layouts)
     name_scale = 1.0
@@ -781,8 +796,15 @@ def maybe_queue_matrix_signals(
 
     match = score_line_against_repertoire(line, repertoire)
     line["match_pct"] = int(match.get("spatial_match_pct") or 0)
-    line["nearest_layout"] = str(match.get("nearest_layout_id") or "—")
-    line["nearest_strategy"] = str(match.get("nearest_strategy") or "—")
+    layout_id = str(match.get("nearest_layout_id") or "—")
+    line["nearest_layout"] = layout_id
+    nearest_strat = str(match.get("nearest_strategy") or "").strip()
+    if (
+        (not nearest_strat or nearest_strat in ("—", "-", "matrix"))
+        and layout_id not in PLACEHOLDER_LAYOUTS
+    ):
+        nearest_strat = strategy_for_layout(layout_id, repertoire)
+    line["nearest_strategy"] = nearest_strat or "—"
     line["score"] = float(match.get("display_score") or 0)
     line["second_cosine"] = float(match.get("second_cosine") or 0)
 
@@ -791,10 +813,17 @@ def maybe_queue_matrix_signals(
     slices = list(line.get("slices") or [])
     last_px = float(slices[-1].get("c") or 0) if slices else 0.0
     exclude = ticker if str(line.get("state") or "") in ("in", "committed") else ""
+    # Watch Size $ = fire-ready ticket (at ≥85%), not the shrunk warming preview.
+    raw_match = float(line.get("match_pct") or 0)
+    preview_match = (
+        float(MATCH_THRESHOLD_PCT)
+        if 0 < raw_match < MATCH_THRESHOLD_PCT
+        else raw_match
+    )
     preview = compute_entry_plan(
         price=last_px,
         timeframe=tf,
-        match_pct=float(line.get("match_pct") or 0),
+        match_pct=preview_match,
         session_state=session_state,
         second_cosine=float(match.get("second_cosine") or 0),
         best_cosine=float(match.get("cosine_similarity") or 0),
@@ -923,12 +952,16 @@ def maybe_queue_matrix_signals(
     cur_match = int(match.get("spatial_match_pct") or 0)
     # Warm DNA but not full signal yet — keep mapping; stock may still fill the puzzle.
     if cur_match < MATCH_THRESHOLD_PCT:
-        if cur_match >= 70:
+        if cur_match >= WARMING_MATCH_PCT:
             line["patience"] = True
             line["patience_note"] = (
                 f"warming {cur_match}% · need ≥{MATCH_THRESHOLD_PCT}% · "
                 f"30s snaps continue"
             )
+        else:
+            # Drop stale warming Err when Match% falls back under the floor.
+            line["patience"] = False
+            line.pop("patience_note", None)
         return
     line["patience"] = False
     line.pop("patience_note", None)

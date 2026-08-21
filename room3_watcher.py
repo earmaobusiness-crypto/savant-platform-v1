@@ -27,6 +27,7 @@ TIMEFRAMES = ("1m", "5m", "15m")
 # Job 2 only maps Job 1 survivors — keep this tight (operator: ~5–10 typical)
 MAX_NAMES = 15
 STICKY_MIN_SCORE = 0.72  # keep after filter drop if map this close to repertoire
+STICKY_MIN_MATCH_PCT = 70  # must also be warming+ DNA — never sticky on a 6% Match%
 STICKY_MAX_MINUTES = 90
 
 # Picture budget — lean where strategies are short; richer only on 15m
@@ -353,9 +354,34 @@ def _append_slice(line: dict[str, Any], snap: dict[str, Any]) -> bool:
     return True
 
 
+def _entry_stamped(line: dict[str, Any]) -> bool:
+    """True when committed means a real queued/filled entry, not sticky-only."""
+    return bool(
+        line.get("entry_signal")
+        or line.get("entry_layout")
+        or line.get("entry_qty")
+        or line.get("entry_match_pct")
+    )
+
+
+def _clear_sticky_watch(line: dict[str, Any]) -> None:
+    """Demote sticky-only committed → watching. Leaves real entry stamps alone."""
+    if line.get("state") == "in" or _entry_stamped(line):
+        return
+    if line.get("state") == "committed" or line.get("sticky"):
+        line["state"] = "watching"
+    line["sticky"] = False
+    line.pop("sticky_until", None)
+
+
 def _maybe_mark_sticky(line: dict[str, Any]) -> None:
     score = float(line.get("score") or 0)
-    if score >= STICKY_MIN_SCORE and line.get("state") in ("watching", "committed"):
+    match_pct = int(line.get("match_pct") or 0)
+    # Match% collapsed after a warm read → drop sticky so UI doesn't lie.
+    if match_pct < STICKY_MIN_MATCH_PCT or score < STICKY_MIN_SCORE:
+        _clear_sticky_watch(line)
+        return
+    if line.get("state") in ("watching", "committed"):
         from datetime import timedelta
 
         line["sticky"] = True
@@ -538,6 +564,8 @@ def tick_watcher(
             _maybe_mark_sticky(line)
         elif float(line.get("score") or 0) >= STICKY_MIN_SCORE:
             _maybe_mark_sticky(line)
+        else:
+            _clear_sticky_watch(line)
 
         if trade_ok:
             sig = evaluate_line_signals(line)
@@ -546,7 +574,11 @@ def tick_watcher(
 
     n_lines = len(book.get("lines") or {})
     n_layouts = int(repertoire.get("layout_count") or 0)
-    trade_note = "trading ON" if trade_ok else "maps on · arm engine to trade"
+    trade_note = (
+        "armed · scanning"
+        if trade_ok
+        else "maps on · arm engine to trade"
+    )
     lb_note = ", ".join(
         f"{tf}≤{tf_plans[tf].get('lookback_minutes')}m" for tf in TIMEFRAMES
     )
@@ -582,13 +614,45 @@ def purge_untouched_maps(book: dict[str, Any]) -> dict[str, Any]:
     return book
 
 
+def _display_state(line: dict[str, Any]) -> str:
+    """Operator-facing state: sticky ≠ queued order-ready."""
+    raw = str(line.get("state") or "watching")
+    if raw == "in":
+        return "in"
+    if raw == "committed" and _entry_stamped(line):
+        return "queued"
+    if raw == "committed" or line.get("sticky"):
+        return "sticky"
+    return raw
+
+
+def _why_not_firing(line: dict[str, Any]) -> str:
+    """Short reason when DNA is hot but no order is in flight."""
+    note = str(line.get("patience_note") or line.get("last_error") or "").strip()
+    if note:
+        return note[:48]
+    match = int(line.get("match_pct") or 0)
+    state = _display_state(line)
+    if state == "queued":
+        return "order stamped · waiting fill"
+    if state == "in":
+        return ""
+    if match >= room3_matrix.MATCH_THRESHOLD_PCT:
+        if state == "sticky":
+            return "≥85% · need arm + open gates"
+        return "≥85% · waiting arm/gates"
+    if match >= STICKY_MIN_MATCH_PCT:
+        return f"warming {match}% · need ≥{room3_matrix.MATCH_THRESHOLD_PCT}%"
+    return ""
+
+
 def book_status_rows(book: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for key, line in sorted((book.get("lines") or {}).items()):
         rows.append(
             {
                 "Line": key,
-                "State": line.get("state"),
+                "State": _display_state(line),
                 "Match%": int(line.get("match_pct") or 0),
                 "Layout": str(line.get("nearest_layout") or "—")[:16],
                 "Strategy": str(line.get("nearest_strategy") or "—")[:12],
@@ -605,7 +669,7 @@ def book_status_rows(book: dict[str, Any]) -> list[dict[str, Any]]:
                 "Score": f"{float(line.get('score') or 0):.2f}",
                 "Filter": "in" if line.get("in_filter") else ("sticky" if line.get("sticky") else "out"),
                 "Last bar": str(line.get("last_bar_ts") or "—")[-19:],
-                "Err": (line.get("last_error") or line.get("patience_note") or "")[:40],
+                "Err": _why_not_firing(line)[:40],
             }
         )
     return rows

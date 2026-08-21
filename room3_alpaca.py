@@ -497,70 +497,78 @@ def _fetch_fill_events(paper: bool = True) -> tuple[list[dict[str, Any]], str]:
     except Exception as exc:
         err = str(exc).strip() or type(exc).__name__
 
-    if events:
-        events.sort(key=lambda e: e["ts"])
-        return events, err
-
+    # Always merge activities — orders alone can miss unpaired legs / EH fills.
+    seen = {str(e.get("id") or "") for e in events}
     try:
         creds = load_alpaca_credentials(paper=paper)
         if not creds["key"] or not creds["secret"]:
-            return [], err or "Alpaca keys missing"
-        base = (creds["endpoint"] or PAPER_BASE_URL).rstrip("/")
-        after = lookback_start.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
-        until = (datetime.now(et) + timedelta(minutes=5)).astimezone(ZoneInfo("UTC")).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-        qs = urllib.parse.urlencode(
-            {
-                "activity_types": "FILL",
-                "after": after,
-                "until": until,
-                "direction": "asc",
-                "page_size": 100,
-            }
-        )
-        url = f"{base}/v2/account/activities?{qs}"
-        req = urllib.request.Request(
-            url,
-            headers={
-                "APCA-API-KEY-ID": creds["key"],
-                "APCA-API-SECRET-KEY": creds["secret"],
-                "Accept": "application/json",
-            },
-            method="GET",
-        )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-        for a in payload if isinstance(payload, list) else []:
-            ts = _parse_alpaca_ts(a.get("transaction_time") or a.get("timestamp"))
-            if ts is None:
-                continue
-            sym = str(a.get("symbol") or "").upper()
-            side = str(a.get("side") or "").lower()
-            qty = abs(float(a.get("qty") or 0))
-            px = float(a.get("price") or 0)
-            oid = str(a.get("order_id") or a.get("id") or "")
-            if side in ("b",):
-                side = "buy"
-            if side in ("s",):
-                side = "sell"
-            if not sym or side not in ("buy", "sell") or qty <= 0 or px <= 0:
-                continue
-            events.append(
+            if not events:
+                return [], err or "Alpaca keys missing"
+        else:
+            base = (creds["endpoint"] or PAPER_BASE_URL).rstrip("/")
+            after = lookback_start.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+            until = (datetime.now(et) + timedelta(minutes=5)).astimezone(ZoneInfo("UTC")).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            qs = urllib.parse.urlencode(
                 {
-                    "symbol": sym,
-                    "side": side,
-                    "qty": qty,
-                    "price": px,
-                    "ts": ts,
-                    "id": oid or f"{sym}-{ts.isoformat()}",
-                    "source": "activity",
+                    "activity_types": "FILL",
+                    "after": after,
+                    "until": until,
+                    "direction": "asc",
+                    "page_size": 100,
                 }
             )
-        events.sort(key=lambda e: e["ts"])
+            url = f"{base}/v2/account/activities?{qs}"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "APCA-API-KEY-ID": creds["key"],
+                    "APCA-API-SECRET-KEY": creds["secret"],
+                    "Accept": "application/json",
+                },
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            for a in payload if isinstance(payload, list) else []:
+                ts = _parse_alpaca_ts(a.get("transaction_time") or a.get("timestamp"))
+                if ts is None:
+                    continue
+                sym = str(a.get("symbol") or "").upper()
+                side = str(a.get("side") or "").lower()
+                qty = abs(float(a.get("qty") or 0))
+                px = float(a.get("price") or 0)
+                oid = str(a.get("order_id") or a.get("id") or "")
+                if side in ("b",):
+                    side = "buy"
+                if side in ("s",):
+                    side = "sell"
+                if not sym or side not in ("buy", "sell") or qty <= 0 or px <= 0:
+                    continue
+                eid = oid or f"{sym}-{ts.isoformat()}"
+                if eid in seen:
+                    continue
+                seen.add(eid)
+                events.append(
+                    {
+                        "symbol": sym,
+                        "side": side,
+                        "qty": qty,
+                        "price": px,
+                        "ts": ts,
+                        "id": eid,
+                        "source": "activity",
+                    }
+                )
     except Exception as exc:
         msg = str(exc).strip() or type(exc).__name__
-        err = f"{err}; {msg}" if err else msg
+        # 404 on activities is common on some paper hosts — keep order events.
+        if "404" not in msg and "Not Found" not in msg:
+            err = f"{err}; {msg}" if err else msg
+        elif not err:
+            err = "activities 404 (orders path used)"
+    events.sort(key=lambda e: e["ts"])
     return events, err
 
 
