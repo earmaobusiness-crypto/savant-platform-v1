@@ -427,6 +427,8 @@ def _closed_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "reviewed": False,
                     "status": "closed · alpaca",
                     "broker_source": True,
+                    "exit_order_id": oid,
+                    "broker_order_id": oid,
                 }
             )
         except Exception:

@@ -1046,11 +1046,12 @@ def _session_pl_stats() -> dict:
     equity = float(st.session_state.room3_account_equity or ROOM3_DEFAULT_EQUITY)
     open_rows = st.session_state.room3_open_positions or []
     pending = st.session_state.room3_pending_reviews or []
-    history = st.session_state.room3_trade_history or []
+    # Always count unique closed rows after dedupe.
+    history = _dedupe_trade_history()
+    st.session_state.room3_trade_history = history[:200]
     open_pl = sum(float(r.get("pnl_usd") or 0) for r in open_rows)
-    closed_pl = sum(float(r.get("pnl_usd") or 0) for r in pending)
-    # Closed trades stay in the day — don't require operator review to count
-    closed_pl += sum(float(r.get("pnl_usd") or 0) for r in history)
+    closed_rows = [r for r in history if _trade_is_closed_row(r)]
+    closed_pl = sum(float(r.get("pnl_usd") or 0) for r in closed_rows)
     local_day_pl = open_pl + closed_pl
     broker_day = st.session_state.get("room3_broker_day_pl")
     broker_pct = st.session_state.get("room3_broker_day_pl_pct")
@@ -1064,17 +1065,11 @@ def _session_pl_stats() -> dict:
     else:
         day_pl = local_day_pl
         day_pl_pct = (day_pl / equity * 100.0) if equity > 0 else 0.0
-    wins = sum(
-        1 for r in list(pending) + list(history)
-        if float(r.get("pnl_usd") or 0) > 0
-    )
-    losses = sum(
-        1 for r in list(pending) + list(history)
-        if float(r.get("pnl_usd") or 0) < 0
-    )
+    wins = sum(1 for r in closed_rows if float(r.get("pnl_usd") or 0) > 0)
+    losses = sum(1 for r in closed_rows if float(r.get("pnl_usd") or 0) < 0)
     decided = wins + losses
     win_rate = (wins / decided * 100.0) if decided else 0.0
-    trades_today = len(pending) + len(history)
+    trades_today = len(closed_rows)
     awaiting_review = len(pending)
     tradable = _clamp_tradable(equity)
     return {
@@ -1169,6 +1164,305 @@ _META_STRAT_PLACEHOLDER = frozenset(
 )
 
 
+def _is_placeholder_tf(raw: str) -> bool:
+    t = str(raw or "").strip()
+    return t in _META_TF_PLACEHOLDER or t.upper().startswith("ALPACA")
+
+
+def _is_placeholder_strat(raw: str) -> bool:
+    s = str(raw or "").strip()
+    return s in _META_STRAT_PLACEHOLDER or s.upper().startswith("ALPACA")
+
+
+def _parse_hhmmss(raw: str) -> int | None:
+    text = str(raw or "").strip()
+    if not text or text in ("—", "-"):
+        return None
+    parts = text.replace(".", ":").split(":")
+    try:
+        if len(parts) >= 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
+        if len(parts) == 2:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _times_near(a: str, b: str, *, window_sec: int = 180) -> bool:
+    sa, sb = _parse_hhmmss(a), _parse_hhmmss(b)
+    if sa is None or sb is None:
+        return False
+    return abs(sa - sb) <= window_sec
+
+
+def _nums_near(a: float, b: float, *, abs_tol: float = 0.05, rel_tol: float = 0.004) -> bool:
+    try:
+        x, y = float(a), float(b)
+    except (TypeError, ValueError):
+        return False
+    if x == 0 and y == 0:
+        return True
+    return abs(x - y) <= max(abs_tol, abs(x) * rel_tol, abs(y) * rel_tol)
+
+
+def _trade_is_closed_row(row: dict) -> bool:
+    """True when this is a finished round-trip (not a submit stub)."""
+    if row.get("broker_source"):
+        return True
+    status = str(row.get("status") or "").lower()
+    if "submitted" in status:
+        return False
+    exit_t = str(row.get("exit_time") or "").strip()
+    if exit_t and exit_t not in ("—", "-"):
+        return True
+    try:
+        return abs(float(row.get("pnl_usd") or 0)) > 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
+def _same_closed_roundtrip(a: dict, b: dict) -> bool:
+    """One economic close — ignore id / Alpaca-vs-matrix label differences."""
+    ta = str(a.get("ticker") or "").upper()
+    tb = str(b.get("ticker") or "").upper()
+    if not ta or ta != tb:
+        return False
+    if not (_trade_is_closed_row(a) and _trade_is_closed_row(b)):
+        # Submit stub vs closed: still match on ticker + entry print + qty.
+        pass
+    qa = abs(float(a.get("qty") or 0))
+    qb = abs(float(b.get("qty") or 0))
+    if qa > 0 and qb > 0 and not _nums_near(qa, qb, abs_tol=0.6, rel_tol=0.02):
+        return False
+    ea, eb = float(a.get("entry_price") or 0), float(b.get("entry_price") or 0)
+    if ea > 0 and eb > 0 and not _nums_near(ea, eb):
+        return False
+    xa, xb = float(a.get("exit_price") or 0), float(b.get("exit_price") or 0)
+    if xa > 0 and xb > 0 and not _nums_near(xa, xb):
+        return False
+    # Time: prefer exit match; else entry.
+    if _times_near(str(a.get("exit_time") or ""), str(b.get("exit_time") or "")):
+        return True
+    if _times_near(str(a.get("entry_time") or ""), str(b.get("entry_time") or "")):
+        return True
+    # Same broker order id on either leg.
+    for key in ("broker_order_id", "exit_order_id", "entry_order_id"):
+        oid_a = str(a.get(key) or "").strip()
+        oid_b = str(b.get(key) or "").strip()
+        if oid_a and oid_b and oid_a == oid_b:
+            return True
+    # Last resort: same ticker + same day P/L + qty when both closed.
+    if _trade_is_closed_row(a) and _trade_is_closed_row(b):
+        if qa > 0 and qb > 0 and _nums_near(qa, qb, abs_tol=0.6, rel_tol=0.02):
+            pa, pb = float(a.get("pnl_usd") or 0), float(b.get("pnl_usd") or 0)
+            if _nums_near(pa, pb, abs_tol=0.15, rel_tol=0.05):
+                return True
+    return False
+
+
+def _pick_better_field(old: str, new: str, *, placeholder_fn) -> str:
+    o, n = str(old or "").strip(), str(new or "").strip()
+    if n and not placeholder_fn(n):
+        return n
+    if o and not placeholder_fn(o):
+        return o
+    return n or o
+
+
+def _merge_trade_rows(base: dict, incoming: dict) -> dict:
+    """Collapse two views of the same fill into one canonical row."""
+    out = dict(base or {})
+    inc = dict(incoming or {})
+    # Identity: prefer broker fill id, keep aliases.
+    ids = []
+    for r in (out, inc):
+        rid = str(r.get("id") or "").strip()
+        if rid:
+            ids.append(rid)
+    aliases = set(out.get("id_aliases") or []) | set(inc.get("id_aliases") or [])
+    aliases.update(ids)
+    if any(i.startswith("alpaca-fill-") for i in ids):
+        out["id"] = next(i for i in ids if i.startswith("alpaca-fill-"))
+    elif ids:
+        out["id"] = ids[0]
+    out["id_aliases"] = sorted(aliases)[:12]
+
+    out["ticker"] = str(inc.get("ticker") or out.get("ticker") or "").upper()
+    out["timeframe"] = _pick_better_field(
+        str(out.get("timeframe") or ""),
+        str(inc.get("timeframe") or ""),
+        placeholder_fn=_is_placeholder_tf,
+    )
+    out["strategy"] = _pick_better_field(
+        str(out.get("strategy") or ""),
+        str(inc.get("strategy") or ""),
+        placeholder_fn=_is_placeholder_strat,
+    )
+    # Prefer closed broker economics when present.
+    for key in (
+        "entry_time",
+        "exit_time",
+        "entry_price",
+        "exit_price",
+        "pnl_usd",
+        "pnl_pct",
+        "qty",
+        "broker_order_id",
+        "entry_order_id",
+        "exit_order_id",
+        "broker_status",
+        "status",
+    ):
+        new_v, old_v = inc.get(key), out.get(key)
+        if new_v in (None, "", "—", "-"):
+            continue
+        if key in ("entry_price", "exit_price", "pnl_usd", "pnl_pct", "qty"):
+            try:
+                if abs(float(new_v)) > 0 or old_v in (None, "", "—"):
+                    out[key] = new_v
+            except (TypeError, ValueError):
+                out[key] = new_v
+        elif key in ("entry_time", "exit_time"):
+            if _is_placeholder_tf(str(old_v or "")) or not old_v:
+                out[key] = new_v
+            elif key == "exit_time" and _trade_is_closed_row(inc):
+                out[key] = new_v
+        else:
+            out[key] = new_v
+
+    if inc.get("broker_source") or out.get("broker_source"):
+        out["broker_source"] = True
+    if _trade_is_closed_row(inc) or _trade_is_closed_row(out):
+        if not str(out.get("status") or "").startswith("reviewed"):
+            out["status"] = str(
+                inc.get("status")
+                or out.get("status")
+                or ("closed · alpaca" if out.get("broker_source") else "closed")
+            )
+
+    # Human review wins.
+    if out.get("operator_vote") or inc.get("operator_vote"):
+        vote = inc.get("operator_vote") or out.get("operator_vote")
+        out["operator_vote"] = vote
+        out["reviewed"] = True
+        out["reviewed_at"] = inc.get("reviewed_at") or out.get("reviewed_at")
+    elif "reviewed" in inc and not out.get("operator_vote"):
+        out["reviewed"] = bool(inc.get("reviewed"))
+    return _enrich_trade_row_meta(out)
+
+
+def _find_matching_trade_index(hist: list, row: dict) -> int:
+    rid = str(row.get("id") or "").strip()
+    aliases = set(row.get("id_aliases") or [])
+    if rid:
+        aliases.add(rid)
+    for i, old in enumerate(hist):
+        oid = str(old.get("id") or "").strip()
+        old_aliases = set(old.get("id_aliases") or [])
+        if oid:
+            old_aliases.add(oid)
+        if aliases and old_aliases and aliases & old_aliases:
+            return i
+        for key in ("broker_order_id", "exit_order_id", "entry_order_id"):
+            a = str(row.get(key) or "").strip()
+            b = str(old.get(key) or "").strip()
+            if a and b and a == b:
+                return i
+        if _same_closed_roundtrip(old, row):
+            return i
+    return -1
+
+
+def _upsert_trade_history_row(row: dict) -> None:
+    """Insert or merge into today's log — one row per economic round-trip."""
+    hist = list(st.session_state.get("room3_trade_history") or [])
+    enriched = _enrich_trade_row_meta(dict(row or {}))
+    idx = _find_matching_trade_index(hist, enriched)
+    if idx >= 0:
+        hist[idx] = _merge_trade_rows(hist[idx], enriched)
+    else:
+        hist.insert(0, enriched)
+    st.session_state.room3_trade_history = _dedupe_trade_history(hist)[:200]
+
+
+def _dedupe_trade_history(hist: list | None = None) -> list:
+    """Collapse duplicate RFAI/Alpaca/matrix copies into one row each."""
+    rows = list(hist if hist is not None else (st.session_state.get("room3_trade_history") or []))
+    # Drop pure submit stubs when a closed twin exists for the same ticker/time.
+    closed = [r for r in rows if _trade_is_closed_row(r)]
+    stubs = [r for r in rows if not _trade_is_closed_row(r)]
+    kept_stubs = []
+    for stub in stubs:
+        if any(_same_closed_roundtrip(stub, c) or (
+            str(stub.get("ticker") or "").upper() == str(c.get("ticker") or "").upper()
+            and _times_near(str(stub.get("entry_time") or ""), str(c.get("entry_time") or ""), window_sec=300)
+        ) for c in closed):
+            # Fold stub meta into the closed row first.
+            for i, c in enumerate(closed):
+                if str(c.get("ticker") or "").upper() == str(stub.get("ticker") or "").upper() and (
+                    _same_closed_roundtrip(stub, c)
+                    or _times_near(str(stub.get("entry_time") or ""), str(c.get("entry_time") or ""), window_sec=300)
+                ):
+                    closed[i] = _merge_trade_rows(c, stub)
+                    break
+            continue
+        kept_stubs.append(stub)
+
+    canon: list[dict] = []
+    for row in closed + kept_stubs:
+        matched = False
+        for i, existing in enumerate(canon):
+            if _find_matching_trade_index([existing], row) == 0 or _same_closed_roundtrip(existing, row):
+                canon[i] = _merge_trade_rows(existing, row)
+                matched = True
+                break
+        if not matched:
+            canon.append(dict(row))
+    return canon
+
+
+def _remember_matrix_fill_meta(result: dict) -> None:
+    """Cache strategy/TF/order ids so broker closed rows inherit matrix labels."""
+    ticker = str(result.get("symbol") or "").upper()
+    if not ticker:
+        return
+    cache = dict(st.session_state.get("room3_fill_meta_by_ticker") or {})
+    entry = dict(cache.get(ticker) or {})
+    strat = str(result.get("strategy") or "").strip()
+    tf = str(result.get("timeframe") or "").strip()
+    if strat and not _is_placeholder_strat(strat):
+        entry["strategy"] = strat
+    if tf and not _is_placeholder_tf(tf):
+        entry["timeframe"] = tf
+    oid = str(result.get("order_id") or "").strip()
+    side = str(result.get("side") or "").lower()
+    if oid and side == "buy":
+        entry["entry_order_id"] = oid
+    if oid and side == "sell":
+        entry["exit_order_id"] = oid
+    entry["qty"] = abs(float(result.get("qty") or entry.get("qty") or 0))
+    entry["updated"] = datetime.now(ET).strftime("%H:%M:%S")
+    cache[ticker] = entry
+    st.session_state.room3_fill_meta_by_ticker = cache
+
+
+def _apply_cached_fill_meta(row: dict) -> dict:
+    out = dict(row or {})
+    ticker = str(out.get("ticker") or "").upper()
+    cache = (st.session_state.get("room3_fill_meta_by_ticker") or {}).get(ticker) or {}
+    if not cache:
+        return out
+    if _is_placeholder_strat(str(out.get("strategy") or "")) and cache.get("strategy"):
+        out["strategy"] = cache["strategy"]
+    if _is_placeholder_tf(str(out.get("timeframe") or "")) and cache.get("timeframe"):
+        out["timeframe"] = cache["timeframe"]
+    for key in ("entry_order_id", "exit_order_id"):
+        if cache.get(key) and not out.get(key):
+            out[key] = cache[key]
+    return out
+
+
 def _matrix_meta_for_ticker(ticker: str) -> tuple[str, str]:
     """Best TF + strategy from watch book / local history for a symbol."""
     sym = str(ticker or "").upper()
@@ -1202,6 +1496,12 @@ def _matrix_meta_for_ticker(ticker: str) -> tuple[str, str]:
         if tf and strat:
             break
     if not tf or not strat:
+        cached = (st.session_state.get("room3_fill_meta_by_ticker") or {}).get(sym) or {}
+        if not tf and cached.get("timeframe"):
+            tf = str(cached.get("timeframe") or "")
+        if not strat and cached.get("strategy"):
+            strat = str(cached.get("strategy") or "")
+    if not tf or not strat:
         for row in list(st.session_state.get("room3_trade_history") or []):
             if str(row.get("ticker") or "").upper() != sym:
                 continue
@@ -1220,11 +1520,11 @@ def _matrix_meta_for_ticker(ticker: str) -> tuple[str, str]:
 
 def _enrich_trade_row_meta(row: dict) -> dict:
     """Fill placeholder Alpaca strategy/TF from matrix context when possible."""
-    out = dict(row or {})
+    out = _apply_cached_fill_meta(dict(row or {}))
     cur_tf = str(out.get("timeframe") or "").strip()
     cur_s = str(out.get("strategy") or "").strip()
-    need_tf = cur_tf in _META_TF_PLACEHOLDER or cur_tf.upper().startswith("ALPACA")
-    need_s = cur_s in _META_STRAT_PLACEHOLDER or cur_s.upper().startswith("ALPACA")
+    need_tf = _is_placeholder_tf(cur_tf)
+    need_s = _is_placeholder_strat(cur_s)
     if not need_tf and not need_s:
         return out
     tf, strat = _matrix_meta_for_ticker(str(out.get("ticker") or ""))
@@ -1236,52 +1536,28 @@ def _enrich_trade_row_meta(row: dict) -> dict:
 
 
 def _merge_broker_closed_trades(closed: list) -> None:
-    """Upsert Alpaca closed fills; keep real matrix strategy/TF over placeholders."""
-    hist = list(st.session_state.get("room3_trade_history") or [])
-    by_id = {str(r.get("id") or ""): i for i, r in enumerate(hist) if r.get("id")}
+    """Upsert Alpaca closed fills into one canonical row per round-trip."""
     blocked = set(str(x) for x in (st.session_state.get("room3_review_block_ids") or []))
     for row in closed or []:
-        rid = str(row.get("id") or "")
         enriched = _enrich_trade_row_meta(row)
-        # Broker never counts as an operator review.
         enriched["reviewed"] = False
         enriched.pop("operator_vote", None)
         enriched.pop("reviewed_at", None)
-        if rid and rid in by_id:
-            old = hist[by_id[rid]]
-            merged = {**old, **enriched}
-            # Preserve a real human review; never re-fake one after Undo.
-            if rid in blocked or not old.get("operator_vote"):
-                merged["reviewed"] = False
-                merged.pop("operator_vote", None)
-                merged.pop("reviewed_at", None)
-            elif old.get("operator_vote"):
-                merged["reviewed"] = True
-                merged["operator_vote"] = old.get("operator_vote")
-                if old.get("reviewed_at"):
-                    merged["reviewed_at"] = old.get("reviewed_at")
-            old_s = str(old.get("strategy") or "").strip()
-            new_s = str(enriched.get("strategy") or "").strip()
-            if old_s and old_s not in _META_STRAT_PLACEHOLDER and (
-                new_s in _META_STRAT_PLACEHOLDER or new_s.upper().startswith("ALPACA")
-            ):
-                merged["strategy"] = old_s
-            old_tf = str(old.get("timeframe") or "").strip()
-            new_tf = str(enriched.get("timeframe") or "").strip()
-            if old_tf in ("1m", "5m", "15m") and new_tf in _META_TF_PLACEHOLDER:
-                merged["timeframe"] = old_tf
-            hist[by_id[rid]] = _enrich_trade_row_meta(merged)
-            continue
+        rid = str(enriched.get("id") or "")
         if rid and rid in blocked:
             enriched["reviewed"] = False
-        hist.insert(0, enriched)
-    # One-shot cleanup: broker rows that were wrongly stamped reviewed with no vote.
-    for i, r in enumerate(hist):
-        if r.get("broker_source") and r.get("reviewed") and not str(r.get("operator_vote") or "").strip():
-            row = dict(r)
-            row["reviewed"] = False
-            hist[i] = row
-    st.session_state.room3_trade_history = hist[:200]
+        # Preserve human vote if we already have this round-trip reviewed.
+        hist = list(st.session_state.get("room3_trade_history") or [])
+        idx = _find_matching_trade_index(hist, enriched)
+        if idx >= 0:
+            old = hist[idx]
+            if old.get("operator_vote") and rid not in blocked:
+                enriched["operator_vote"] = old.get("operator_vote")
+                enriched["reviewed"] = True
+                if old.get("reviewed_at"):
+                    enriched["reviewed_at"] = old.get("reviewed_at")
+        _upsert_trade_history_row(enriched)
+    st.session_state.room3_trade_history = _dedupe_trade_history()[:200]
 
 
 def _release_watch_book_queues() -> int:
@@ -1362,16 +1638,23 @@ def _record_operator_review(trade_id: str, vote: str) -> None:
     pending = list(st.session_state.room3_pending_reviews or [])
     trade = next((t for t in pending if str(t.get("id")) == str(trade_id)), None)
     if not trade:
+        # Allow reviewing a history row directly by id.
+        hist = list(st.session_state.room3_trade_history or [])
+        trade = next((t for t in hist if str(t.get("id")) == str(trade_id)), None)
+    if not trade:
         return
-    st.session_state.room3_pending_reviews = [t for t in pending if str(t.get("id")) != str(trade_id)]
+    st.session_state.room3_pending_reviews = [
+        t for t in pending if str(t.get("id")) != str(trade_id)
+    ]
     reviewed = dict(trade)
     reviewed["operator_vote"] = vote_clean
     reviewed["reviewed"] = True
     reviewed["reviewed_at"] = datetime.now(timezone.utc).isoformat()
-    st.session_state.room3_operator_reviews = list(st.session_state.room3_operator_reviews or []) + [reviewed]
-    hist = list(st.session_state.room3_trade_history or [])
-    hist.append(reviewed)
-    st.session_state.room3_trade_history = hist
+    st.session_state.room3_operator_reviews = list(
+        st.session_state.room3_operator_reviews or []
+    ) + [reviewed]
+    # Update the existing log row in place — never append a second copy.
+    _upsert_trade_history_row(reviewed)
 
     strat = str(trade.get("strategy") or "unknown")
     fb = dict(st.session_state.room3_strategy_feedback or {})
@@ -1787,29 +2070,25 @@ def _trade_widget_key(prefix: str, trade: dict, index: int = 0) -> str:
 
 def _render_trade_history() -> None:
     st.markdown("### Today's trade log")
-    pending = st.session_state.room3_pending_reviews or []
-    history = st.session_state.room3_trade_history or []
+    pending_ids = {
+        str(r.get("id") or "")
+        for r in (st.session_state.room3_pending_reviews or [])
+        if r.get("id")
+    }
+    # One list only — pending is a status, not a second copy of the trade.
+    history = _dedupe_trade_history()
+    st.session_state.room3_trade_history = history[:200]
     rows = []
-    for r in pending:
-        rows.append(
-            {
-                "Ticker": r.get("ticker"),
-                "TF": r.get("timeframe"),
-                "Strategy": r.get("strategy"),
-                "Entry": r.get("entry_time"),
-                "Exit": r.get("exit_time"),
-                "Entry $": f"{float(r.get('entry_price') or 0):.2f}",
-                "Exit $": f"{float(r.get('exit_price') or 0):.2f}",
-                "P/L $": _fmt_pl_usd(r.get("pnl_usd")),
-                "P/L %": _fmt_pl_pct(r.get("pnl_pct")),
-                "Status": "awaiting review",
-            }
-        )
     for r in history:
+        if not _trade_is_closed_row(r) and "closing" not in str(r.get("status") or "").lower():
+            continue
+        rid = str(r.get("id") or "")
         if r.get("broker_source"):
             status = str(r.get("status") or "closed · alpaca")
-        elif r.get("reviewed"):
+        elif r.get("reviewed") and r.get("operator_vote"):
             status = f"reviewed · {r.get('operator_vote', '—')}"
+        elif rid and rid in pending_ids:
+            status = "awaiting review"
         else:
             status = str(r.get("status") or "closed")
         rows.append(
@@ -2849,50 +3128,55 @@ def execute_matrix_signal(signal: dict) -> dict:
 
 
 def _log_alpaca_order_fill(result: dict) -> None:
-    """Append a paper fill into today's open book / trade log shape."""
-    now = datetime.now(ET).strftime("%H:%M:%S")
-    ticker = str(result.get("symbol") or "")
-    side = str(result.get("side") or "")
-    qty = float(result.get("qty") or 0)
+    """
+    Remember matrix strategy/TF for broker reconcile.
+    Do NOT insert submit stubs into Today's trade log — that caused triple rows
+    (buy submit + sell submit + alpaca closed) for one economic trade.
+    """
+    _remember_matrix_fill_meta(result)
+    side = str(result.get("side") or "").lower()
+    # Closed truth comes from Alpaca sync; on sell, seed one canonical closed row
+    # so the log shows matrix labels immediately even before FIFO rebuild.
+    if side != "sell":
+        return
+    ticker = str(result.get("symbol") or "").upper()
+    if not ticker:
+        return
     px = result.get("filled_avg_price")
-    entry_px = float(px) if px not in (None, "") else 0.0
+    exit_px = float(px) if px not in (None, "") else 0.0
+    qty = abs(float(result.get("qty") or 0))
     strat = str(result.get("strategy") or "").strip()
     tf = str(result.get("timeframe") or "").strip()
-    if not strat or strat in _META_STRAT_PLACEHOLDER or strat.upper().startswith("ALPACA"):
+    if _is_placeholder_strat(strat) or _is_placeholder_tf(tf):
         _tf, _st = _matrix_meta_for_ticker(ticker)
-        if _st:
-            strat = _st
-    if not tf or tf in _META_TF_PLACEHOLDER:
-        _tf, _st = _matrix_meta_for_ticker(ticker)
-        if _tf:
+        if _is_placeholder_tf(tf) and _tf:
             tf = _tf
+        if _is_placeholder_strat(strat) and _st:
+            strat = _st
+    now = datetime.now(ET).strftime("%H:%M:%S")
+    oid = str(result.get("order_id") or "").strip()
     row = {
-        "id": f"alpaca-ord-{result.get('order_id') or now}",
+        "id": f"alpaca-exit-{oid or now}",
         "ticker": ticker,
         "strategy": strat or "matrix",
-        "timeframe": tf or "—",
+        "timeframe": tf if not _is_placeholder_tf(tf) else "—",
         "entry_time": now,
-        "entry_price": entry_px,
-        "last_price": entry_px,
+        "exit_time": now,
+        "entry_price": exit_px,
+        "exit_price": exit_px,
         "pnl_usd": 0.0,
         "pnl_pct": 0.0,
-        "qty": qty if side == "buy" else -qty,
-        "broker_order_id": result.get("order_id"),
+        "qty": qty,
+        "broker_order_id": oid,
+        "exit_order_id": oid,
         "broker_status": result.get("status"),
+        "status": f"closing · {result.get('status')}",
+        "reviewed": False,
     }
-    # Buys / opens land in open positions via refresh; still stamp activity log
-    history = list(st.session_state.get("room3_trade_history") or [])
-    history.insert(
-        0,
-        {
-            **row,
-            "exit_time": "—",
-            "exit_price": entry_px,
-            "status": f"submitted · {result.get('status')}",
-            "operator_verdict": "",
-        },
-    )
-    st.session_state.room3_trade_history = history[:200]
+    cache = (st.session_state.get("room3_fill_meta_by_ticker") or {}).get(ticker) or {}
+    if cache.get("entry_order_id"):
+        row["entry_order_id"] = cache["entry_order_id"]
+    _upsert_trade_history_row(row)
 
 
 def _render_execution_posture(mode: str) -> None:
