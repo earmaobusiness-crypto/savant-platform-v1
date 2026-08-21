@@ -31,6 +31,12 @@ except ImportError:
 POLYGON_CALLS_PER_MINUTE = 5
 POLYGON_REST_DATA_EMPTY = "POLYGON REST DATA EMPTY"
 MASSIVE_PLAN_TIMEFRAME_BLOCKED = "MASSIVE PLAN TIMEFRAME BLOCKED"
+MASSIVE_OPERATOR_DAY_PENDING = "MASSIVE OPERATOR DAY PENDING"
+MASSIVE_SAME_DAY_WAIT_HINT = (
+    "Massive does not have this session's minute bars yet. "
+    "Do not use Yahoo for vault DNA. Wait until Massive catches up — "
+    "usually the next trading morning (after ~9:30 ET), then save again."
+)
 MASSIVE_API_BASE = "https://api.massive.com"
 MASSIVE_PUBLIC_HOST = "massive.com"
 MASSIVE_API_BASES = (MASSIVE_API_BASE,)
@@ -701,6 +707,38 @@ def _polygon_aggs_to_dataframe(results):
     return frame if not frame.empty else None
 
 
+def _session_calendar_dates(start_date, end_date) -> list:
+    start_text = _session_date_value(start_date)
+    end_text = _session_date_value(end_date) or start_text
+    if not start_text:
+        return []
+    try:
+        start_d = datetime.datetime.strptime(start_text, "%Y-%m-%d").date()
+        end_d = datetime.datetime.strptime(end_text, "%Y-%m-%d").date()
+    except ValueError:
+        return []
+    if end_d < start_d:
+        start_d, end_d = end_d, start_d
+    out = []
+    cur = start_d
+    while cur <= end_d:
+        out.append(cur)
+        cur += datetime.timedelta(days=1)
+    return out
+
+
+def _frame_session_dates(frame) -> set:
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return set()
+    try:
+        return {ts.date() for ts in frame.index.to_pydatetime()}
+    except Exception:
+        try:
+            return {pd.Timestamp(ts).date() for ts in frame.index}
+        except Exception:
+            return set()
+
+
 def resample_ohlcv_bars(frame_1m, rule: str):
     """Local Pandas resample — 1 API credit already spent on the 1m package."""
     frame = _ensure_dataframe(frame_1m)
@@ -744,6 +782,13 @@ def _resolve_track_from_1m(frame_1m, timeframe_resolution: str):
     return resample_ohlcv_bars(frame_1m, rule)
 
 
+def _operator_days_missing_from_frame(frame_1m, *, start_date, end_date) -> list:
+    """Calendar days in the operator window that Massive did not return."""
+    needed = set(_session_calendar_dates(start_date, end_date))
+    have = _frame_session_dates(frame_1m)
+    return sorted(needed - have)
+
+
 def get_room2_polygon_pipeline(
     ticker,
     *,
@@ -752,8 +797,9 @@ def get_room2_polygon_pipeline(
     timeframe_resolution: str = "15-Minute",
 ):
     """
-    Room 2 institutional datalink — one Polygon 1m macro-request per submission,
+    Room 2 institutional datalink — one Polygon/Massive 1m macro-request per submission,
     local resample to 5m/15m tracks, timezone stripped on ingest.
+    Never falls back to Yahoo for vault DNA.
     """
     ticker_clean = str(ticker).strip().upper()
     if not ticker_clean:
@@ -763,7 +809,7 @@ def get_room2_polygon_pipeline(
     fetch_start_date = _shift_session_date_backward(start_date, fetch_pad_days)
     cache_key = (
         f"{ticker_clean}|{_session_date_value(fetch_start_date)}"
-        f"|{_session_date_value(end_date)}|pad={fetch_pad_days}"
+        f"|{_session_date_value(end_date)}|pad={fetch_pad_days}|massive_only"
     )
     cached_key = st.session_state.get("r2_polygon_session_key")
     frame_1m = st.session_state.get("r2_polygon_1m_ram")
@@ -781,6 +827,15 @@ def get_room2_polygon_pipeline(
             return MASSIVE_PLAN_TIMEFRAME_BLOCKED
         if polygon_signal == POLYGON_REST_DATA_EMPTY or not polygon_bars:
             st.session_state.r2_micro_feed_source = DATA_FEED_POLYGON_1M
+            # Empty package on a very recent session → wait for Massive, do not Yahoo-fill.
+            missing = _operator_days_missing_from_frame(
+                None, start_date=start_date, end_date=end_date
+            )
+            if missing:
+                st.session_state.r2_market_data_error = (
+                    f"MASSIVE_DAY_PENDING|{_session_date_value(start_date)}"
+                )
+                return MASSIVE_OPERATOR_DAY_PENDING
             return POLYGON_REST_DATA_EMPTY
         frame_1m = _polygon_aggs_to_dataframe(polygon_bars)
         if not is_usable_data_stream(frame_1m):
@@ -789,6 +844,19 @@ def get_room2_polygon_pipeline(
         st.session_state.r2_polygon_1m_ram = frame_1m
         st.session_state.r2_polygon_session_key = cache_key
         st.session_state.r2_micro_feed_source = DATA_FEED_POLYGON_1M
+
+    missing_days = _operator_days_missing_from_frame(
+        frame_1m, start_date=start_date, end_date=end_date
+    )
+    if missing_days:
+        st.session_state.r2_market_data_error = (
+            "MASSIVE_DAY_PENDING|"
+            + ",".join(d.isoformat() for d in missing_days)
+        )
+        # Drop stale cache so the next try re-pulls Massive.
+        st.session_state.pop("r2_polygon_1m_ram", None)
+        st.session_state.pop("r2_polygon_session_key", None)
+        return MASSIVE_OPERATOR_DAY_PENDING
 
     track = _resolve_track_from_1m(frame_1m, timeframe_resolution)
     if not is_usable_data_stream(track):
@@ -2164,20 +2232,31 @@ def evaluate_playbook_quality_barrier(
         timeframe_resolution=timeframe_resolution,
     )
     net_margin_pct = round(structural_move_pct - friction_pct, 4)
-    passed = (
-        bool(timeframe_fit.get("passed"))
-        and rally_ok
-        and net_margin_pct >= floor_pct
-    )
     trash_reason = None
     if not timeframe_fit.get("passed"):
         trash_reason = timeframe_fit.get("message")
+    elif ignition_price is None or exit_price is None:
+        trash_reason = (
+            "OPERATOR_WINDOW_EMPTY|no Massive bars between Start and End "
+            "(wait for Massive — do not Yahoo-fill vault DNA)"
+        )
+        rally_ok = False
     elif not rally_ok:
         trash_reason = (
             f"ENDPOINT_WICK_REJECTED|start_low={operator_spike.get('start_bar_low')}|"
             f"end_high={operator_spike.get('end_bar_high')}|"
             "end_wick_not_above_start_wick"
         )
+    elif net_margin_pct < floor_pct:
+        trash_reason = (
+            f"NET_MARGIN_REJECTED|net={net_margin_pct}|floor={floor_pct}"
+        )
+    passed = (
+        bool(timeframe_fit.get("passed"))
+        and bool(ignition_price is not None and exit_price is not None)
+        and rally_ok
+        and net_margin_pct >= floor_pct
+    )
     quality = {
         "passed": passed,
         "trashed": not passed,
@@ -3815,7 +3894,13 @@ def _get_room2_polygon_pipeline_with_macro(
         end_date=end_date,
         timeframe_resolution=timeframe_resolution,
     )
-    if is_pipeline_signal(data_stream, "THROTTLE", POLYGON_REST_DATA_EMPTY):
+    if is_pipeline_signal(
+        data_stream,
+        "THROTTLE",
+        POLYGON_REST_DATA_EMPTY,
+        MASSIVE_PLAN_TIMEFRAME_BLOCKED,
+        MASSIVE_OPERATOR_DAY_PENDING,
+    ):
         return data_stream
 
     if not is_usable_data_stream(data_stream):
@@ -4953,7 +5038,9 @@ def _parse_session_datetime(date_val, time_str: str):
             date_str = date_val.strftime("%Y-%m-%d")
         else:
             date_str = str(date_val)[:10]
-        time_clean = str(time_str).strip().upper()
+        time_clean = re.sub(r"\s+", " ", str(time_str).strip().upper())
+        # Accept 02:20PM / 02:20pM as well as 02:20 PM
+        time_clean = re.sub(r"(?<=\d)(AM|PM)$", r" \1", time_clean)
         return datetime.datetime.strptime(f"{date_str} {time_clean}", "%Y-%m-%d %I:%M %p")
     except Exception:
         return None

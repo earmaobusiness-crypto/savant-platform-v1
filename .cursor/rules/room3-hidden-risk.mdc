@@ -11,7 +11,7 @@ When adding execution logic: put the rule on the execution posture / watch book,
 
 **Size:** Engine-internal. Trading today opens **50% 15m / 30% 5m / 20% 1m**; leftover from quiet TFs diverts to whatever is actually printing. A live 15m can add once. Do **not** dump this as a lecture on the operator screen.
 
-**Same day:** Checkboxes gate **new entries**. An open trade may continue pre → RTH → post. Flatten after ~8:00 ET (second-best exit in late post). Overnight flat.
+**Same day:** Checkboxes gate **new entries**. An open trade may ride into the next window only if that box is on (Post on → hold through post; Post off → flatten at RTH close and drop committed maps). Always flatten by ~8:00 ET (second-best exit in late post when Post was on). Overnight flat.
 
 **Orders:** Price off **Alpaca last**, not Yahoo close. Style is **per strategy**: pops (scalp/sniper/impulse, and unnamed 1m) → market; slower setups on any TF → limit. Outside RTH always limit. Kill / day-end flatten uses limit.
 

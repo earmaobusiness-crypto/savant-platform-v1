@@ -6615,6 +6615,18 @@ def _advance_room2_processor() -> str:
                         f"(e.g. {_session_date_label(_last_completed_equity_session_date())})."
                     )
                 )
+            if core_quantum.is_pipeline_signal(
+                data_stream, core_quantum.MASSIVE_OPERATOR_DAY_PENDING
+            ):
+                day_label = _session_date_label(start_date)
+                return _halt_room2_processor(
+                    fault_text=(
+                        f"⏳ WAIT — Massive does not have {ticker} minute bars for {day_label} yet. "
+                        f"{core_quantum.MASSIVE_SAME_DAY_WAIT_HINT} "
+                        "Your Start→End wick math stays the same; we will not substitute Yahoo "
+                        "into the vault."
+                    )
+                )
             if core_quantum.is_pipeline_signal(data_stream, core_quantum.POLYGON_REST_DATA_EMPTY):
                 api_err = str(st.session_state.get("r2_market_data_error") or "").strip()
                 if api_err.startswith("MASSIVE_TIMEOUT"):
@@ -6776,6 +6788,13 @@ def _advance_room2_processor() -> str:
                 net = quality.get("net_margin_pct", move_pct)
                 friction = quality.get("execution_friction_buffer_pct", 0.0)
                 reason = str(quality.get("trash_reason") or "")
+                if reason.startswith("OPERATOR_WINDOW_EMPTY"):
+                    return _halt_room2_processor_with_charts(
+                        fault_text=(
+                            "🗑️ PRE-STORAGE TRASH — No Massive bars inside Start→End. "
+                            f"{core_quantum.MASSIVE_SAME_DAY_WAIT_HINT}"
+                        )
+                    )
                 if reason.startswith("DOWN_STRUCTURE_REJECTED") or reason.startswith(
                     "ENDPOINT_WICK_REJECTED"
                 ):

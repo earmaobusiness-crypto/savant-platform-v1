@@ -168,7 +168,7 @@ def match_spatial(
 ) -> dict[str, Any]:
     best_cosine = 0.0
     second_cosine = 0.0
-    nearest = "NEW_LAYOUT"
+    nearest = "—"
     nearest_strategy = ""
     structural_move = 0.0
     best_ticker = ""
@@ -193,13 +193,20 @@ def match_spatial(
         if cos > best_cosine:
             second_cosine = best_cosine
             best_cosine = cos
-            nearest = str(entry.get("layout_id") or "LAYOUT")
+            nearest = str(entry.get("layout_id") or "—")
             nearest_strategy = str(entry.get("strategy") or "")
             structural_move = float(entry.get("structural_move_pct") or 0.0)
             best_ticker = str(entry.get("ticker") or "")
             best_tf = str(entry.get("timeframe_resolution") or entry_tf)
         elif cos > second_cosine:
             second_cosine = cos
+    # No positive hit → do not invent "NEW_LAYOUT" (Room 2 mint jargon). Show blank.
+    if best_cosine <= 0:
+        nearest = "—"
+        nearest_strategy = ""
+        structural_move = 0.0
+        best_ticker = ""
+        best_tf = ""
     return {
         "spatial_match_pct": int(round(best_cosine * 100)),
         "cosine_similarity": round(best_cosine, 4),
@@ -289,12 +296,31 @@ def _approaching_day_close() -> bool:
         return False
 
 
-def _ticker_already_engaged(book: dict[str, Any], ticker: str) -> bool:
+def _ticker_already_engaged(
+    book: dict[str, Any],
+    ticker: str,
+    *,
+    except_key: str = "",
+) -> bool:
+    """True if another line already owns this ticker (open or real entry queued).
+
+    Sticky watch also uses state=committed — that alone must NOT block the
+    line that is trying to stamp an entry, or ≥85% never fires.
+    """
     sym = str(ticker).upper()
-    for line in (book.get("lines") or {}).values():
+    for key, line in (book.get("lines") or {}).items():
+        if except_key and key == except_key:
+            continue
         if str(line.get("ticker") or "").upper() != sym:
             continue
-        if line.get("state") in ("in", "committed") or line.get("entry_signal"):
+        if line.get("state") == "in" or line.get("entry_signal"):
+            return True
+        # Real matrix commitment (sized/layout stamped), not sticky-only.
+        if line.get("state") == "committed" and (
+            line.get("entry_layout")
+            or line.get("entry_qty")
+            or line.get("entry_match_pct")
+        ):
             return True
     return False
 
@@ -906,7 +932,9 @@ def maybe_queue_matrix_signals(
         return
     line["patience"] = False
     line.pop("patience_note", None)
-    if _ticker_already_engaged(book, ticker):
+    if _ticker_already_engaged(
+        book, ticker, except_key=room3_watcher.line_key(ticker, tf)
+    ):
         return
 
     layout_id = str(match.get("nearest_layout_id") or "")

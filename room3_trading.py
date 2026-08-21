@@ -2774,9 +2774,10 @@ def _render_execution_posture(mode: str) -> None:
 
     st.markdown("#### Session filters (when engine may trade)")
     st.caption(
-        "Checkboxes = new entries only. An open trade can ride pre → market → post "
-        "the same calendar day. Flat by ~8:00 ET (if the best exit never prints, take "
-        "second-best in the last minutes of post). Nothing overnight."
+        "Checkboxes gate **new entries**. An open trade may ride into the **next** "
+        "window only if that window’s box is on (e.g. Post on → hold through post; "
+        "Post off → flatten at the RTH close and drop committed maps). "
+        "Always flat by ~8:00 ET. Nothing overnight."
     )
     allowed = set(st.session_state.get("room3_allowed_sessions") or [])
     f1, f2, f3 = st.columns(3)
@@ -3224,26 +3225,44 @@ def _has_intraday_risk() -> bool:
 
 def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
     """
-    Overnight flat: flatten only after the US session is fully closed (~8:00 ET).
-    Open trades may continue through post even if the Post checkbox is off.
+    Session flat gates:
+    - Post checkbox OFF + clock in post → flatten open + drop committed/in maps
+      (no ride into post when Post is off).
+    - After ~8:00 ET (SESSION_CLOSED) → overnight flat always.
+    - Post ON → open trades may ride RTH → post; still flatten overnight.
     """
     now = datetime.now(ET)
     window = room3_engine.detect_session_window()
-    if window != room3_engine.SESSION_CLOSED:
-        return ""
+    allowed = set(st.session_state.get("room3_allowed_sessions") or [])
     day_key = now.date().isoformat()
     if now.weekday() >= 5:
         day_key = f"{day_key}-we"
-    if st.session_state.get("room3_rth_end_flat_day") == day_key:
+
+    post_off = (
+        window == room3_engine.SESSION_POST
+        and room3_engine.SESSION_POST not in allowed
+    )
+    overnight = window == room3_engine.SESSION_CLOSED
+    if not post_off and not overnight:
+        return ""
+
+    marker_key = "room3_post_off_flat_day" if post_off else "room3_rth_end_flat_day"
+    marker_val = f"{day_key}-post-off" if post_off else day_key
+    if st.session_state.get(marker_key) == marker_val:
         _release_watch_book_queues()
         return ""
+
     released = _release_watch_book_queues()
     positions = list(st.session_state.get("room3_open_positions") or [])
     if not positions:
-        st.session_state.room3_rth_end_flat_day = day_key
+        st.session_state[marker_key] = marker_val
+        if overnight:
+            st.session_state.room3_rth_end_flat_day = day_key
         if released:
-            return f"Session end · released {released} stuck map line(s)"
+            label = "Post off · RTH close" if post_off else "Session end"
+            return f"{label} · released {released} stuck map line(s)"
         return ""
+
     ok_n = 0
     errs: list[str] = []
     for pos in positions:
@@ -3260,13 +3279,16 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
             errs.append(f"{sym}:{exc}")
     _sync_alpaca_account_into_session(paper=paper)
     remaining = list(st.session_state.get("room3_open_positions") or [])
-    if not remaining and not errs:
-        st.session_state.room3_rth_end_flat_day = day_key
-    elif not remaining and ok_n:
-        st.session_state.room3_rth_end_flat_day = day_key
+    if not remaining and (not errs or ok_n):
+        st.session_state[marker_key] = marker_val
+        if overnight:
+            st.session_state.room3_rth_end_flat_day = day_key
     bits = []
     if ok_n:
-        bits.append(f"day-end flatten {ok_n} (after 8:00 ET)")
+        if post_off:
+            bits.append(f"Post off · flattened {ok_n} at RTH close")
+        else:
+            bits.append(f"day-end flatten {ok_n} (after 8:00 ET)")
     if released:
         bits.append(f"released {released} stuck map line(s)")
     if errs:
@@ -3311,12 +3333,15 @@ def _room3_heartbeat_fragment() -> None:
     _apply_active_filter_universe()
     window = room3_engine.detect_session_window()
     new_ok = _session_trading_allowed()
+    allowed = set(st.session_state.get("room3_allowed_sessions") or [])
     intraday = window in (
         room3_engine.SESSION_PRE,
         room3_engine.SESSION_RTH,
         room3_engine.SESSION_POST,
     )
-    manage = bool(intraday and (new_ok or _has_intraday_risk()))
+    # Open risk may ride only into an *enabled* window (Post off ⇒ no post manage).
+    risk_continue = bool(_has_intraday_risk() and window in allowed)
+    manage = bool(intraday and (new_ok or risk_continue))
     book, signals = room3_watcher.tick_watcher(
         st.session_state.room3_watch_book,
         session_state=st.session_state,
