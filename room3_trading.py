@@ -1607,24 +1607,14 @@ def _kill_go_flat() -> str:
             except Exception as exc:
                 errs.append(f"{sym}:{exc}")
         _sync_alpaca_account_into_session(paper=paper)
-    released = _release_watch_book_queues()
-    ingest_filter_universe([])
-    st.session_state.room3_screener_last = {
-        "ok": True,
-        "tickers": [],
-        "passed": 0,
-        "pipeline": "kill",
-        "source": "kill",
-    }
-    _persist_screener_to_disk()
-    _sync_belt_query([])
+    wipe_note = _wipe_maps_and_belt()
+    # Never touch closed trade history — finished fills stay on the books.
     window = room3_engine.detect_session_window()
     bits = []
     if closed:
         bits.append(f"flatten submitted {closed}")
-    if released:
-        bits.append(f"cleared {released} stuck map line(s)")
-    bits.append("belt emptied")
+    if wipe_note:
+        bits.append(wipe_note)
     if window == room3_engine.SESSION_CLOSED:
         bits.append("overnight — a broker close only fills if Alpaca still has a book; otherwise it waits until 4:00 ET")
     if errs:
@@ -3246,7 +3236,7 @@ def _render_execution_posture(mode: str) -> None:
     st.caption(
         "Checkboxes gate **new entries**. An open trade may ride into the **next** "
         "window only if that window’s box is on (e.g. Post on → hold through post; "
-        "Post off → flatten at the RTH close and drop committed maps). "
+        "Post off → flatten at the RTH close, wipe maps, and clear the belt). "
         "Always flat by ~8:00 ET. Nothing overnight."
     )
     allowed = set(st.session_state.get("room3_allowed_sessions") or [])
@@ -3693,12 +3683,38 @@ def _has_intraday_risk() -> bool:
     return False
 
 
+def _wipe_maps_and_belt() -> str:
+    """Post-off / kill clean slate — belt + TF maps gone; broker positions handled separately."""
+    released = _release_watch_book_queues()
+    book = st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
+    n_lines = len(book.get("lines") or {})
+    st.session_state.room3_watch_book = room3_watcher.empty_book()
+    ingest_filter_universe([])
+    st.session_state.room3_screener_last = {
+        "ok": True,
+        "tickers": [],
+        "passed": 0,
+        "at": datetime.now(ET).strftime("%H:%M:%S ET"),
+        "pipeline": "session-flat",
+        "source": "post-off" if room3_engine.detect_session_window() == room3_engine.SESSION_POST else "session",
+    }
+    _persist_screener_to_disk()
+    _sync_belt_query([])
+    bits = []
+    if released:
+        bits.append(f"released {released} stuck map line(s)")
+    if n_lines:
+        bits.append(f"purged {n_lines} TF map(s)")
+    bits.append("belt cleared")
+    return " · ".join(bits)
+
+
 def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
     """
     Session flat gates:
-    - Post checkbox OFF + clock in post → flatten open + drop committed/in maps
-      (no ride into post when Post is off).
-    - After ~8:00 ET (SESSION_CLOSED) → overnight flat always.
+    - Post checkbox OFF + clock in post → flatten open + wipe maps + clear belt
+      (no ride into post when Post is off — clean evening slate).
+    - After ~8:00 ET (SESSION_CLOSED) → overnight flat always (same wipe).
     - Post ON → open trades may ride RTH → post; still flatten overnight.
     """
     now = datetime.now(ET)
@@ -3719,19 +3735,21 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
     marker_key = "room3_post_off_flat_day" if post_off else "room3_rth_end_flat_day"
     marker_val = f"{day_key}-post-off" if post_off else day_key
     if st.session_state.get(marker_key) == marker_val:
-        _release_watch_book_queues()
+        # Keep enforcing empty belt/maps if something reappeared.
+        belt = list(st.session_state.get("room3_filter_universe") or [])
+        lines = ((st.session_state.get("room3_watch_book") or {}).get("lines") or {})
+        if belt or lines:
+            return _wipe_maps_and_belt()
         return ""
 
-    released = _release_watch_book_queues()
+    wipe_note = _wipe_maps_and_belt()
     positions = list(st.session_state.get("room3_open_positions") or [])
     if not positions:
         st.session_state[marker_key] = marker_val
         if overnight:
             st.session_state.room3_rth_end_flat_day = day_key
-        if released:
-            label = "Post off · RTH close" if post_off else "Session end"
-            return f"{label} · released {released} stuck map line(s)"
-        return ""
+        label = "Post off · RTH close" if post_off else "Session end"
+        return f"{label} · {wipe_note}" if wipe_note else ""
 
     ok_n = 0
     errs: list[str] = []
@@ -3759,8 +3777,8 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
             bits.append(f"Post off · flattened {ok_n} at RTH close")
         else:
             bits.append(f"day-end flatten {ok_n} (after 8:00 ET)")
-    if released:
-        bits.append(f"released {released} stuck map line(s)")
+    if wipe_note:
+        bits.append(wipe_note)
     if errs:
         bits.append("flatten errors · " + "; ".join(errs[:3]))
     return " · ".join(bits)

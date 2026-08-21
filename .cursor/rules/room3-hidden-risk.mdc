@@ -11,10 +11,10 @@ When adding execution logic: put the rule on the execution posture / watch book,
 
 **Size:** Engine-internal. Trading today opens **50% 15m / 30% 5m / 20% 1m**; leftover from quiet TFs diverts to whatever is actually printing. Opening fill reservation is lean (~3/6/5 priors, capped under ~50 combined). At ≥85% match a ticket takes ~80% of its TF slot; watch-book Size $ shows that fire-ready amount while warming. A live 15m can add once. Do **not** dump this as a lecture on the operator screen.
 
-**Same day:** Checkboxes gate **new entries**. An open trade may ride into the next window only if that box is on (Post on → hold through post; Post off → flatten at RTH close and drop committed maps). Always flatten by ~8:00 ET (second-best exit in late post when Post was on). Overnight flat.
+**Same day:** Checkboxes gate **new entries**. Post on → open trades may hold through post. Post off → at RTH close: flatten opens, drop committed maps, **clear the belt** (clean slate for the evening). Always flatten by ~8:00 ET. Overnight flat.
+
+**Belt:** Drop **adds** names — they stay through the trading windows you enabled. Max **15**. × removes one; Clear wipes all. Post off at RTH close also clears the belt. Several names can be in at once. One ticker = one open position at a time (Alpaca is one pile of shares); after that exit it can fire again the same day.
 
 **Orders:** Price off **Alpaca last**, not Yahoo close. Style is **per strategy**: pops (scalp/sniper/impulse, and unnamed 1m) → market; slower setups on any TF → limit. Outside RTH always limit. Kill / day-end flatten uses limit.
 
-**Belt:** Drop **adds** names (they stay all day, including after an exit). Max **15**. × removes one; Clear wipes all. Several names can be in at once. One ticker = one open position at a time (Alpaca is one pile of shares); after that exit it can fire again the same day.
-
-**Kill:** FLAT disarms, drops committed queues, and flattens open paper positions.
+**Kill:** FLAT disarms, clears belt, drops committed queues, and flattens open paper positions.
