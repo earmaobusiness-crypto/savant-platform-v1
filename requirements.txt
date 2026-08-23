@@ -1,4 +1,6 @@
-streamlit>=1.32.0
+# Cap below 1.62 — that release replaced the BaseWeb date picker with React Aria
+# (weird Room 2 Start/End Date animation / commit behavior on Cloud).
+streamlit>=1.32.0,<1.62.0
 requests>=2.31.0
 pandas>=2.0.0
 groq
