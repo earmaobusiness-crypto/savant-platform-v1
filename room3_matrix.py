@@ -10,6 +10,7 @@ import math
 from typing import Any
 
 import room3_recipes
+import room3_review_learn
 
 MATCH_THRESHOLD_PCT = 85
 EXIT_MATCH_FLOOR_PCT = 65
@@ -874,7 +875,9 @@ def maybe_queue_matrix_signals(
         if exit_reason and not line.get("exit_signal"):
             qty = _open_qty(session_state, ticker)
             if qty <= 0:
-                qty = float(line.get("entry_qty") or 1.0)
+                qty = float(line.get("entry_qty") or 0)
+            if qty <= 0:
+                return
             strat = str(line.get("entry_strategy") or "matrix")
             room3_watcher.queue_exit_signal(
                 book,
@@ -951,11 +954,26 @@ def maybe_queue_matrix_signals(
 
     cur_match = int(match.get("spatial_match_pct") or 0)
     # Warm DNA but not full signal yet — keep mapping; stock may still fill the puzzle.
-    if cur_match < MATCH_THRESHOLD_PCT:
+    layout_for_floor = str(match.get("nearest_layout_id") or line.get("nearest_layout") or "")
+    strat_for_floor = str(match.get("nearest_strategy") or line.get("nearest_strategy") or "")
+    floor = float(MATCH_THRESHOLD_PCT)
+    try:
+        floor += float(
+            room3_review_learn.overlay_match_floor_delta(
+                session_state,
+                layout_for_floor,
+                strat_for_floor,
+                tf,
+            )
+        )
+    except Exception:
+        pass
+    floor = max(70.0, min(95.0, floor))
+    if cur_match < floor:
         if cur_match >= WARMING_MATCH_PCT:
             line["patience"] = True
             line["patience_note"] = (
-                f"warming {cur_match}% · need ≥{MATCH_THRESHOLD_PCT}% · "
+                f"warming {cur_match}% · need ≥{int(floor)}% · "
                 f"30s snaps continue"
             )
         else:

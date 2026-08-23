@@ -25,6 +25,7 @@ import room3_ibkr
 import room3_matrix
 import room3_screener
 import room3_watcher
+import room3_review_learn
 
 ROOM3_MODE_PAPER = "paper"
 ROOM3_MODE_LIVE = "live"
@@ -214,6 +215,11 @@ def init_room3_session_state() -> None:
         st.session_state.room3_decay_alerts = []
     if "room3_matrix_sync_log" not in st.session_state:
         st.session_state.room3_matrix_sync_log = []
+    if "room3_review_learn" not in st.session_state:
+        st.session_state.room3_review_learn = room3_review_learn.load_state()
+        room3_review_learn.sync_state_to_session(st.session_state, st.session_state.room3_review_learn)
+    if "room3_fill_meta_by_ticker" not in st.session_state:
+        st.session_state.room3_fill_meta_by_ticker = {}
     if "room3_archive_days" not in st.session_state:
         st.session_state.room3_archive_days = []
     if "room3_history_open_day" not in st.session_state:
@@ -923,7 +929,7 @@ def _trading_day_display(day_key: str) -> str:
 
 
 def _maybe_roll_trading_session() -> None:
-    """Reset intraday RAM when the trading day rolls (4 AM ET). Archive not wired yet."""
+    """Reset intraday RAM when the trading day rolls (4 AM ET). Archive closed trades first."""
     key = _trading_day_key()
     prev = str(st.session_state.room3_session_day_key or "")
     if not prev:
@@ -931,8 +937,8 @@ def _maybe_roll_trading_session() -> None:
         return
     if prev == key:
         return
+    _ensure_day_archived(prev)
     st.session_state.room3_session_day_key = key
-    # Archive current day later when IBKR hose is live; reset intraday RAM for new session.
     st.session_state.room3_open_positions = []
     st.session_state.room3_pending_reviews = []
     st.session_state.room3_trade_history = []
@@ -1349,6 +1355,16 @@ def _merge_trade_rows(base: dict, incoming: dict) -> dict:
         out["reviewed_at"] = inc.get("reviewed_at") or out.get("reviewed_at")
     elif "reviewed" in inc and not out.get("operator_vote"):
         out["reviewed"] = bool(inc.get("reviewed"))
+    for sticky, field, ph_fn in (
+        ("matrix_strategy", "strategy", _is_placeholder_strat),
+        ("matrix_timeframe", "timeframe", _is_placeholder_tf),
+    ):
+        for src in (out, inc):
+            val = str(src.get(sticky) or src.get(field) or "").strip()
+            if val and not ph_fn(val):
+                out[sticky] = val
+                out[field] = val
+                break
     return _enrich_trade_row_meta(out)
 
 
@@ -1423,7 +1439,7 @@ def _dedupe_trade_history(hist: list | None = None) -> list:
 
 
 def _remember_matrix_fill_meta(result: dict) -> None:
-    """Cache strategy/TF/order ids so broker closed rows inherit matrix labels."""
+    """Cache strategy/TF/layout/order ids so broker closed rows inherit matrix labels."""
     ticker = str(result.get("symbol") or "").upper()
     if not ticker:
         return
@@ -1431,10 +1447,40 @@ def _remember_matrix_fill_meta(result: dict) -> None:
     entry = dict(cache.get(ticker) or {})
     strat = str(result.get("strategy") or "").strip()
     tf = str(result.get("timeframe") or "").strip()
+    layout = str(
+        result.get("layout_id")
+        or result.get("entry_layout")
+        or result.get("nearest_layout_id")
+        or ""
+    ).strip()
     if strat and not _is_placeholder_strat(strat):
         entry["strategy"] = strat
     if tf and not _is_placeholder_tf(tf):
         entry["timeframe"] = tf
+    if layout and layout not in ("—", "-", "NEW_LAYOUT", "PURGATORY_PENDING"):
+        entry["layout_id"] = layout
+    # Fall back to watch-book stamps when the order payload omitted layout.
+    if not entry.get("layout_id") or not entry.get("strategy") or not entry.get("timeframe"):
+        book = st.session_state.get("room3_watch_book") or {}
+        for line in (book.get("lines") or {}).values():
+            if str(line.get("ticker") or "").upper() != ticker:
+                continue
+            if not entry.get("layout_id"):
+                cand = str(line.get("entry_layout") or line.get("nearest_layout") or "").strip()
+                if cand and cand not in ("—", "-", "NEW_LAYOUT", "PURGATORY_PENDING"):
+                    entry["layout_id"] = cand
+            if not entry.get("strategy"):
+                cand = str(
+                    line.get("entry_strategy") or line.get("nearest_strategy") or ""
+                ).strip()
+                if cand and not _is_placeholder_strat(cand):
+                    entry["strategy"] = cand
+            if not entry.get("timeframe"):
+                cand = str(line.get("timeframe") or "").strip()
+                if cand in ("1m", "5m", "15m"):
+                    entry["timeframe"] = cand
+            if entry.get("layout_id") and entry.get("strategy") and entry.get("timeframe"):
+                break
     oid = str(result.get("order_id") or "").strip()
     side = str(result.get("side") or "").lower()
     if oid and side == "buy":
@@ -1457,6 +1503,15 @@ def _apply_cached_fill_meta(row: dict) -> dict:
         out["strategy"] = cache["strategy"]
     if _is_placeholder_tf(str(out.get("timeframe") or "")) and cache.get("timeframe"):
         out["timeframe"] = cache["timeframe"]
+    if (
+        (
+            not str(out.get("layout_id") or out.get("matrix_layout") or "").strip()
+            or str(out.get("layout_id") or "").strip() in ("—", "-", "NEW_LAYOUT")
+        )
+        and cache.get("layout_id")
+    ):
+        out["layout_id"] = cache["layout_id"]
+        out["matrix_layout"] = cache["layout_id"]
     for key in ("entry_order_id", "exit_order_id"):
         if cache.get(key) and not out.get(key):
             out[key] = cache[key]
@@ -1523,16 +1578,57 @@ def _enrich_trade_row_meta(row: dict) -> dict:
     out = _apply_cached_fill_meta(dict(row or {}))
     cur_tf = str(out.get("timeframe") or "").strip()
     cur_s = str(out.get("strategy") or "").strip()
+    sticky_tf = str(out.get("matrix_timeframe") or "").strip()
+    sticky_s = str(out.get("matrix_strategy") or "").strip()
+    if sticky_tf and not _is_placeholder_tf(sticky_tf):
+        out["timeframe"] = sticky_tf
+    if sticky_s and not _is_placeholder_strat(sticky_s):
+        out["strategy"] = sticky_s
+    cur_tf = str(out.get("timeframe") or "").strip()
+    cur_s = str(out.get("strategy") or "").strip()
     need_tf = _is_placeholder_tf(cur_tf)
     need_s = _is_placeholder_strat(cur_s)
     if not need_tf and not need_s:
-        return out
+        return _stamp_matrix_labels_on_row(out)
     tf, strat = _matrix_meta_for_ticker(str(out.get("ticker") or ""))
     if need_tf and tf:
         out["timeframe"] = tf
     if need_s and strat:
         out["strategy"] = strat
+    return _stamp_matrix_labels_on_row(out)
+
+
+def _stamp_matrix_labels_on_row(row: dict) -> dict:
+    """Once we know real matrix labels, keep them — broker resync must not wipe them."""
+    out = dict(row or {})
+    for field, sticky, ph_fn in (
+        ("strategy", "matrix_strategy", _is_placeholder_strat),
+        ("timeframe", "matrix_timeframe", _is_placeholder_tf),
+        ("layout_id", "matrix_layout", lambda x: str(x or "").strip() in ("", "—", "-", "NEW_LAYOUT", "PURGATORY_PENDING")),
+    ):
+        sticky_val = str(out.get(sticky) or "").strip()
+        cur = str(out.get(field) or "").strip()
+        if sticky_val and not ph_fn(sticky_val):
+            out[field] = sticky_val
+        elif cur and not ph_fn(cur):
+            out[sticky] = cur
     return out
+
+
+def _display_trade_strategy(row: dict) -> str:
+    stamped = _stamp_matrix_labels_on_row(_enrich_trade_row_meta(dict(row or {})))
+    strat = str(stamped.get("matrix_strategy") or stamped.get("strategy") or "").strip()
+    if strat and not _is_placeholder_strat(strat):
+        return strat
+    return "—"
+
+
+def _display_trade_timeframe(row: dict) -> str:
+    stamped = _stamp_matrix_labels_on_row(_enrich_trade_row_meta(dict(row or {})))
+    tf = str(stamped.get("matrix_timeframe") or stamped.get("timeframe") or "").strip()
+    if tf and not _is_placeholder_tf(tf):
+        return tf
+    return "—"
 
 
 def _merge_broker_closed_trades(closed: list) -> None:
@@ -1568,21 +1664,107 @@ def _release_watch_book_queues() -> int:
     for line in lines.values():
         if not isinstance(line, dict):
             continue
-        dirty = False
-        if line.get("entry_signal") or line.get("exit_signal"):
-            line["entry_signal"] = None
-            line["exit_signal"] = None
-            dirty = True
-        if str(line.get("state") or "") in ("committed", "in"):
-            line["state"] = "watching"
-            dirty = True
-        if dirty:
-            line["patience"] = False
-            line.pop("patience_note", None)
-            line["scale_ins"] = 0
+        if str(line.get("state") or "") in ("committed", "in") or line.get("entry_signal") or line.get("exit_signal"):
+            _reset_line_to_watching(line)
             n += 1
     st.session_state.room3_watch_book = book
     return n
+
+
+_ENTRY_STAMP_KEYS = (
+    "entry_layout",
+    "entry_strategy",
+    "entry_price",
+    "entry_qty",
+    "entry_match_pct",
+    "entry_structural_move_pct",
+    "entry_order_id",
+)
+
+
+def _clear_line_entry_stamps(line: dict) -> None:
+    for k in _ENTRY_STAMP_KEYS:
+        line.pop(k, None)
+
+
+def _reset_line_to_watching(line: dict) -> None:
+    line["state"] = "watching"
+    line["sticky"] = False
+    line.pop("sticky_until", None)
+    line["entry_signal"] = None
+    line["exit_signal"] = None
+    line["patience"] = False
+    line.pop("patience_note", None)
+    line["scale_ins"] = 0
+    _clear_line_entry_stamps(line)
+
+
+def _broker_open_symbols() -> set[str]:
+    out: set[str] = set()
+    for pos in st.session_state.get("room3_open_positions") or []:
+        sym = str(pos.get("symbol") or pos.get("ticker") or "").upper()
+        try:
+            qty = abs(float(pos.get("qty") or 0))
+        except (TypeError, ValueError):
+            qty = 0.0
+        if sym and qty > 0:
+            out.add(sym)
+    return out
+
+
+def _reconcile_watch_book_with_broker() -> int:
+    """Demote phantom in lines when Alpaca is flat for that ticker."""
+    book = st.session_state.get("room3_watch_book") or {}
+    lines = book.get("lines") or {}
+    open_syms = _broker_open_symbols()
+    n = 0
+    for line in lines.values():
+        if not isinstance(line, dict):
+            continue
+        if str(line.get("state") or "") != "in":
+            continue
+        ticker = str(line.get("ticker") or "").upper()
+        if ticker and ticker in open_syms:
+            continue
+        _reset_line_to_watching(line)
+        n += 1
+    if n:
+        st.session_state.room3_watch_book = book
+    return n
+
+
+def _ensure_day_archived(day_key: str) -> None:
+    """Idempotent — closed trades land in Session history; never wipe without archiving."""
+    day_key = str(day_key or "").strip()
+    if not day_key:
+        return
+    for d in st.session_state.get("room3_archive_days") or []:
+        if str(d.get("date") or "") == day_key:
+            return
+    trades = [dict(r) for r in _dedupe_trade_history() if _trade_is_closed_row(r)]
+    if not trades:
+        return
+    stats = _session_pl_stats()
+    equity = float(stats.get("equity") or 0)
+    entry = {
+        "date": day_key,
+        "display": _trading_day_display(day_key),
+        "trade_count": len(trades),
+        "trades": trades,
+        "pl_usd": float(stats.get("day_pl") or 0),
+        "pl_pct": float(stats.get("day_pl_pct") or 0),
+        "wins": int(stats.get("wins") or 0),
+        "losses": int(stats.get("losses") or 0),
+        "win_rate": float(stats.get("win_rate") or 0),
+        "end_equity": equity if equity > 0 else None,
+    }
+    archive = list(st.session_state.get("room3_archive_days") or [])
+    archive.append(entry)
+    st.session_state.room3_archive_days = sorted(
+        archive, key=lambda d: str(d.get("date") or "")
+    )
+    _sync_equity_curve_with_today()
+    _persist_screener_to_disk()
 
 
 def _kill_go_flat() -> str:
@@ -1623,7 +1805,7 @@ def _kill_go_flat() -> str:
 
 
 def _record_operator_review(trade_id: str, vote: str) -> None:
-    """RAM-only — logs what would sync to matrix later."""
+    """Record operator vote locally; matrix DNA hose is dry-run until IBKR sync lands."""
     vote_clean = "good" if str(vote).lower().startswith("g") else "bad"
     pending = list(st.session_state.room3_pending_reviews or [])
     trade = next((t for t in pending if str(t.get("id")) == str(trade_id)), None)
@@ -1636,7 +1818,7 @@ def _record_operator_review(trade_id: str, vote: str) -> None:
     st.session_state.room3_pending_reviews = [
         t for t in pending if str(t.get("id")) != str(trade_id)
     ]
-    reviewed = dict(trade)
+    reviewed = _stamp_matrix_labels_on_row(_enrich_trade_row_meta(dict(trade)))
     reviewed["operator_vote"] = vote_clean
     reviewed["reviewed"] = True
     reviewed["reviewed_at"] = datetime.now(timezone.utc).isoformat()
@@ -1646,26 +1828,51 @@ def _record_operator_review(trade_id: str, vote: str) -> None:
     # Update the existing log row in place — never append a second copy.
     _upsert_trade_history_row(reviewed)
 
-    strat = str(trade.get("strategy") or "unknown")
+    strat = _display_trade_strategy(reviewed)
+    if strat in ("—", "-", ""):
+        strat = "unknown"
     fb = dict(st.session_state.room3_strategy_feedback or {})
     bucket = dict(fb.get(strat) or {"good": 0, "bad": 0})
     bucket[vote_clean] = int(bucket.get(vote_clean) or 0) + 1
     fb[strat] = bucket
     st.session_state.room3_strategy_feedback = fb
 
+    learn = room3_review_learn.process_operator_vote(
+        st.session_state,
+        reviewed,
+        vote_clean,
+    )
+    applied_n = len(learn.get("applied") or [])
+    pending_ready = sum(1 for p in (learn.get("pending") or []) if p.get("ready"))
     sync_line = (
-        f"[DRY-RUN] {trade.get('ticker')} · {strat} · operator={vote_clean} · "
-        "matrix sync skipped (hose not connected)"
+        f"[LEARN] {reviewed.get('ticker')} · {strat} · operator={vote_clean} · "
+        f"banked"
+        + (f" · DNA updated ×{applied_n} (snapshot kept for revert)" if applied_n else "")
+        + (f" · {pending_ready} pattern(s) near harden bar" if pending_ready and not applied_n else "")
     )
     log = list(st.session_state.room3_matrix_sync_log or [])
     log.append(sync_line)
-    st.session_state.room3_matrix_sync_log = log[-12:]
+    for a in learn.get("applied") or []:
+        if a.get("ok"):
+            log.append(
+                f"[DNA] {a.get('bucket_key')} · majority={a.get('majority')} · "
+                f"ver {a.get('version_id')} · revert-able"
+            )
+    st.session_state.room3_matrix_sync_log = log[-20:]
 
     alerts = list(st.session_state.room3_decay_alerts or [])
     if bucket.get("bad", 0) >= 2:
         alert = f"Alpha decay watch — {strat} marked bad {bucket['bad']}× today (local only)."
         if alert not in alerts:
             alerts.append(alert)
+    for a in learn.get("applied") or []:
+        if a.get("ok") and a.get("majority") == "bad":
+            alert = (
+                f"DNA trimmed · {a.get('bucket_key')} · ver {a.get('version_id')} "
+                f"(snapshot kept — revert from Strategy health)."
+            )
+            if alert not in alerts:
+                alerts.append(alert)
     st.session_state.room3_decay_alerts = alerts
 
 
@@ -1726,11 +1933,20 @@ def _undo_operator_review(trade_id: str) -> None:
         fb[strat] = bucket
         st.session_state.room3_strategy_feedback = fb
 
+    # Drop still-pending compile-pile rows for this vote (applied DNA stays until explicit revert).
+    learn_state = room3_review_learn.state_from_session(st.session_state)
+    dropped = room3_review_learn.remove_observations_for_trade(learn_state, trade_id)
+    room3_review_learn.save_state(learn_state)
+    room3_review_learn.sync_state_to_session(st.session_state, learn_state)
+
     log = list(st.session_state.room3_matrix_sync_log or [])
-    log.append(
+    undo_msg = (
         f"[UNDO] {match.get('ticker')} · {match.get('strategy')} · "
         f"vote '{old_vote}' reverted — back to pending"
     )
+    if dropped:
+        undo_msg += f" · dropped {dropped} pending learn obs"
+    log.append(undo_msg)
     st.session_state.room3_matrix_sync_log = log[-12:]
 
 
@@ -2084,8 +2300,8 @@ def _render_trade_history() -> None:
         rows.append(
             {
                 "Ticker": r.get("ticker"),
-                "TF": r.get("timeframe"),
-                "Strategy": r.get("strategy"),
+                "TF": _display_trade_timeframe(r),
+                "Strategy": _display_trade_strategy(r),
                 "Entry": r.get("entry_time"),
                 "Exit": r.get("exit_time"),
                 "Entry $": (
@@ -2656,6 +2872,44 @@ def _render_strategy_health_strip() -> None:
             "When filters scan and matrix signals fire, decay / weather-fit warnings land here. "
             "Your ✓/✗ votes feed that loop."
         )
+
+    learn_state = room3_review_learn.state_from_session(st.session_state)
+    pending = room3_review_learn.pending_pattern_stats(learn_state)
+    if pending:
+        bits = []
+        for p in pending[:6]:
+            bar = int(p.get("threshold") or 0)
+            cnt = int(p.get("count") or 0)
+            tf = p.get("timeframe") or "—"
+            label = p.get("trait") or p.get("strategy") or p.get("pattern_key")
+            mark = "READY" if p.get("ready") else f"{cnt}/{bar}"
+            bits.append(f"{label} · {tf} · {mark}")
+        st.caption("Compile pile · " + " · ".join(bits))
+    versions = [v for v in (learn_state.get("versions") or []) if not v.get("reverted")]
+    if versions:
+        with st.expander("DNA versions (revert)", expanded=False):
+            for v in reversed(versions[-8:]):
+                vid = str(v.get("id") or "")
+                label = (
+                    f"{v.get('bucket_key')} · {v.get('vote_majority')} · "
+                    f"{v.get('reason')} · {vid}"
+                )
+                c1, c2 = st.columns([4, 1])
+                with c1:
+                    st.caption(label)
+                with c2:
+                    if st.button("Revert", key=f"room3_revert_{vid}", use_container_width=True):
+                        res = room3_review_learn.revert_version(learn_state, st.session_state, vid)
+                        room3_review_learn.save_state(learn_state)
+                        room3_review_learn.sync_state_to_session(st.session_state, learn_state)
+                        log = list(st.session_state.room3_matrix_sync_log or [])
+                        log.append(
+                            f"[REVERT] {vid} · {res.get('bucket_key') or ''} · "
+                            + ("ok" if res.get("ok") else str(res.get("error") or "fail"))
+                        )
+                        st.session_state.room3_matrix_sync_log = log[-20:]
+                        st.rerun()
+
     sync_log = st.session_state.room3_matrix_sync_log or []
     if sync_log:
         with st.expander("Matrix sync log", expanded=False):
@@ -2665,7 +2919,10 @@ def _render_strategy_health_strip() -> None:
 
 def _render_operator_review_panel() -> None:
     st.markdown("### Operator review")
-    st.caption("System proposes · you confirm ✓ good or ✗ bad · feeds matrix learning.")
+    st.caption(
+        "System proposes · you confirm ✓ good or ✗ bad · votes save locally today; "
+        "votes bank first · DNA hardens only after TF bars (15m≥2 · 5m≥3 · 1m≥4) · prior DNA snapshotted for revert."
+    )
     pending = st.session_state.room3_pending_reviews or []
     if not pending:
         st.caption("No closed trades waiting for your vote.")
@@ -3057,6 +3314,7 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     st.session_state.room3_broker_day_pl_pct = float(result.get("day_pl_pct") or 0)
     st.session_state.room3_last_broker_sync = datetime.now(ET).strftime("%H:%M:%S ET")
     st.session_state.pop("room3_positions_pinned_empty", None)
+    _reconcile_watch_book_with_broker()
     return result
 
 
@@ -3404,6 +3662,28 @@ def _hydrate_screener_from_disk() -> None:
         return
     st.session_state.room3_screener_disk_hydrated = True
     snap = room3_screener.load_screener_snapshot()
+    arch = (snap.get("archive_days") or []) if snap else []
+    if isinstance(arch, list) and arch and not (st.session_state.get("room3_archive_days") or []):
+        st.session_state.room3_archive_days = arch
+    th = (snap.get("trade_history") or []) if snap else []
+    if isinstance(th, list) and th and not (st.session_state.get("room3_trade_history") or []):
+        st.session_state.room3_trade_history = _dedupe_trade_history(th)[:200]
+    meta = (snap.get("fill_meta_by_ticker") or {}) if snap else {}
+    if isinstance(meta, dict) and meta and not (st.session_state.get("room3_fill_meta_by_ticker") or {}):
+        st.session_state.room3_fill_meta_by_ticker = meta
+    fb = (snap.get("strategy_feedback") or {}) if snap else {}
+    if isinstance(fb, dict) and fb and not (st.session_state.get("room3_strategy_feedback") or {}):
+        st.session_state.room3_strategy_feedback = fb
+    op = (snap.get("operator_reviews") or []) if snap else []
+    if isinstance(op, list) and op and not (st.session_state.get("room3_operator_reviews") or []):
+        st.session_state.room3_operator_reviews = op
+    rl = (snap.get("review_learn") or {}) if snap else {}
+    if isinstance(rl, dict) and (rl.get("observations") or rl.get("versions")) and not (
+        (st.session_state.get("room3_review_learn") or {}).get("observations")
+        or (st.session_state.get("room3_review_learn") or {}).get("versions")
+    ):
+        st.session_state.room3_review_learn = rl
+        room3_review_learn.sync_state_to_session(st.session_state, rl)
     last = (snap.get("last") or {}) if snap else {}
     if last and not (st.session_state.get("room3_screener_last") or {}).get("tickers"):
         st.session_state.room3_screener_last = dict(last)
@@ -3455,6 +3735,12 @@ def _persist_screener_to_disk() -> None:
             "filter_slots": st.session_state.get("room3_filter_slots") or {},
             "filter_universe": st.session_state.get("room3_filter_universe") or [],
             "watch_book": st.session_state.get("room3_watch_book") or {},
+            "archive_days": st.session_state.get("room3_archive_days") or [],
+            "trade_history": _dedupe_trade_history()[:200],
+            "fill_meta_by_ticker": st.session_state.get("room3_fill_meta_by_ticker") or {},
+            "strategy_feedback": st.session_state.get("room3_strategy_feedback") or {},
+            "operator_reviews": st.session_state.get("room3_operator_reviews") or [],
+            "review_learn": st.session_state.get("room3_review_learn") or room3_review_learn.state_from_session(st.session_state),
             "last_hub": str(st.session_state.get("terminal_hub") or ""),
         }
     )
@@ -3685,6 +3971,7 @@ def _has_intraday_risk() -> bool:
 
 def _wipe_maps_and_belt() -> str:
     """Post-off / kill clean slate — belt + TF maps gone; broker positions handled separately."""
+    _ensure_day_archived(_trading_day_key())
     released = _release_watch_book_queues()
     book = st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
     n_lines = len(book.get("lines") or {})
@@ -3843,15 +4130,18 @@ def _room3_heartbeat_fragment() -> None:
         if str(sig.get("intent") or "") == "entry" and not new_ok:
             continue
         result = execute_matrix_signal(sig)
-        # Mark TF line if fill ok
-        if result.get("ok"):
-            key = room3_watcher.line_key(
-                str(sig.get("symbol") or ""),
-                str(sig.get("timeframe") or "1m"),
-            )
-            line = (st.session_state.room3_watch_book.get("lines") or {}).get(key)
-            if line:
-                if str(sig.get("intent")) == "entry":
+        key = room3_watcher.line_key(
+            str(sig.get("symbol") or ""),
+            str(sig.get("timeframe") or "1m"),
+        )
+        line = (st.session_state.room3_watch_book.get("lines") or {}).get(key)
+        if not line:
+            continue
+        sym = str(sig.get("symbol") or "").upper()
+        if str(sig.get("intent")) == "entry":
+            if result.get("ok"):
+                filled = float(result.get("filled_qty") or 0)
+                if filled > 0 or sym in _broker_open_symbols():
                     line["state"] = "in"
                     if not sig.get("scale_in"):
                         line["trades_today"] = int(line.get("trades_today") or 0) + 1
@@ -3860,9 +4150,14 @@ def _room3_heartbeat_fragment() -> None:
                             int(line.get("scale_ins") or 0),
                             1,
                         )
-                elif str(sig.get("intent")) == "exit":
-                    line["state"] = "watching"
-                    line["trades_today"] = int(line.get("trades_today") or 0) + 1
+                else:
+                    line["state"] = "committed"
+            else:
+                line["entry_signal"] = None
+                _clear_line_entry_stamps(line)
+        elif str(sig.get("intent")) == "exit" and result.get("ok"):
+            _reset_line_to_watching(line)
+            line["trades_today"] = int(line.get("trades_today") or 0) + 1
 
     _persist_screener_to_disk()
 
