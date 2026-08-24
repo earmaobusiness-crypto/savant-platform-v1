@@ -934,16 +934,15 @@ def _maybe_roll_trading_session() -> None:
     prev = str(st.session_state.room3_session_day_key or "")
     if not prev:
         st.session_state.room3_session_day_key = key
+        _rebuild_archive_from_history()
         return
     if prev == key:
         return
-    _ensure_day_archived(prev)
+    _rebuild_archive_from_history()
     st.session_state.room3_session_day_key = key
     st.session_state.room3_open_positions = []
     st.session_state.room3_pending_reviews = []
-    st.session_state.room3_trade_history = []
-    st.session_state.room3_operator_reviews = []
-    st.session_state.room3_strategy_feedback = {}
+    # Keep closed trade history + operator votes — All-time / Session history need them.
     st.session_state.room3_decay_alerts = []
     st.session_state.room3_broker_day_pl = None
     st.session_state.room3_broker_day_pl_pct = None
@@ -951,11 +950,11 @@ def _maybe_roll_trading_session() -> None:
     st.session_state.room3_watch_book = room3_watcher.purge_untouched_maps(
         st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
     )
-    st.session_state.room3_filter_universe = []
     st.session_state.pop("room3_tf_projection", None)
     log = list(st.session_state.room3_matrix_sync_log or [])
-    log.append(f"Session rolled · new trading day {key} (4 AM ET) · watch maps purged")
+    log.append(f"Session rolled · new trading day {key} (4 AM ET) · closed trades kept")
     st.session_state.room3_matrix_sync_log = log[-12:]
+    _persist_screener_to_disk()
 
 
 def _sync_equity_curve_with_today() -> None:
@@ -1004,6 +1003,7 @@ def _sync_equity_curve_with_today() -> None:
 
 
 def _all_time_stats() -> dict:
+    _rebuild_archive_from_history()
     _sync_equity_curve_with_today()
     start = float(st.session_state.room3_starting_equity or ROOM3_DEFAULT_EQUITY)
     curve = list(st.session_state.room3_equity_curve or [])
@@ -1021,9 +1021,14 @@ def _all_time_stats() -> dict:
     all_time_pl = current - start
     all_time_pct = (all_time_pl / start * 100.0) if start else 0.0
     archive = list(st.session_state.room3_archive_days or [])
-    today_trades = int(_session_pl_stats().get("trades_today") or 0)
+    today_key = _trading_day_key()
+    today_trades = [
+        r
+        for r in _dedupe_trade_history()
+        if _trade_is_closed_row(r) and _trade_session_date(r) == today_key
+    ]
     sessions = len(archive) + (1 if today_trades else 0)
-    total_trades = sum(int(d.get("trade_count") or 0) for d in archive) + today_trades
+    total_trades = sum(int(d.get("trade_count") or 0) for d in archive) + len(today_trades)
     session_pls = [
         float(p.get("day_pl") or 0)
         for p in curve
@@ -1044,6 +1049,7 @@ def _all_time_stats() -> dict:
         "avg_session_pl": avg_session,
         "session_win_rate": session_wr,
         "curve": curve,
+        "closed_trades": _all_closed_trades_chronological(),
     }
 
 
@@ -1055,8 +1061,13 @@ def _session_pl_stats() -> dict:
     # Always count unique closed rows after dedupe.
     history = _dedupe_trade_history()
     st.session_state.room3_trade_history = history[:200]
+    today_key = _trading_day_key()
     open_pl = sum(float(r.get("pnl_usd") or 0) for r in open_rows)
-    closed_rows = [r for r in history if _trade_is_closed_row(r)]
+    closed_rows = [
+        r
+        for r in history
+        if _trade_is_closed_row(r) and _trade_session_date(r) == today_key
+    ]
     closed_pl = sum(float(r.get("pnl_usd") or 0) for r in closed_rows)
     local_day_pl = open_pl + closed_pl
     broker_day = st.session_state.get("room3_broker_day_pl")
@@ -1226,6 +1237,134 @@ def _trade_is_closed_row(row: dict) -> bool:
         return abs(float(row.get("pnl_usd") or 0)) > 1e-9
     except (TypeError, ValueError):
         return False
+
+
+def _trade_session_date(row: dict) -> str:
+    """Trading-day key (YYYY-MM-DD, 4 AM ET roll) for a closed or open trade row."""
+    explicit = str(row.get("session_date") or row.get("date") or "").strip()[:10]
+    if len(explicit) == 10 and explicit[4:5] == "-" and explicit[7:8] == "-":
+        return explicit
+    for key in ("exit_at", "filled_at", "timestamp", "closed_at"):
+        raw = str(row.get(key) or "").strip()
+        if len(raw) >= 10 and raw[4:5] == "-":
+            try:
+                ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=ET)
+                else:
+                    ts = ts.astimezone(ET)
+                if ts.hour < ROOM3_SESSION_ROLL_HOUR_ET:
+                    ts = ts - timedelta(days=1)
+                return ts.strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+    return _trading_day_key()
+
+
+def _all_closed_trades_chronological() -> list[dict]:
+    """Archive trades + today's closed rows, oldest first, deduped."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for day in sorted(
+        list(st.session_state.get("room3_archive_days") or []),
+        key=lambda d: str(d.get("date") or ""),
+    ):
+        for trade in day.get("trades") or []:
+            if not isinstance(trade, dict):
+                continue
+            stamped = dict(trade)
+            stamped.setdefault("session_date", str(day.get("date") or ""))
+            rid = str(stamped.get("id") or "")
+            key = rid or (
+                f"{stamped.get('ticker')}|{stamped.get('exit_time')}|"
+                f"{stamped.get('pnl_usd')}|{stamped.get('session_date')}"
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(stamped)
+    for row in _dedupe_trade_history():
+        if not _trade_is_closed_row(row):
+            continue
+        stamped = dict(row)
+        stamped["session_date"] = _trade_session_date(stamped)
+        rid = str(stamped.get("id") or "")
+        key = rid or (
+            f"{stamped.get('ticker')}|{stamped.get('exit_time')}|"
+            f"{stamped.get('pnl_usd')}|{stamped.get('session_date')}"
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(stamped)
+    out.sort(
+        key=lambda r: (
+            str(r.get("session_date") or ""),
+            str(r.get("exit_time") or ""),
+            str(r.get("ticker") or ""),
+        )
+    )
+    return out
+
+
+def _archive_entry_from_trades(day_key: str, trades: list[dict]) -> dict:
+    wins = sum(1 for r in trades if float(r.get("pnl_usd") or 0) > 0)
+    losses = sum(1 for r in trades if float(r.get("pnl_usd") or 0) < 0)
+    decided = wins + losses
+    pl_usd = round(sum(float(r.get("pnl_usd") or 0) for r in trades), 2)
+    equity = float(st.session_state.get("room3_account_equity") or ROOM3_DEFAULT_EQUITY)
+    pl_pct = (pl_usd / equity * 100.0) if equity > 0 else 0.0
+    return {
+        "date": day_key,
+        "display": _trading_day_display(day_key),
+        "trade_count": len(trades),
+        "trades": trades,
+        "pl_usd": pl_usd,
+        "pl_pct": round(pl_pct, 4),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": (wins / decided * 100.0) if decided else 0.0,
+        "end_equity": None,
+    }
+
+
+def _rebuild_archive_from_history() -> None:
+    """Upsert Session history from closed rows so Friday stays after day roll / Cloud refresh."""
+    today = _trading_day_key()
+    by_day: dict[str, list[dict]] = {}
+    for row in _dedupe_trade_history():
+        if not _trade_is_closed_row(row):
+            continue
+        dk = _trade_session_date(row)
+        if not dk or dk == today:
+            continue
+        stamped = dict(row)
+        stamped["session_date"] = dk
+        by_day.setdefault(dk, []).append(stamped)
+
+    existing = {
+        str(d.get("date") or ""): dict(d)
+        for d in (st.session_state.get("room3_archive_days") or [])
+        if isinstance(d, dict) and str(d.get("date") or "")
+    }
+    for dk, trades in by_day.items():
+        prior = existing.get(dk) or {}
+        entry = _archive_entry_from_trades(dk, trades)
+        if prior.get("end_equity") is not None:
+            entry["end_equity"] = prior.get("end_equity")
+        existing[dk] = entry
+
+    # Keep prior archive days that still have trades even if history briefly empty.
+    for dk, row in list(existing.items()):
+        if dk == today:
+            existing.pop(dk, None)
+            continue
+        if dk not in by_day and not (row.get("trades") or []):
+            existing.pop(dk, None)
+
+    st.session_state.room3_archive_days = sorted(
+        existing.values(), key=lambda d: str(d.get("date") or "")
+    )
 
 
 def _same_closed_roundtrip(a: dict, b: dict) -> bool:
@@ -1632,10 +1771,12 @@ def _display_trade_timeframe(row: dict) -> str:
 
 
 def _merge_broker_closed_trades(closed: list) -> None:
-    """Upsert Alpaca closed fills into one canonical row per round-trip."""
+    """Upsert Alpaca closed fills into one canonical row per round-trip (lookback days)."""
     blocked = set(str(x) for x in (st.session_state.get("room3_review_block_ids") or []))
     for row in closed or []:
         enriched = _enrich_trade_row_meta(row)
+        if not enriched.get("session_date"):
+            enriched["session_date"] = _trade_session_date(enriched)
         enriched["reviewed"] = False
         enriched.pop("operator_vote", None)
         enriched.pop("reviewed_at", None)
@@ -1652,8 +1793,12 @@ def _merge_broker_closed_trades(closed: list) -> None:
                 enriched["reviewed"] = True
                 if old.get("reviewed_at"):
                     enriched["reviewed_at"] = old.get("reviewed_at")
+            if old.get("session_date") and not enriched.get("session_date"):
+                enriched["session_date"] = old.get("session_date")
         _upsert_trade_history_row(enriched)
     st.session_state.room3_trade_history = _dedupe_trade_history()[:200]
+    _rebuild_archive_from_history()
+    _persist_screener_to_disk()
 
 
 def _release_watch_book_queues() -> int:
@@ -1738,31 +1883,35 @@ def _ensure_day_archived(day_key: str) -> None:
     day_key = str(day_key or "").strip()
     if not day_key:
         return
-    for d in st.session_state.get("room3_archive_days") or []:
-        if str(d.get("date") or "") == day_key:
-            return
-    trades = [dict(r) for r in _dedupe_trade_history() if _trade_is_closed_row(r)]
+    trades = [
+        dict(r)
+        for r in _dedupe_trade_history()
+        if _trade_is_closed_row(r) and _trade_session_date(r) == day_key
+    ]
     if not trades:
+        _rebuild_archive_from_history()
         return
-    stats = _session_pl_stats()
-    equity = float(stats.get("equity") or 0)
-    entry = {
-        "date": day_key,
-        "display": _trading_day_display(day_key),
-        "trade_count": len(trades),
-        "trades": trades,
-        "pl_usd": float(stats.get("day_pl") or 0),
-        "pl_pct": float(stats.get("day_pl_pct") or 0),
-        "wins": int(stats.get("wins") or 0),
-        "losses": int(stats.get("losses") or 0),
-        "win_rate": float(stats.get("win_rate") or 0),
-        "end_equity": equity if equity > 0 else None,
-    }
-    archive = list(st.session_state.get("room3_archive_days") or [])
+    entry = _archive_entry_from_trades(day_key, trades)
+    archive = [
+        dict(d)
+        for d in (st.session_state.get("room3_archive_days") or [])
+        if str(d.get("date") or "") != day_key
+    ]
+    prior = next(
+        (
+            d
+            for d in (st.session_state.get("room3_archive_days") or [])
+            if str(d.get("date") or "") == day_key
+        ),
+        None,
+    )
+    if isinstance(prior, dict) and prior.get("end_equity") is not None:
+        entry["end_equity"] = prior.get("end_equity")
     archive.append(entry)
     st.session_state.room3_archive_days = sorted(
         archive, key=lambda d: str(d.get("date") or "")
     )
+    _rebuild_archive_from_history()
     _sync_equity_curve_with_today()
     _persist_screener_to_disk()
 
@@ -2282,10 +2431,13 @@ def _render_trade_history() -> None:
         if r.get("id")
     }
     # One list only — pending is a status, not a second copy of the trade.
+    today_key = _trading_day_key()
     history = _dedupe_trade_history()
     st.session_state.room3_trade_history = history[:200]
     rows = []
     for r in history:
+        if _trade_session_date(r) != today_key:
+            continue
         if not _trade_is_closed_row(r) and "closing" not in str(r.get("status") or "").lower():
             continue
         rid = str(r.get("id") or "")
@@ -2331,7 +2483,7 @@ def _render_trade_history() -> None:
             if sync_meta.get("error"):
                 detail += f" · {sync_meta.get('error')}"
         st.caption(
-            "Log empty — closed Alpaca fills should land here after Refresh from Alpaca."
+            "Log empty for today — prior-session fills live under All-time / Session history."
             + detail
         )
         return
@@ -2341,7 +2493,8 @@ def _render_trade_history() -> None:
         st.caption(
             f"Broker closed sync · {sync_meta.get('at') or '—'} · "
             f"session {sync_meta.get('session_day') or '—'} · "
-            f"{sync_meta.get('closed_count', 0)} closed from "
+            f"{sync_meta.get('today_closed_count', sync_meta.get('closed_count', 0))} today / "
+            f"{sync_meta.get('closed_count', 0)} lookback from "
             f"{sync_meta.get('fill_events', 0)} fills"
         )
 
@@ -2684,6 +2837,7 @@ def _render_all_time_panel() -> None:
     """Hidden all-time readout — collective P/L vs bankroll, risk, expectancy."""
     at = _all_time_stats()
     start = float(at["start"])
+    closed = list(at.get("closed_trades") or [])
     _render_metric_tiles(
         [
             {
@@ -2731,9 +2885,29 @@ def _render_all_time_panel() -> None:
         grid_class="room3-metric-grid-2",
     )
     st.caption(
-        f"Collective P/L = current account − starting bankroll "
-        f"(${start:,.2f}). Not today’s P/L."
+        f"Live tiles (not props) · Collective P/L = current account − starting bankroll "
+        f"(${start:,.2f}). Trades come from Alpaca lookback + Session history."
     )
+    if closed:
+        table_rows = [
+            {
+                "Date": str(r.get("session_date") or "—"),
+                "Ticker": r.get("ticker"),
+                "TF": _display_trade_timeframe(r),
+                "Strategy": _display_trade_strategy(r),
+                "P/L $": _fmt_pl_usd(r.get("pnl_usd")),
+                "P/L %": _fmt_pl_pct(r.get("pnl_pct")),
+                "Exit": r.get("exit_time") or "—",
+            }
+            for r in closed
+        ]
+        st.markdown("**Closed trades (all sessions)**")
+        _render_dark_table(table_rows)
+    else:
+        st.caption(
+            "No closed trades restored yet — Refresh from Alpaca should pull Friday+ "
+            "fills from the lookback window."
+        )
     _render_equity_trajectory_chart(at, height=360)
 
 
@@ -3299,13 +3473,14 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     # Open = still open at broker. Flat account ⇒ empty open table.
     st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(paper=paper) or []
     _stamp_position_timeframes()
-    # Closed today stays in the log even after the position is gone (manual EH included).
+    # Closed fills across lookback (Friday+) stay in history / Session history.
     dbg = room3_alpaca.fetch_closed_trades_today_debug(paper=paper)
     closed = dbg.get("closed") or []
     _merge_broker_closed_trades(closed)
     st.session_state.room3_broker_closed_sync = {
         "fill_events": int(dbg.get("fill_events") or 0),
         "closed_count": int(dbg.get("closed_count") or 0),
+        "today_closed_count": int(dbg.get("today_closed_count") or 0),
         "error": str(dbg.get("error") or ""),
         "session_day": str(dbg.get("session_day") or ""),
         "at": datetime.now(ET).strftime("%H:%M:%S ET"),
@@ -3668,6 +3843,7 @@ def _hydrate_screener_from_disk() -> None:
     th = (snap.get("trade_history") or []) if snap else []
     if isinstance(th, list) and th and not (st.session_state.get("room3_trade_history") or []):
         st.session_state.room3_trade_history = _dedupe_trade_history(th)[:200]
+    _rebuild_archive_from_history()
     meta = (snap.get("fill_meta_by_ticker") or {}) if snap else {}
     if isinstance(meta, dict) and meta and not (st.session_state.get("room3_fill_meta_by_ticker") or {}):
         st.session_state.room3_fill_meta_by_ticker = meta

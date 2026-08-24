@@ -374,7 +374,6 @@ def _parse_alpaca_ts(raw: Any) -> datetime | None:
 
 
 def _closed_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    session_day = _et_trading_day()
     lots: dict[str, list[dict[str, Any]]] = {}
     closed: list[dict[str, Any]] = []
     for ev in events:
@@ -406,8 +405,9 @@ def _closed_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 remain -= take
                 if float(lot["qty"]) <= 1e-9:
                     book.pop(0)
-            if entry_qty_acc <= 0 or _et_trading_day(ts) != session_day:
+            if entry_qty_acc <= 0:
                 continue
+            close_day = _et_trading_day(ts).isoformat()
             avg_entry = entry_px_acc / entry_qty_acc
             pnl = (px - avg_entry) * entry_qty_acc
             pnl_pct = ((px - avg_entry) / avg_entry * 100.0) if avg_entry else 0.0
@@ -429,6 +429,7 @@ def _closed_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "broker_source": True,
                     "exit_order_id": oid,
                     "broker_order_id": oid,
+                    "session_date": close_day,
                 }
             )
         except Exception:
@@ -574,22 +575,36 @@ def _fetch_fill_events(paper: bool = True) -> tuple[list[dict[str, Any]], str]:
     return events, err
 
 
-def fetch_closed_trades_today(paper: bool = True) -> list[dict[str, Any]]:
-    """Rebuild this trading day's closed round-trips from Alpaca fills (manual EH included)."""
+def fetch_closed_trades_lookback(paper: bool = True) -> list[dict[str, Any]]:
+    """Closed round-trips in the fill lookback (prior sessions included)."""
     events, _err = _fetch_fill_events(paper=paper)
     return _closed_from_events(events)
+
+
+def fetch_closed_trades_today(paper: bool = True) -> list[dict[str, Any]]:
+    """This trading day's closed round-trips only."""
+    today = _et_trading_day().isoformat()
+    return [
+        row
+        for row in fetch_closed_trades_lookback(paper=paper)
+        if str(row.get("session_date") or "") == today
+    ]
 
 
 def fetch_closed_trades_today_debug(paper: bool = True) -> dict[str, Any]:
     """Closed trades plus sync diagnostics for the Room 3 refresh caption."""
     events, err = _fetch_fill_events(paper=paper)
     closed = _closed_from_events(events)
+    today = _et_trading_day().isoformat()
+    today_closed = [row for row in closed if str(row.get("session_date") or "") == today]
     return {
         "closed": closed,
+        "today_closed": today_closed,
         "fill_events": len(events),
         "closed_count": len(closed),
+        "today_closed_count": len(today_closed),
         "error": err,
-        "session_day": _et_trading_day().isoformat(),
+        "session_day": today,
     }
 
 
