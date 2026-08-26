@@ -1,0 +1,27 @@
+---
+description: Room 3 session watch — timer wakes must become real Cloud checks + day-log notes
+alwaysApply: true
+---
+
+# Room 3 — keep-tabs watch (hard)
+
+When the operator asks to **keep tabs / check every N minutes / watch the belt / session observe**, or when a wake arrives as `AGENT_LOOP_TICK_room3_*` / similar:
+
+## Non-negotiable each tick
+1. **Open the operator’s Cloud Room 3 URL** (prefer the last `?hub=3&belt=...` they gave). Not local Streamlit unless they said local.
+2. **Read for real:** belt names, arm/DISARMED, gates/session window, heartbeat, open positions, day P/L, today’s trade log, watch-book lines (Match%, Layout, Strategy, state, Size$ if shown).
+3. **Append** a timestamped block to `room3_data/day_logs/YYYY-MM-DD.md` (ET date) — even if “quiet / still DISARMED / no ≥85%.” Empty silence is a failure.
+4. **Observe only** unless they explicitly ask to Arm/Kill/order. Do not invent Match% you did not see.
+5. Reply briefly in chat when a tick was processed (what changed vs last note, anything alarming).
+
+## Forbidden
+- Treating “loop armed” / `sleep` started as the job.
+- Ignoring timer wakes because the chat is idle or another topic is open.
+- Claiming you watched the day without mid-session day-log entries.
+- Skipping a tick because “nothing probably happened.”
+
+## End of window
+When the agreed end time passes (e.g. 1:30 ET): one final snapshot + day-log EOD, then **stop** the loop. Do not leave orphan timers.
+
+## Honesty
+If a tick fails (Cloud load, lock, blank session), write that failure in the day log. Do not pretend the cadence ran.
