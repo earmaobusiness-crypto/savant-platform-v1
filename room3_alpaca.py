@@ -714,6 +714,7 @@ def place_market_order(
     ref_price: float | None = None,
     extended_hours: bool | None = None,
     prefer_limit: bool = False,
+    slip_pct: float | None = None,
 ) -> dict[str, Any]:
     """
     Submit equity order.
@@ -755,7 +756,10 @@ def place_market_order(
                         "Retry, or wait for regular hours."
                     ),
                 }
-            slip = 0.012 if use_eh else 0.0015
+            if slip_pct is not None:
+                slip = max(0.0, float(slip_pct))
+            else:
+                slip = 0.012 if use_eh else 0.0015
             if side_l == "buy":
                 limit_px = round(px * (1.0 + slip), 2)
             else:
@@ -807,19 +811,58 @@ def place_market_order(
         return {"ok": False, "error": str(exc).strip() or type(exc).__name__}
 
 
+def cancel_open_orders_for_symbol(symbol: str, *, paper: bool = True) -> int:
+    """Drop working orders on one ticker so a flatten retry can replace them."""
+    ticker = str(symbol or "").strip().upper()
+    if not ticker:
+        return 0
+    n = 0
+    try:
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        client = _trading_client(paper=paper)
+        orders = (
+            client.get_orders(
+                GetOrdersRequest(
+                    status=QueryOrderStatus.OPEN,
+                    symbols=[ticker],
+                    limit=50,
+                )
+            )
+            or []
+        )
+        for order in orders:
+            oid = getattr(order, "id", None)
+            if not oid:
+                continue
+            try:
+                client.cancel_order_by_id(oid)
+                n += 1
+            except Exception:
+                continue
+    except Exception:
+        return n
+    return n
+
+
 def close_position_now(
     symbol: str,
     *,
     paper: bool = True,
     qty: float | None = None,
+    aggressive: bool = False,
 ) -> dict[str, Any]:
     """
     Flatten one symbol. Outside RTH uses EH limit (dashboard 'X / liquidate'
     often queues a market order until 9:30).
+    Session-end flatten: cancel working orders first, then a wider EH limit.
     """
     ticker = str(symbol or "").strip().upper()
     if not ticker:
         return {"ok": False, "error": "Ticker required."}
+    if aggressive:
+        cancel_open_orders_for_symbol(ticker, paper=paper)
     try:
         client = _trading_client(paper=paper)
         pos = client.get_open_position(ticker)
@@ -835,6 +878,14 @@ def close_position_now(
     # Long → sell; short → buy
     side = "sell" if raw_qty > 0 else "buy"
     ref = float(getattr(pos, "current_price", 0) or 0) or None
+    # Post/overnight books are thin — 1.2% under last often never prints.
+    slip = 0.06 if aggressive else None
     return place_market_order(
-        ticker, side, shares, paper=paper, ref_price=ref, prefer_limit=True
+        ticker,
+        side,
+        shares,
+        paper=paper,
+        ref_price=ref,
+        prefer_limit=True,
+        slip_pct=slip,
     )

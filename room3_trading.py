@@ -1995,6 +1995,11 @@ def _broker_open_symbols() -> set[str]:
 
 def _reconcile_watch_book_with_broker() -> int:
     """Broker truth: drop phantom ins; mark real leftover shares as in (not ready-to-fire)."""
+    if _session_must_be_flat():
+        # Post off / overnight — leftover piles stay on the open-position table
+        # until flatten fills. Do not rebuild "1m is in" maps.
+        st.session_state.room3_watch_book = room3_watcher.empty_book()
+        return 0
     book = st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
     lines = book.setdefault("lines", {})
     open_syms = _broker_open_symbols()
@@ -2106,7 +2111,7 @@ def _kill_go_flat() -> str:
             if not sym:
                 continue
             try:
-                result = room3_alpaca.close_position_now(sym, paper=paper)
+                result = room3_alpaca.close_position_now(sym, paper=paper, aggressive=True)
                 if result.get("ok"):
                     closed += 1
                 else:
@@ -2550,7 +2555,7 @@ def _render_open_positions() -> None:
                     sym = str(r.get("ticker") or "").upper()
                     if not sym:
                         continue
-                    results.append(room3_alpaca.close_position_now(sym, paper=paper))
+                    results.append(room3_alpaca.close_position_now(sym, paper=paper, aggressive=True))
                 _sync_alpaca_account_into_session(paper=paper)
                 ok_n = sum(1 for x in results if x.get("ok"))
                 err = next((x.get("error") for x in results if not x.get("ok")), "")
@@ -4010,6 +4015,9 @@ def ingest_filter_slot(slot: str, tickers: list[str] | None) -> None:
 
 def _apply_active_filter_universe() -> list[str]:
     # Manual belt is sticky. Session checkboxes gate *trades*, not which names stay mapped.
+    if _session_must_be_flat():
+        ingest_filter_universe([])
+        return []
     if not room3_screener.BUILTIN_SCREENER_ENABLED:
         pasted = list(st.session_state.get("room3_filter_universe") or [])
         if not pasted:
@@ -4284,6 +4292,18 @@ def _session_trading_allowed() -> bool:
     return window in allowed
 
 
+def _session_must_be_flat() -> bool:
+    """Post off after 16:00, or overnight — no maps, no new risk, flatten leftovers."""
+    window = room3_engine.detect_session_window()
+    if window == room3_engine.SESSION_CLOSED:
+        return True
+    allowed = set(st.session_state.get("room3_allowed_sessions") or [])
+    return (
+        window == room3_engine.SESSION_POST
+        and room3_engine.SESSION_POST not in allowed
+    )
+
+
 def _any_session_enabled() -> bool:
     allowed = set(st.session_state.get("room3_allowed_sessions") or [])
     return bool(
@@ -4403,7 +4423,9 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
 
     marker_key = "room3_post_off_flat_day" if post_off else "room3_rth_end_flat_day"
     marker_val = f"{day_key}-post-off" if post_off else day_key
-    if st.session_state.get(marker_key) == marker_val:
+    positions = list(st.session_state.get("room3_open_positions") or [])
+    already = st.session_state.get(marker_key) == marker_val
+    if already and not positions:
         # Keep enforcing empty belt/maps if something reappeared.
         belt = list(st.session_state.get("room3_filter_universe") or [])
         lines = ((st.session_state.get("room3_watch_book") or {}).get("lines") or {})
@@ -4427,7 +4449,7 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
         if not sym:
             continue
         try:
-            result = room3_alpaca.close_position_now(sym, paper=paper)
+            result = room3_alpaca.close_position_now(sym, paper=paper, aggressive=True)
             if result.get("ok"):
                 ok_n += 1
             else:
@@ -4435,7 +4457,19 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
         except Exception as exc:
             errs.append(f"{sym}:{exc}")
     _sync_alpaca_account_into_session(paper=paper)
+    # Sync rebuilds leftover maps for names still open — kill them while Post is off.
+    if _session_must_be_flat():
+        extra_wipe = _wipe_maps_and_belt()
+        if extra_wipe and extra_wipe not in (wipe_note or ""):
+            wipe_note = f"{wipe_note} · {extra_wipe}" if wipe_note else extra_wipe
     remaining = list(st.session_state.get("room3_open_positions") or [])
+    if remaining:
+        still = ", ".join(
+            str(p.get("ticker") or p.get("symbol") or "").upper()
+            for p in remaining
+            if str(p.get("ticker") or p.get("symbol") or "").strip()
+        )
+        errs.append(f"still open {still} (EH retrying)")
     if not remaining and (not errs or ok_n):
         st.session_state[marker_key] = marker_val
         if overnight:
@@ -4489,6 +4523,9 @@ def _room3_heartbeat_fragment() -> None:
         flat_note = _maybe_flatten_when_rth_ends(paper=paper)
         if flat_note:
             st.session_state.room3_last_session_flat_note = flat_note
+        if _session_must_be_flat():
+            st.session_state.room3_watch_book = room3_watcher.empty_book()
+            ingest_filter_universe([])
 
     _apply_active_filter_universe()
     window = room3_engine.detect_session_window()
