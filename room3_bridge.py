@@ -20,7 +20,7 @@ from typing import Any
 
 import requests
 
-REPERTOIRE_CACHE_TTL_SEC = 900  # refresh vault library every 15 min max
+REPERTOIRE_CACHE_TTL_SEC = 45
 
 ROOM2_OBSERVE_KEYS = (
     "layout_master_matrix_index",
@@ -232,10 +232,8 @@ def _layout_entry(
             strategy=strategy,
             timeframe_resolution=timeframe_resolution,
         ) or _normalize_tf(timeframe_resolution or strategy)
-        mint_n = int(room3_recipes.STRATEGY_MINT_MIN_SAVES)
     except Exception:
         tf_norm = _normalize_tf(timeframe_resolution or strategy)
-        mint_n = 3
     bkey = bucket_key or f"{layout_id}|{strategy}|{tf_norm}"
     entry = {
         "layout_id": layout_id,
@@ -248,13 +246,7 @@ def _layout_entry(
         "strategy": str(strategy or ""),
         "pattern_count": int(pattern_count or 0),
         "vector_source": source or "unknown",
-        # A bucket we already built a vector for is matchable. Envelopes are
-        # Room 2 DNA; only skip trip-size (those never become a bucket).
-        "tradeable": bool(
-            int(pattern_count or 0) >= mint_n
-            and str(source or "") in ("vault_genetic", "vault_envelopes", "session")
-            and bool(vector)
-        ),
+        "tradeable": bool(vector),
     }
     try:
         import room3_recipes
@@ -373,7 +365,8 @@ def _layouts_from_session_vectors(session_state: Any) -> list[dict[str, Any]]:
             timeframe_resolution=str(entry.get("timeframe_resolution") or ""),
             structural_move_pct=float(entry.get("structural_move_pct") or 0.0),
             strategy=str(entry.get("execution_strategy") or entry.get("strategy") or ""),
-            source="session",
+            pattern_count=int(entry.get("pattern_count") or 0),
+            source=str(entry.get("vector_source") or "session"),
         )
         if row:
             out.append(row)

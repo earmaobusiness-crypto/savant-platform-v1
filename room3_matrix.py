@@ -183,20 +183,13 @@ def match_spatial(
         for e in (layouts or [])
         if (e.get("vector") or []) and len(e.get("vector") or []) == len(snapshot_vec)
     ]
-    # Hard TF gate + live strategies only (purgatory / trip-size proxy do not fire).
     usable: list[dict[str, Any]] = []
     for e in dim_ok:
-        if not e.get("tradeable", True):
-            continue
-        try:
-            if int(e.get("pattern_count") or 0) < int(room3_recipes.STRATEGY_MINT_MIN_SAVES):
-                continue
-        except (TypeError, ValueError):
-            continue
         entry_tf = _layout_dna_tf(e)
         if watch_tf and entry_tf and entry_tf != watch_tf:
             continue
-        if watch_tf and not entry_tf:
+        strat = str(e.get("strategy") or e.get("execution_strategy") or "")
+        if watch_tf and strat and not room3_recipes.strategy_tf_agrees(strat, watch_tf):
             continue
         usable.append(e)
     weights = _wallpaper_weights(usable, len(snapshot_vec))
@@ -823,15 +816,7 @@ def maybe_queue_matrix_signals(
         nearest_strat = strategy_for_layout(layout_id, repertoire, timeframe=tf)
     if nearest_strat and not room3_recipes.strategy_tf_agrees(nearest_strat, tf):
         nearest_strat = "—"
-        layout_id = "—"
-        line["nearest_layout"] = layout_id
-        match = {
-            **match,
-            "nearest_layout_id": "—",
-            "nearest_strategy": "",
-            "spatial_match_pct": 0,
-        }
-        line["match_pct"] = 0
+        # Keep Match% / layout. Wrong-TF letter must not fire; do not blank the score.
     line["nearest_strategy"] = nearest_strat or "—"
     line["score"] = float(match.get("display_score") or 0)
     line["second_cosine"] = float(match.get("second_cosine") or 0)
