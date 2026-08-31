@@ -608,6 +608,61 @@ def fetch_closed_trades_today_debug(paper: bool = True) -> dict[str, Any]:
     }
 
 
+def fetch_today_1m_bars(ticker: str, *, paper: bool = True):
+    """Same-session 1m OHLCV from Alpaca (IEX). None if the symbol has no tape."""
+    sym = str(ticker or "").strip().upper()
+    if not sym:
+        return None
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+    except Exception:
+        return None
+    try:
+        creds = load_alpaca_credentials(paper=paper)
+        if not creds.get("key") or not creds.get("secret"):
+            return None
+        data = StockHistoricalDataClient(creds["key"], creds["secret"])
+        start = datetime.now(ZoneInfo("America/New_York")).replace(
+            hour=4, minute=0, second=0, microsecond=0
+        )
+        req = StockBarsRequest(
+            symbol_or_symbols=sym,
+            timeframe=TimeFrame.Minute,
+            start=start,
+            limit=1500,
+        )
+        bars = data.get_stock_bars(req)
+        frame = getattr(bars, "df", None)
+        if frame is None or getattr(frame, "empty", True):
+            return None
+        if getattr(frame.index, "nlevels", 1) > 1:
+            try:
+                frame = frame.xs(sym, level=0)
+            except Exception:
+                frame = frame.droplevel(0)
+        rename = {
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume",
+        }
+        frame = frame.rename(columns={k: v for k, v in rename.items() if k in frame.columns})
+        need = ("Open", "High", "Low", "Close")
+        if any(c not in frame.columns for c in need):
+            return None
+        keep = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in frame.columns]
+        frame = frame[keep].copy()
+        idx = frame.index
+        if getattr(idx, "tz", None) is not None:
+            frame.index = idx.tz_convert(ZoneInfo("America/New_York")).tz_localize(None)
+        return frame if not frame.empty else None
+    except Exception:
+        return None
+
+
 def fetch_latest_price(symbol: str, *, paper: bool = True) -> float | None:
     """Best-effort last price for EH limit orders (trade → position → None)."""
     ticker = str(symbol or "").strip().upper()

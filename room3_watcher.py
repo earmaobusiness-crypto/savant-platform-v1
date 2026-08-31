@@ -383,9 +383,10 @@ def _seed_line_from_history(
         if rows is None:
             rows, source = room3_precursor.live_bar_rows(ticker, tf, bars_keep=keep)
         if not rows:
-            line["seeded"] = True
+            line["seeded"] = False
             line["seed_bars"] = 0
             line["feed"] = source or "yahoo"
+            line["last_error"] = "no tape · Yahoo/Massive/Alpaca empty"
             return 0
         added = 0
         prev_c = None
@@ -416,6 +417,7 @@ def _seed_line_from_history(
         line["seed_bars"] = added
         line["recipe_bars_keep"] = keep
         line["feed"] = source or "yahoo"
+        line["last_error"] = ""
         return added
     except Exception as exc:
         line["seeded"] = True
@@ -865,6 +867,7 @@ def tick_watcher(
         if trade_ok
         else "maps on · arm engine to trade"
     )
+    book["engine_armed"] = bool(trade_ok)
     pulse_note = ", ".join(
         f"{tf}@{int(tf_plans[tf].get('pulse_seconds') or 60)}s"
         for tf in TIMEFRAMES
@@ -963,11 +966,16 @@ def _why_not_firing(line: dict[str, Any], book: dict[str, Any] | None = None) ->
         if match >= STICKY_MIN_MATCH_PCT:
             return f"warming {match}% · {seat} is in"
         return f"scanning · {seat} is in"
-    note = str(line.get("patience_note") or line.get("last_error") or "").strip()
+    if not (line.get("slices") or []):
+        err = str(line.get("last_error") or "").strip()
+        return (err or "no tape · retrying")[:48]
+    note = str(line.get("patience_note") or "").strip()
     if note:
         return note[:48]
     if match >= room3_matrix.MATCH_THRESHOLD_PCT:
-        return "≥85% · ready · arm to fire"
+        if book and book.get("engine_armed"):
+            return "≥85% · firing"
+        return "≥85% · ready · Arm is OFF — flip Arm to send"
     if match >= STICKY_MIN_MATCH_PCT:
         return f"warming {match}% · need ≥{room3_matrix.MATCH_THRESHOLD_PCT}%"
     return "scanning"

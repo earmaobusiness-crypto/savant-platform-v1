@@ -41,6 +41,7 @@ _BARS: dict[str, Any] = {}
 _MASSIVE_LAST = 0.0
 _FEED_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix="r3feed")
 _LIVE_YF_TTL = 14.0
+_LIVE_EMPTY_TTL = 20.0
 _MASSIVE_LIVE_TICKER_TTL = 900.0
 _LIVE_1M: dict[str, dict[str, Any]] = {}
 _MASSIVE_LIVE_TICKER: dict[str, float] = {}
@@ -560,13 +561,33 @@ def _yahoo_1m_live(ticker: str):
             prepost=True,
         )
         if hist is None or getattr(hist, "empty", True):
+            hist = yf.Ticker(ticker).history(
+                period="5d",
+                interval="1m",
+                auto_adjust=True,
+                prepost=True,
+            )
+        if hist is None or getattr(hist, "empty", True):
             return None
         return _to_et_naive(hist)
 
     try:
-        return _FEED_POOL.submit(_pull).result(timeout=10)
+        return _FEED_POOL.submit(_pull).result(timeout=12)
     except Exception:
         return None
+
+
+def _alpaca_1m_live(ticker: str):
+    def _pull():
+        import room3_alpaca
+
+        return room3_alpaca.fetch_today_1m_bars(ticker, paper=True)
+
+    try:
+        frame = _FEED_POOL.submit(_pull).result(timeout=10)
+    except Exception:
+        return None
+    return _to_et_naive(frame)
 
 
 def _massive_live_ok(ticker: str) -> bool:
@@ -626,8 +647,12 @@ def _massive_today_1m(ticker: str):
 def _live_1m_cached(ticker: str, *, allow_massive: bool) -> tuple[Any, str]:
     now = _time.monotonic()
     hit = _LIVE_1M.get(ticker)
-    if isinstance(hit, dict) and (now - float(hit.get("t") or 0)) < _LIVE_YF_TTL:
-        return hit.get("frame"), str(hit.get("source") or "yahoo")
+    if isinstance(hit, dict):
+        age = now - float(hit.get("t") or 0)
+        empty = _frame_empty(hit.get("frame"))
+        ttl = _LIVE_EMPTY_TTL if empty else _LIVE_YF_TTL
+        if age < ttl:
+            return hit.get("frame"), str(hit.get("source") or "yahoo")
     frame = _yahoo_1m_live(ticker)
     source = "yahoo"
     if _frame_empty(frame) and allow_massive and _massive_live_ok(ticker):
@@ -635,6 +660,11 @@ def _live_1m_cached(ticker: str, *, allow_massive: bool) -> tuple[Any, str]:
         if not _frame_empty(ms):
             frame = ms
             source = "massive"
+    if _frame_empty(frame):
+        ap = _alpaca_1m_live(ticker)
+        if not _frame_empty(ap):
+            frame = ap
+            source = "alpaca"
     _LIVE_1M[ticker] = {"t": now, "frame": frame, "source": source}
     return frame, source
 
