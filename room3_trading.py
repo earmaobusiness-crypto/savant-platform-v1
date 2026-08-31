@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets as py_secrets
+import time
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
@@ -4360,16 +4361,20 @@ def _room3_screener_fragment() -> None:
         st.caption(f"Screener error · {result.get('error')}")
 
 
-@st.fragment(run_every=timedelta(seconds=30))
+@st.fragment(run_every=timedelta(seconds=15))
 def _room3_heartbeat_fragment() -> None:
-    """Unattended pulse — broker truth + watcher eyes."""
+    """Unattended pulse — broker truth + watcher eyes (per-letter cadence inside)."""
     if not _broker_is_connected():
         st.caption("Heartbeat idle · broker disconnected")
         return
     mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
     if str(st.session_state.get("room3_broker") or "") == "alpaca":
+        last = float(st.session_state.get("room3_alpaca_sync_mono") or 0)
+        if time.monotonic() - last >= 30:
+            paper = mode != ROOM3_MODE_LIVE
+            _sync_alpaca_account_into_session(paper=paper)
+            st.session_state.room3_alpaca_sync_mono = time.monotonic()
         paper = mode != ROOM3_MODE_LIVE
-        _sync_alpaca_account_into_session(paper=paper)
         flat_note = _maybe_flatten_when_rth_ends(paper=paper)
         if flat_note:
             st.session_state.room3_last_session_flat_note = flat_note
@@ -4386,13 +4391,17 @@ def _room3_heartbeat_fragment() -> None:
     # Open risk may ride only into an *enabled* window (Post off ⇒ no post manage).
     risk_continue = bool(_has_intraday_risk() and window in allowed)
     manage = bool(intraday and (new_ok or risk_continue))
-    book, signals = room3_watcher.tick_watcher(
-        st.session_state.room3_watch_book,
-        session_state=st.session_state,
-        session_allowed=manage,
-        engine_armed=bool(st.session_state.get("room3_engine_armed")),
-        entries_allowed=new_ok,
-    )
+    try:
+        book, signals = room3_watcher.tick_watcher(
+            st.session_state.room3_watch_book,
+            session_state=st.session_state,
+            session_allowed=manage,
+            engine_armed=bool(st.session_state.get("room3_engine_armed")),
+            entries_allowed=new_ok,
+        )
+    except Exception as exc:
+        st.caption(f"Heartbeat error · {type(exc).__name__}: {exc}")
+        return
     st.session_state.room3_watch_book = book
 
     for sig in signals:

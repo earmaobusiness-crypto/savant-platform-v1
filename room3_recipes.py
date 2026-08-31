@@ -181,6 +181,12 @@ def recipe_for(
     lookback = max(5, min(cap, lookback))
     bars = minutes_to_bars(tf, lookback)
 
+    cadence = cadence_for(
+        strat,
+        tf,
+        layout_id=layout,
+        structural_move_pct=move,
+    )
     return {
         "layout_id": layout,
         "strategy": strat or "—",
@@ -188,6 +194,8 @@ def recipe_for(
         "lookback_minutes": lookback,
         "bars_keep": bars,
         "sensors": sensors,
+        "pulse_seconds": cadence["pulse_seconds"],
+        "extra_refresh_seconds": cadence["extra_refresh_seconds"],
         "order_style": order_style_for(
             strat, tf, layout_id=layout, structural_move_pct=move
         ),
@@ -248,6 +256,46 @@ def order_style_for(
     return "limit"
 
 
+def cadence_for(
+    strategy: str = "",
+    timeframe: str = "5m",
+    *,
+    layout_id: str = "",
+    structural_move_pct: float = 0.0,
+    in_trade: bool = False,
+) -> dict[str, int]:
+    """
+    Revisit interval after the first lookback paint.
+    15m lives on 5–10m checks (a closed bar), not a 15s clip.
+    5m typical ~1–5m. 1m pops stay short.
+    """
+    tf = normalize_tf(timeframe)
+    style = order_style_for(
+        strategy,
+        tf,
+        layout_id=layout_id,
+        structural_move_pct=structural_move_pct,
+    )
+    pop = style == "market"
+    if tf == "1m":
+        pulse = 15 if pop else 60
+        extras = 120 if pop else 180
+    elif tf == "5m":
+        pulse = 60 if pop else 300
+        extras = 180 if pop else 300
+    else:
+        pulse = 300 if pop else 600
+        extras = 300 if pop else 600
+    if in_trade:
+        if tf == "1m":
+            pulse = min(int(pulse), 15)
+        elif tf == "5m":
+            pulse = min(int(pulse), 60)
+        else:
+            pulse = min(int(pulse), 300)
+    return {"pulse_seconds": int(pulse), "extra_refresh_seconds": int(extras)}
+
+
 def attach_recipe(layout_entry: dict[str, Any]) -> dict[str, Any]:
     entry = dict(layout_entry or {})
     entry["recipe"] = recipe_for(
@@ -303,11 +351,15 @@ def plan_for_timeframe(
             sensors.insert(0, s)
             seen.add(s)
 
+    pulses = [int(r.get("pulse_seconds") or 60) for r in recipes] or [60]
+    extras = [int(r.get("extra_refresh_seconds") or 300) for r in recipes] or [300]
     return {
         "timeframe": tf,
         "lookback_minutes": lookback,
         "bars_keep": max(bars, minutes_to_bars(tf, lookback)),
         "sensors": sensors,
+        "pulse_seconds": min(pulses),
+        "extra_refresh_seconds": min(extras),
         "recipes": recipes,
         "strategy_count": len(recipes),
     }

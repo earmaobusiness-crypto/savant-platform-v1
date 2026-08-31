@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import math
 import re
+import time as _time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -37,6 +39,11 @@ _SUBMISSIONS: dict[str, dict[str, Any]] = {}
 _INFO: dict[str, dict[str, Any]] = {}
 _BARS: dict[str, Any] = {}
 _MASSIVE_LAST = 0.0
+_FEED_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix="r3feed")
+_LIVE_YF_TTL = 14.0
+_MASSIVE_LIVE_TICKER_TTL = 900.0
+_LIVE_1M: dict[str, dict[str, Any]] = {}
+_MASSIVE_LIVE_TICKER: dict[str, float] = {}
 
 
 def tf_token(raw: str) -> str:
@@ -152,15 +159,19 @@ def window_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _yahoo_info_pull(ticker: str) -> dict[str, Any]:
+    import yfinance as yf
+
+    return dict(yf.Ticker(ticker).info or {})
+
+
 def _yahoo_info(ticker: str) -> dict[str, Any]:
     tk = str(ticker or "").upper()
     if tk in _INFO:
         return _INFO[tk]
     info: dict[str, Any] = {}
     try:
-        import yfinance as yf
-
-        info = dict(yf.Ticker(tk).info or {})
+        info = dict(_FEED_POOL.submit(_yahoo_info_pull, tk).result(timeout=8) or {})
     except Exception:
         info = {}
     _INFO[tk] = info
@@ -176,7 +187,7 @@ def _cik_for(ticker: str) -> str:
             resp = requests.get(
                 "https://www.sec.gov/files/company_tickers.json",
                 headers=SEC_HEADERS,
-                timeout=20,
+                timeout=8,
             )
             if resp.ok:
                 for entry in (resp.json() or {}).values():
@@ -200,7 +211,7 @@ def _sec_submissions(ticker: str) -> dict[str, Any]:
             resp = requests.get(
                 f"https://data.sec.gov/submissions/CIK{cik}.json",
                 headers=SEC_HEADERS,
-                timeout=20,
+                timeout=8,
             )
             if resp.ok:
                 blob = resp.json() if isinstance(resp.json(), dict) else {}
@@ -296,15 +307,23 @@ def extra_pack(
     full_day=None,
 ) -> dict[str, Any]:
     """Hyper-vol extras. Historical: SEC as-of date. Float/SI from Yahoo (current snapshot)."""
+    def _f(val: Any, default: float = 0.0) -> float:
+        try:
+            if val in (None, "", "N/A", "None"):
+                return default
+            return float(val)
+        except (TypeError, ValueError):
+            return default
+
     info = _yahoo_info(ticker)
-    float_shares = float(info.get("floatShares") or info.get("sharesOutstanding") or 0) or 0.0
-    short_pct = float(info.get("shortPercentOfFloat") or 0) or 0.0
+    float_shares = _f(info.get("floatShares") or info.get("sharesOutstanding"))
+    short_pct = _f(info.get("shortPercentOfFloat"))
     if short_pct > 1.5:
         short_pct = short_pct / 100.0
-    short_ratio = float(info.get("shortRatio") or 0) or 0.0
-    avg_vol = float(info.get("averageVolume") or info.get("averageVolume10days") or 0) or 0.0
-    bid = float(info.get("bid") or 0) or 0.0
-    ask = float(info.get("ask") or 0) or 0.0
+    short_ratio = _f(info.get("shortRatio"))
+    avg_vol = _f(info.get("averageVolume") or info.get("averageVolume10days"))
+    bid = _f(info.get("bid"))
+    ask = _f(info.get("ask"))
     spread_live = ((ask - bid) / ((ask + bid) / 2.0) * 100.0) if bid and ask and ask > bid else 0.0
 
     win_vol = 0.0
@@ -524,6 +543,147 @@ def load_session_bars(ticker: str, sess: date, tf: str):
             return yf_frame
     ms = fetch_bars_massive(ticker, sess)
     return _resample(ms, tf)
+
+
+def _frame_empty(frame) -> bool:
+    return frame is None or getattr(frame, "empty", True)
+
+
+def _yahoo_1m_live(ticker: str):
+    def _pull():
+        import yfinance as yf
+
+        hist = yf.Ticker(ticker).history(
+            period="1d",
+            interval="1m",
+            auto_adjust=True,
+            prepost=True,
+        )
+        if hist is None or getattr(hist, "empty", True):
+            return None
+        return _to_et_naive(hist)
+
+    try:
+        return _FEED_POOL.submit(_pull).result(timeout=10)
+    except Exception:
+        return None
+
+
+def _massive_live_ok(ticker: str) -> bool:
+    now = _time.monotonic()
+    if _MASSIVE_LAST > 0 and (now - _MASSIVE_LAST) < 12.0:
+        return False
+    last = float(_MASSIVE_LIVE_TICKER.get(ticker) or 0)
+    if last and (now - last) < _MASSIVE_LIVE_TICKER_TTL:
+        return False
+    return bool(_market_key())
+
+
+def _massive_today_1m(ticker: str):
+    """Same-day 1m only. Never sleeps — skip if the 12s lock is held."""
+    global _MASSIVE_LAST
+    api_key = _market_key()
+    if not api_key:
+        return None
+    today = datetime.now(ET).date().isoformat()
+    url = f"{MASSIVE_API_BASE}/v2/aggs/ticker/{ticker}/range/1/minute/{today}/{today}"
+    _MASSIVE_LIVE_TICKER[ticker] = _time.monotonic()
+    try:
+        resp = requests.get(
+            url,
+            params={"adjusted": "false", "sort": "asc", "limit": 5000, "apiKey": api_key},
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=8,
+        )
+        _MASSIVE_LAST = _time.monotonic()
+        payload = resp.json() if resp.ok else {}
+        rows = payload.get("results") if isinstance(payload, dict) else None
+        if not rows:
+            return None
+        import pandas as pd
+
+        idx = [
+            datetime.fromtimestamp(int(r["t"]) / 1000.0, tz=timezone.utc)
+            .astimezone(ET)
+            .replace(tzinfo=None)
+            for r in rows
+        ]
+        return pd.DataFrame(
+            {
+                "Open": [float(r.get("o") or 0) for r in rows],
+                "High": [float(r.get("h") or 0) for r in rows],
+                "Low": [float(r.get("l") or 0) for r in rows],
+                "Close": [float(r.get("c") or 0) for r in rows],
+                "Volume": [float(r.get("v") or 0) for r in rows],
+            },
+            index=idx,
+        )
+    except Exception:
+        _MASSIVE_LAST = _time.monotonic()
+        return None
+
+
+def _live_1m_cached(ticker: str, *, allow_massive: bool) -> tuple[Any, str]:
+    now = _time.monotonic()
+    hit = _LIVE_1M.get(ticker)
+    if isinstance(hit, dict) and (now - float(hit.get("t") or 0)) < _LIVE_YF_TTL:
+        return hit.get("frame"), str(hit.get("source") or "yahoo")
+    frame = _yahoo_1m_live(ticker)
+    source = "yahoo"
+    if _frame_empty(frame) and allow_massive and _massive_live_ok(ticker):
+        ms = _massive_today_1m(ticker)
+        if not _frame_empty(ms):
+            frame = ms
+            source = "massive"
+    _LIVE_1M[ticker] = {"t": now, "frame": frame, "source": source}
+    return frame, source
+
+
+def _rows_from_1m(frame, tf: str, bars_keep: int) -> list[dict[str, Any]]:
+    chopped = _resample(frame, tf)
+    if _frame_empty(chopped):
+        return []
+    keep = max(3, min(120, int(bars_keep or 8)))
+    tail = chopped.tail(keep)
+    out: list[dict[str, Any]] = []
+    for idx, row in tail.iterrows():
+        out.append(
+            {
+                "ts": str(idx),
+                "o": float(row["Open"]),
+                "h": float(row["High"]),
+                "l": float(row["Low"]),
+                "c": float(row["Close"]),
+                "v": float(row["Volume"]) if "Volume" in row else 0.0,
+            }
+        )
+    return out
+
+
+def peek_live_bar_rows(
+    ticker: str, tf: str, *, bars_keep: int
+) -> tuple[list[dict[str, Any]] | None, str]:
+    """Reuse a fresh Yahoo 1m pull (resampled). None = cache miss, must fetch."""
+    tk = str(ticker or "").upper()
+    hit = _LIVE_1M.get(tk)
+    if not isinstance(hit, dict):
+        return None, ""
+    if (_time.monotonic() - float(hit.get("t") or 0)) >= _LIVE_YF_TTL:
+        return None, ""
+    return _rows_from_1m(hit.get("frame"), tf, bars_keep), str(hit.get("source") or "yahoo")
+
+
+def live_bar_rows(
+    ticker: str,
+    tf: str,
+    *,
+    bars_keep: int,
+    allow_massive: bool = True,
+) -> tuple[list[dict[str, Any]], str]:
+    """Yahoo 1m first. Massive only if Yahoo is empty and quota lock allows."""
+    tk = str(ticker or "").upper()
+    frame, source = _live_1m_cached(tk, allow_massive=allow_massive)
+    return _rows_from_1m(frame, tf, bars_keep), source
 
 
 def precursor_window(frame, start_dt: datetime, tf: str):
