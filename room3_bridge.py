@@ -248,9 +248,12 @@ def _layout_entry(
         "strategy": str(strategy or ""),
         "pattern_count": int(pattern_count or 0),
         "vector_source": source or "unknown",
+        # A bucket we already built a vector for is matchable. Envelopes are
+        # Room 2 DNA; only skip trip-size (those never become a bucket).
         "tradeable": bool(
             int(pattern_count or 0) >= mint_n
-            and str(source or "") in ("vault_genetic", "session")
+            and str(source or "") in ("vault_genetic", "vault_envelopes", "session")
+            and bool(vector)
         ),
     }
     try:
@@ -394,7 +397,13 @@ def _layouts_from_supabase() -> list[dict[str, Any]]:
 
 def _merge_layout_libraries(*parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One entry per layout+strategy+timeframe bucket."""
-    rank = {"session": 3, "vault_genetic": 2, "vault_collective": 1, "unknown": 0}
+    rank = {
+        "session": 3,
+        "vault_genetic": 2,
+        "vault_envelopes": 1,
+        "vault_collective": 1,
+        "unknown": 0,
+    }
     merged: dict[str, dict[str, Any]] = {}
     for layouts in parts:
         for entry in layouts or []:
