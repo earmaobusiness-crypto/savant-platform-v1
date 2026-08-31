@@ -188,29 +188,59 @@ def set_filter_universe(book: dict[str, Any], tickers: list[str] | None) -> dict
     if cleaned:
         book["last_note"] = f"Filter feed · {len(cleaned)} name(s) · tracking 1m/5m/15m"
         ensure_maps(book)
+    elif _keep_tickers_for_book(book):
+        book["last_note"] = "Belt empty · still mapping open broker names."
+        ensure_maps(book)
     else:
         book["last_note"] = "Awaiting TradingView / session filter feed."
         book["lines"] = {}
     return book
 
 
-def ensure_maps(book: dict[str, Any]) -> dict[str, Any]:
+def ensure_maps(book: dict[str, Any], keep_tickers: list[str] | None = None) -> dict[str, Any]:
     """Open 1m/5m/15m lines as soon as names land — don't wait for a heartbeat."""
+    if keep_tickers is not None:
+        book["keep_tickers"] = [
+            str(t).strip().upper() for t in keep_tickers if str(t).strip()
+        ]
     _ensure_lines_for_universe(book)
     return book
+
+
+def ensure_ticker_maps(book: dict[str, Any], ticker: str) -> None:
+    """Make sure one name has 1m/5m/15m lines (broker leftovers, not the belt)."""
+    sym = str(ticker or "").strip().upper()
+    if not sym:
+        return
+    lines = book.setdefault("lines", {})
+    universe = set(book.get("universe") or [])
+    for tf in TIMEFRAMES:
+        key = line_key(sym, tf)
+        if key not in lines:
+            lines[key] = _new_line(sym, tf)
+        lines[key]["in_filter"] = sym in universe
+
+
+def _keep_tickers_for_book(book: dict[str, Any]) -> set[str]:
+    keep = {str(t).strip().upper() for t in (book.get("keep_tickers") or []) if str(t).strip()}
+    return keep
 
 
 def _ensure_lines_for_universe(book: dict[str, Any]) -> None:
     lines = book.setdefault("lines", {})
     universe = set(book.get("universe") or [])
+    keep = set(universe) | _keep_tickers_for_book(book)
     # Open three TF maps for each filtered name
     for ticker in list(universe)[:MAX_NAMES]:
         for tf in TIMEFRAMES:
             key = line_key(ticker, tf)
             if key not in lines:
                 lines[key] = _new_line(ticker, tf)
+    # Broker-open names that left the belt still need maps to manage the pile.
+    for ticker in sorted(keep - universe):
+        ensure_ticker_maps(book, ticker)
 
-    # Drop non-sticky lines whose ticker left the filter
+    # Drop ghosts whose ticker left the filter (sticky-only does not keep them).
     drop_keys = []
     for key, line in lines.items():
         t = str(line.get("ticker") or "")
@@ -218,10 +248,11 @@ def _ensure_lines_for_universe(book: dict[str, Any]) -> None:
             line["in_filter"] = True
             continue
         line["in_filter"] = False
-        if line.get("state") in ("in", "committed"):
-            # still in a trade or entry queued — keep until exit path closes it
+        if t in keep:
             continue
-        if line.get("sticky") and _sticky_alive(line):
+        if line.get("state") == "in":
+            continue
+        if line.get("state") == "committed" and _entry_stamped(line):
             continue
         drop_keys.append(key)
     for key in drop_keys:
@@ -650,9 +681,23 @@ def tick_watcher(
         )
         return book, signals
 
+    keep: list[str] = []
+    try:
+        for row in session_state.get("room3_open_positions") or []:
+            t = str(row.get("ticker") or row.get("symbol") or "").upper()
+            if t:
+                keep.append(t)
+    except Exception:
+        pass
+    book["keep_tickers"] = keep
+    for line in (book.get("lines") or {}).values():
+        if isinstance(line, dict):
+            room3_recipes.scrub_purgatory_line(line)
+
     if book.get("awaiting_filters") or not (book.get("universe") or []):
-        book["last_note"] = "Eyes ready · waiting for filter names (screener or paste)."
-        return book, signals
+        if not keep:
+            book["last_note"] = "Eyes ready · waiting for filter names (screener or paste)."
+            return book, signals
 
     trade_ok = bool(session_allowed and engine_armed)
 
@@ -678,7 +723,12 @@ def tick_watcher(
     for key, line in list((book.get("lines") or {}).items()):
         if line.get("state") == "flat_day":
             continue
-        if not line.get("in_filter") and not line.get("sticky") and line.get("state") != "in":
+        keep_set = set(book.get("keep_tickers") or [])
+        if (
+            not line.get("in_filter")
+            and str(line.get("ticker") or "").upper() not in keep_set
+            and line.get("state") != "in"
+        ):
             continue
         tf = str(line.get("timeframe") or "1m")
         in_trade = 0 if str(line.get("state") or "") == "in" else 1
@@ -795,7 +845,9 @@ def tick_watcher(
             # on a first paint that never got the sensor pack.
             line["next_pulse_at"] = (now_m + pulse) if overlay_ok else 0.0
             if line.get("in_filter") is False:
-                _maybe_mark_sticky(line)
+                # Off-belt leftovers stay only if the broker still holds them.
+                if str(line.get("state") or "") != "in":
+                    _clear_sticky_watch(line)
             elif float(line.get("score") or 0) >= STICKY_MIN_SCORE:
                 _maybe_mark_sticky(line)
             else:
@@ -924,13 +976,18 @@ def _why_not_firing(line: dict[str, Any], book: dict[str, Any] | None = None) ->
 def book_status_rows(book: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for key, line in sorted((book.get("lines") or {}).items()):
+        layout = str(line.get("nearest_layout") or "—")
+        strat = str(line.get("nearest_strategy") or "—")
+        match_pct = int(line.get("match_pct") or 0)
+        if room3_recipes.is_purgatory_letter(layout, strat):
+            layout, strat, match_pct = "—", "—", 0
         rows.append(
             {
                 "Line": key,
                 "State": _display_state(line, book),
-                "Match%": int(line.get("match_pct") or 0),
-                "Layout": str(line.get("nearest_layout") or "—")[:16],
-                "Strategy": str(line.get("nearest_strategy") or "—")[:20],
+                "Match%": match_pct,
+                "Layout": layout[:16],
+                "Strategy": strat[:20],
                 "Lookback": f"{int(line.get('recipe_lookback_min') or 0)}m"
                 if line.get("recipe_lookback_min")
                 else "—",

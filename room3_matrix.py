@@ -264,10 +264,14 @@ def strategy_for_layout(
     lid = str(layout_id or "").strip()
     if not lid or lid in PLACEHOLDER_LAYOUTS:
         return "matrix"
+    if room3_recipes.is_purgatory_letter(lid, ""):
+        return "matrix"
     want = _normalize_watch_tf(timeframe) if timeframe else ""
 
     def _ok(strat: str) -> bool:
         if not strat:
+            return False
+        if room3_recipes.is_purgatory_letter(lid, strat):
             return False
         return room3_recipes.strategy_tf_agrees(strat, want) if want else True
 
@@ -336,6 +340,7 @@ def _ticker_already_engaged(
     ticker: str,
     *,
     except_key: str = "",
+    session_state: Any = None,
 ) -> bool:
     """True if another line already owns this ticker (open or real entry queued).
 
@@ -343,6 +348,8 @@ def _ticker_already_engaged(
     line that is trying to stamp an entry, or ≥85% never fires.
     """
     sym = str(ticker).upper()
+    if session_state is not None and _open_qty(session_state, sym) > 0:
+        return True
     for key, line in (book.get("lines") or {}).items():
         if except_key and key == except_key:
             continue
@@ -823,6 +830,12 @@ def maybe_queue_matrix_signals(
     if nearest_strat and not room3_recipes.strategy_tf_agrees(nearest_strat, tf):
         nearest_strat = "—"
         # Keep Match% / layout. Wrong-TF letter must not fire; do not blank the score.
+    if room3_recipes.is_purgatory_letter(layout_id, nearest_strat):
+        layout_id = "—"
+        nearest_strat = "—"
+        line["nearest_layout"] = "—"
+        line["match_pct"] = 0
+        match = {**match, "nearest_layout_id": "—", "nearest_strategy": "", "spatial_match_pct": 0}
     line["nearest_strategy"] = nearest_strat or "—"
     line["score"] = float(match.get("display_score") or 0)
     line["second_cosine"] = float(match.get("second_cosine") or 0)
@@ -1001,7 +1014,8 @@ def maybe_queue_matrix_signals(
     line["patience"] = False
     line.pop("patience_note", None)
     if _ticker_already_engaged(
-        book, ticker, except_key=room3_watcher.line_key(ticker, tf)
+        book, ticker, except_key=room3_watcher.line_key(ticker, tf),
+        session_state=session_state,
     ):
         return
 

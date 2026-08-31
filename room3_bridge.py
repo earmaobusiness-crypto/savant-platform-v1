@@ -32,7 +32,9 @@ ROOM2_OBSERVE_KEYS = (
     "market_weather_snapshot",
 )
 
-PLACEHOLDER_LAYOUT_IDS = frozenset({"NEW_LAYOUT", "PURGATORY_PENDING", "—", "-", ""})
+PLACEHOLDER_LAYOUT_IDS = frozenset(
+    {"NEW_LAYOUT", "PURGATORY_PENDING", "Purgatory", "PURGATORY", "—", "-", ""}
+)
 PROJECT_ROOT = Path(__file__).resolve().parent
 CACHE_PATH = PROJECT_ROOT / ".streamlit" / "matrix_vault_cache.json"
 LAYOUT_CAP = 256
@@ -513,7 +515,36 @@ def matrix_repertoire(session_state: Any) -> dict[str, Any]:
             _layouts_from_local_cache(),
         )
 
-    deploy_registry = _deploy_registry(session_state, vault_rows)
+    try:
+        import room3_recipes
+
+        layouts = [
+            e
+            for e in layouts
+            if not room3_recipes.is_purgatory_letter(
+                str(e.get("layout_id") or ""),
+                str(e.get("strategy") or e.get("execution_strategy") or ""),
+            )
+        ]
+    except Exception:
+        layouts = [
+            e
+            for e in layouts
+            if "purgatory" not in str(e.get("layout_id") or "").strip().lower()
+        ]
+    try:
+        import room3_recipes
+
+        deploy_registry = [
+            row
+            for row in _deploy_registry(session_state, vault_rows)
+            if not room3_recipes.is_purgatory_letter(
+                str(row.get("layout") or row.get("layout_id") or ""),
+                str(row.get("strategy") or row.get("execution_strategy") or ""),
+            )
+        ]
+    except Exception:
+        deploy_registry = _deploy_registry(session_state, vault_rows)
     genetic_n = sum(1 for x in layouts if str(x.get("vector_source") or "") == "vault_genetic")
     collective_n = sum(1 for x in layouts if str(x.get("vector_source") or "") == "vault_collective")
     tradeable_n = sum(1 for x in layouts if x.get("tradeable"))
@@ -541,9 +572,9 @@ def matrix_repertoire(session_state: Any) -> dict[str, Any]:
     dna_ready = tradeable_n > 0
     if layout_n:
         dna_note = (
-            f"Live strategies: {tradeable_n} (≥3 saves + real DNA). "
+            f"Live strategies: {tradeable_n} (3+ similar packs + real DNA). "
             f"{layout_n} bucket(s) from {pattern_count or len(vault_rows)} save(s). "
-            "Purgatory / trip-size proxies do not fire."
+            "Only live letters match and fire."
         )
     else:
         dna_note = "Vault connected but no layout buckets found."

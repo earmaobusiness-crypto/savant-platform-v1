@@ -131,14 +131,73 @@ def strategy_tf_agrees(strategy: str, watch_tf: str) -> bool:
 
 
 def is_purgatory_letter(layout_id: str = "", strategy: str = "") -> bool:
-    """Purgatory sits. It is not a live strategy and must not match or fire."""
-    lid = str(layout_id or "").strip().lower()
-    if lid == "purgatory" or lid.startswith("purgatory"):
+    """Incubation packs sit. They are not live strategies and must not match or fire."""
+    lid = str(layout_id or "").strip()
+    lid_l = lid.lower()
+    if "purgatory" in lid_l or _PURGATORY_LETTER.match(lid):
         return True
     strat = str(strategy or "").strip()
-    if _PURGATORY_LETTER.match(strat):
+    if "purgatory" in strat.lower() or _PURGATORY_LETTER.match(strat):
         return True
     return False
+
+
+def scrub_purgatory_line(line: dict[str, Any]) -> bool:
+    """Blank incubation stamps. Drop queued tickets. Leave a live fill in place."""
+    if not isinstance(line, dict):
+        return False
+    changed = False
+    layout = str(line.get("nearest_layout") or "")
+    strat = str(line.get("nearest_strategy") or "")
+    in_trade = str(line.get("state") or "") == "in"
+    if is_purgatory_letter(layout, strat):
+        line["nearest_layout"] = "—"
+        line["nearest_strategy"] = "—"
+        if not in_trade:
+            line["match_pct"] = 0
+            line["size_usd"] = 0.0
+            line["size_qty"] = 0.0
+            line["patience"] = False
+            line.pop("patience_note", None)
+        changed = True
+    entry_layout = str(line.get("entry_layout") or "")
+    entry_strat = str(line.get("entry_strategy") or "")
+    sig = line.get("entry_signal") if isinstance(line.get("entry_signal"), dict) else {}
+    sig_layout = str(sig.get("layout_id") or "")
+    sig_strat = str(sig.get("strategy") or "")
+    queued = is_purgatory_letter(entry_layout, entry_strat) or is_purgatory_letter(
+        sig_layout, sig_strat
+    )
+    if not queued:
+        return changed
+    if in_trade:
+        line["entry_layout"] = "—"
+        line["entry_strategy"] = "—"
+        if sig:
+            sig["layout_id"] = "—"
+            sig["strategy"] = "—"
+        return True
+    line["state"] = "watching"
+    line["sticky"] = False
+    line.pop("sticky_until", None)
+    line["entry_signal"] = None
+    line["exit_signal"] = None
+    for key in (
+        "entry_layout",
+        "entry_strategy",
+        "entry_price",
+        "entry_qty",
+        "entry_match_pct",
+        "entry_structural_move_pct",
+        "entry_order_id",
+    ):
+        line.pop(key, None)
+    line["nearest_layout"] = "—"
+    line["nearest_strategy"] = "—"
+    line["match_pct"] = 0
+    line["size_usd"] = 0.0
+    line["size_qty"] = 0.0
+    return True
 
 
 def minutes_to_bars(tf: str, minutes: int) -> int:
