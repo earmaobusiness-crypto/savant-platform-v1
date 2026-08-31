@@ -4401,6 +4401,10 @@ def _room3_heartbeat_fragment() -> None:
         )
     except Exception as exc:
         st.caption(f"Heartbeat error · {type(exc).__name__}: {exc}")
+        book = st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
+        rows = room3_watcher.book_status_rows(book)
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
         return
     st.session_state.room3_watch_book = book
 

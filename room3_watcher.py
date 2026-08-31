@@ -14,7 +14,7 @@ Does NOT import Room 2 modules. Uses room3_bridge snapshot only for repertoire h
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 import time
@@ -32,6 +32,7 @@ TIMEFRAMES = ("1m", "5m", "15m")
 MAX_NAMES = 15
 STICKY_MIN_SCORE = 0.72  # keep after filter drop if map this close to repertoire
 STICKY_MIN_MATCH_PCT = 70  # must also be warming+ DNA — never sticky on a 6% Match%
+STICKY_MAX_MINUTES = 45
 HEARTBEAT_SEC = 15
 # Yahoo/SEC calls per heartbeat — more than this in one gulp whites Cloud.
 MAX_HEAVY_PER_TICK = 3
@@ -518,8 +519,6 @@ def _maybe_mark_sticky(line: dict[str, Any]) -> None:
         _clear_sticky_watch(line)
         return
     if line.get("state") in ("watching", "committed"):
-        from datetime import timedelta
-
         line["sticky"] = True
         line["state"] = "committed"
         line["sticky_until"] = (
