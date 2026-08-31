@@ -15,6 +15,7 @@ from typing import Any
 
 # 5A (15M) / 1D (15M) — the letter’s own TF token. Wins over a stale vault clock.
 _STRATEGY_TF_TOKEN = re.compile(r"\(\s*(1|5|15)\s*M\s*\)", re.IGNORECASE)
+_PURGATORY_LETTER = re.compile(r"^P\d+\b", re.IGNORECASE)
 
 # Default lookback (minutes of tape) when vault doesn't spell it out.
 DEFAULT_LOOKBACK_MIN: dict[str, int] = {
@@ -127,6 +128,17 @@ def strategy_tf_agrees(strategy: str, watch_tf: str) -> bool:
     if not named or want not in ("1m", "5m", "15m"):
         return True
     return named == want
+
+
+def is_purgatory_letter(layout_id: str = "", strategy: str = "") -> bool:
+    """Purgatory sits. It is not a live strategy and must not match or fire."""
+    lid = str(layout_id or "").strip().lower()
+    if lid == "purgatory" or lid.startswith("purgatory"):
+        return True
+    strat = str(strategy or "").strip()
+    if _PURGATORY_LETTER.match(strat):
+        return True
+    return False
 
 
 def minutes_to_bars(tf: str, minutes: int) -> int:

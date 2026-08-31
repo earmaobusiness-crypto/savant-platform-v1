@@ -16,7 +16,9 @@ MATCH_THRESHOLD_PCT = 85
 EXIT_MATCH_FLOOR_PCT = 65
 STOP_LOSS_PCT = 2.5
 MIN_SLICES = {"1m": 5, "5m": 4, "15m": 3}
-PLACEHOLDER_LAYOUTS = frozenset({"NEW_LAYOUT", "PURGATORY_PENDING", "—", "-", ""})
+PLACEHOLDER_LAYOUTS = frozenset(
+    {"NEW_LAYOUT", "PURGATORY_PENDING", "Purgatory", "PURGATORY", "—", "-", ""}
+)
 
 # Day book split — these three add to 100% of Trading today.
 TF_BUCKET_FRAC: dict[str, float] = {"15m": 0.50, "5m": 0.30, "1m": 0.20}
@@ -189,6 +191,10 @@ def match_spatial(
         if watch_tf and entry_tf and entry_tf != watch_tf:
             continue
         strat = str(e.get("strategy") or e.get("execution_strategy") or "")
+        if room3_recipes.is_purgatory_letter(
+            str(e.get("layout_id") or ""), strat
+        ):
+            continue
         if watch_tf and strat and not room3_recipes.strategy_tf_agrees(strat, watch_tf):
             continue
         usable.append(e)
@@ -1001,6 +1007,10 @@ def maybe_queue_matrix_signals(
 
     layout_id = str(match.get("nearest_layout_id") or "")
     if layout_id in PLACEHOLDER_LAYOUTS:
+        return
+    if room3_recipes.is_purgatory_letter(
+        layout_id, str(match.get("nearest_strategy") or "")
+    ):
         return
 
     strategy = str(match.get("nearest_strategy") or "") or strategy_for_layout(

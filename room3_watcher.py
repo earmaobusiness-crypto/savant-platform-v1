@@ -861,23 +861,25 @@ def _line_owns_seat(line: dict[str, Any]) -> bool:
 
 
 def _display_state(line: dict[str, Any], book: dict[str, Any] | None = None) -> str:
-    """Operator-facing state: sticky ≠ queued; sibling TFs can show promise without a second pile."""
+    """Operator-facing: scanning · warming · ready · queued · in."""
     raw = str(line.get("state") or "watching")
     if raw == "in":
         return "in"
     if raw == "committed" and _entry_stamped(line):
         return "queued"
+    match = int(line.get("match_pct") or 0)
     seat = _sibling_seat_tf(book or {}, line) if book else ""
     if seat:
-        match = int(line.get("match_pct") or 0)
         if match >= room3_matrix.MATCH_THRESHOLD_PCT:
-            return "promise"
+            return "ready"
         if match >= STICKY_MIN_MATCH_PCT:
             return "warming"
         return "scanning"
-    if raw == "committed" or line.get("sticky"):
-        return "sticky"
-    return raw
+    if match >= room3_matrix.MATCH_THRESHOLD_PCT:
+        return "ready"
+    if match >= STICKY_MIN_MATCH_PCT:
+        return "warming"
+    return "scanning"
 
 
 def _sibling_seat_tf(book: dict[str, Any], line: dict[str, Any]) -> str:
@@ -913,9 +915,7 @@ def _why_not_firing(line: dict[str, Any], book: dict[str, Any] | None = None) ->
     if note:
         return note[:48]
     if match >= room3_matrix.MATCH_THRESHOLD_PCT:
-        if state == "sticky":
-            return "≥85% · need arm + open gates"
-        return "≥85% · waiting arm/gates"
+        return "≥85% · ready · arm to fire"
     if match >= STICKY_MIN_MATCH_PCT:
         return f"warming {match}% · need ≥{room3_matrix.MATCH_THRESHOLD_PCT}%"
     return "scanning"

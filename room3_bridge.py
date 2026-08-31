@@ -225,6 +225,7 @@ def _layout_entry(
 ) -> dict[str, Any] | None:
     if not layout_id or layout_id in PLACEHOLDER_LAYOUT_IDS or not vector:
         return None
+    purgatory = str(layout_id or "").strip().lower().startswith("purgatory")
     try:
         import room3_recipes
 
@@ -232,8 +233,11 @@ def _layout_entry(
             strategy=strategy,
             timeframe_resolution=timeframe_resolution,
         ) or _normalize_tf(timeframe_resolution or strategy)
+        purgatory = room3_recipes.is_purgatory_letter(layout_id, strategy)
     except Exception:
         tf_norm = _normalize_tf(timeframe_resolution or strategy)
+    if purgatory:
+        return None
     bkey = bucket_key or f"{layout_id}|{strategy}|{tf_norm}"
     entry = {
         "layout_id": layout_id,
@@ -246,7 +250,7 @@ def _layout_entry(
         "strategy": str(strategy or ""),
         "pattern_count": int(pattern_count or 0),
         "vector_source": source or "unknown",
-        "tradeable": bool(vector),
+        "tradeable": bool(vector) and not purgatory,
     }
     try:
         import room3_recipes
