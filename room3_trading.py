@@ -941,8 +941,7 @@ def _maybe_roll_trading_session() -> None:
     _rebuild_archive_from_history()
     st.session_state.room3_session_day_key = key
     st.session_state.room3_open_positions = []
-    st.session_state.room3_pending_reviews = []
-    # Keep closed trade history + operator votes — All-time / Session history need them.
+    # Unvoted reviews stay in Operator review ≥24h — do not wipe the pile at day roll.
     st.session_state.room3_decay_alerts = []
     st.session_state.room3_broker_day_pl = None
     st.session_state.room3_broker_day_pl_pct = None
@@ -1057,10 +1056,11 @@ def _all_time_stats() -> dict:
 def _session_pl_stats() -> dict:
     equity = float(st.session_state.room3_account_equity or ROOM3_DEFAULT_EQUITY)
     open_rows = st.session_state.room3_open_positions or []
-    pending = st.session_state.room3_pending_reviews or []
     # Always count unique closed rows after dedupe.
     history = _dedupe_trade_history()
     st.session_state.room3_trade_history = history[:200]
+    _sync_pending_from_closed_history()
+    pending = st.session_state.room3_pending_reviews or []
     today_key = _trading_day_key()
     open_pl = sum(float(r.get("pnl_usd") or 0) for r in open_rows)
     closed_rows = [
@@ -1539,6 +1539,81 @@ def _upsert_trade_history_row(row: dict) -> None:
     else:
         hist.insert(0, enriched)
     st.session_state.room3_trade_history = _dedupe_trade_history(hist)[:200]
+    _sync_pending_from_closed_history()
+
+
+def _pending_has_row(pending: list, row: dict) -> bool:
+    rid = str(row.get("id") or "")
+    for existing in pending:
+        if rid and str(existing.get("id") or "") == rid:
+            return True
+        if _same_closed_roundtrip(existing, row):
+            return True
+    return False
+
+
+REVIEW_HOLD = timedelta(hours=24)
+
+
+def _parse_iso_utc(raw: str) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _within_review_hold(row: dict) -> bool:
+    """Unvoted closes stay reviewable at least 24h, including after the day log rolls."""
+    if str(row.get("operator_vote") or "").strip():
+        return False
+    queued = _parse_iso_utc(str(row.get("review_queued_at") or ""))
+    now = datetime.now(timezone.utc)
+    if queued is not None:
+        return (now - queued) <= REVIEW_HOLD
+    day = _trade_session_date(row)
+    today = _trading_day_key()
+    if day == today:
+        return True
+    try:
+        d0 = datetime.strptime(day, "%Y-%m-%d").date()
+        d1 = datetime.strptime(today, "%Y-%m-%d").date()
+        return (d1 - d0).days <= 1
+    except ValueError:
+        return False
+
+
+def _sync_pending_from_closed_history() -> None:
+    """Closed fills belong in Operator review until ✓/✗, held ≥24h across day roll."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    pending = [
+        p
+        for p in list(st.session_state.get("room3_pending_reviews") or [])
+        if not str(p.get("operator_vote") or "").strip() and _within_review_hold(p)
+    ]
+    for row in list(st.session_state.get("room3_trade_history") or []):
+        if not _trade_is_closed_row(row):
+            continue
+        status = str(row.get("status") or "").lower()
+        if "closing" in status and not row.get("broker_source"):
+            continue
+        if str(row.get("operator_vote") or "").strip():
+            continue
+        if not _within_review_hold(row):
+            continue
+        if _pending_has_row(pending, row):
+            continue
+        item = _enrich_trade_row_meta(dict(row))
+        if not item.get("review_queued_at"):
+            item["review_queued_at"] = now_iso
+            row["review_queued_at"] = now_iso
+        pending.append(item)
+    st.session_state.room3_pending_reviews = pending
 
 
 def _dedupe_trade_history(hist: list | None = None) -> list:
@@ -1797,6 +1872,7 @@ def _merge_broker_closed_trades(closed: list) -> None:
                 enriched["session_date"] = old.get("session_date")
         _upsert_trade_history_row(enriched)
     st.session_state.room3_trade_history = _dedupe_trade_history()[:200]
+    _sync_pending_from_closed_history()
     _rebuild_archive_from_history()
     _persist_screener_to_disk()
 
@@ -2023,6 +2099,7 @@ def _record_operator_review(trade_id: str, vote: str) -> None:
             if alert not in alerts:
                 alerts.append(alert)
     st.session_state.room3_decay_alerts = alerts
+    _persist_screener_to_disk()
 
 
 def _undo_operator_review(trade_id: str) -> None:
@@ -2097,6 +2174,7 @@ def _undo_operator_review(trade_id: str) -> None:
         undo_msg += f" · dropped {dropped} pending learn obs"
     log.append(undo_msg)
     st.session_state.room3_matrix_sync_log = log[-12:]
+    _persist_screener_to_disk()
 
 
 def _fmt_pl_usd(value) -> str:
@@ -2425,6 +2503,11 @@ def _trade_widget_key(prefix: str, trade: dict, index: int = 0) -> str:
 
 def _render_trade_history() -> None:
     st.markdown("### Today's trade log")
+    st.caption(
+        "Closes land here and in Operator review. After you vote ✓/✗ the row leaves this tape "
+        "(history stays under All-time). If you don't vote, this tape rolls at the next session day; "
+        "the review pile keeps the unvoted close at least 24h."
+    )
     pending_ids = {
         str(r.get("id") or "")
         for r in (st.session_state.room3_pending_reviews or [])
@@ -2439,6 +2522,9 @@ def _render_trade_history() -> None:
         if _trade_session_date(r) != today_key:
             continue
         if not _trade_is_closed_row(r) and "closing" not in str(r.get("status") or "").lower():
+            continue
+        # Voted rows leave this tape; they stay under All-time / Session history.
+        if r.get("reviewed") and str(r.get("operator_vote") or "").strip():
             continue
         rid = str(r.get("id") or "")
         if r.get("broker_source"):
@@ -3094,9 +3180,12 @@ def _render_strategy_health_strip() -> None:
 def _render_operator_review_panel() -> None:
     st.markdown("### Operator review")
     st.caption(
-        "System proposes · you confirm ✓ good or ✗ bad · votes save locally today; "
-        "votes bank first · DNA hardens only after TF bars (15m≥2 · 5m≥3 · 1m≥4) · prior DNA snapshotted for revert."
+        "System proposes · you confirm ✓ good or ✗ bad · votes bank first · "
+        "DNA hardens only after TF bars (15m≥2 · 5m≥3 · 1m≥4) · prior DNA snapshotted for revert. "
+        "A close lands here and in Today's log. After you vote it leaves this pile and Today's log. "
+        "If you don't vote, it stays here at least 24h even after Today's log rolls to the next day."
     )
+    _sync_pending_from_closed_history()
     pending = st.session_state.room3_pending_reviews or []
     if not pending:
         st.caption("No closed trades waiting for your vote.")
@@ -3853,6 +3942,9 @@ def _hydrate_screener_from_disk() -> None:
     op = (snap.get("operator_reviews") or []) if snap else []
     if isinstance(op, list) and op and not (st.session_state.get("room3_operator_reviews") or []):
         st.session_state.room3_operator_reviews = op
+    pend = (snap.get("pending_reviews") or []) if snap else []
+    if isinstance(pend, list) and pend and not (st.session_state.get("room3_pending_reviews") or []):
+        st.session_state.room3_pending_reviews = pend
     rl = (snap.get("review_learn") or {}) if snap else {}
     if isinstance(rl, dict) and (rl.get("observations") or rl.get("versions")) and not (
         (st.session_state.get("room3_review_learn") or {}).get("observations")
@@ -3916,6 +4008,7 @@ def _persist_screener_to_disk() -> None:
             "fill_meta_by_ticker": st.session_state.get("room3_fill_meta_by_ticker") or {},
             "strategy_feedback": st.session_state.get("room3_strategy_feedback") or {},
             "operator_reviews": st.session_state.get("room3_operator_reviews") or [],
+            "pending_reviews": st.session_state.get("room3_pending_reviews") or [],
             "review_learn": st.session_state.get("room3_review_learn") or room3_review_learn.state_from_session(st.session_state),
             "last_hub": str(st.session_state.get("terminal_hub") or ""),
         }
@@ -4388,7 +4481,8 @@ def _render_watch_book_panel() -> None:
     else:
         st.caption(
             "Maps / Match% / ticks refresh in the **Live** pulse below "
-            "(every ~30s) — belt controls stay here."
+            "(every ~30s) — belt controls stay here. Each name maps 1m, 5m, and 15m. "
+            "One open pile per ticker; other TFs keep scanning and show promise if they're hot."
         )
 
 

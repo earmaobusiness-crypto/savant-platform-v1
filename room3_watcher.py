@@ -311,18 +311,51 @@ def _update_shared_sensors(
             "value": vwap,
             "note": "from lookback window" if vwap is not None else "unavailable",
         }
-    # Optional sensors: stubs until wired (structure ready for SEC/news/social).
-    for name in ("sec", "news", "social"):
-        if name in sensors:
-            cur = pack.get(name) or {}
-            if cur.get("ok") is None:
-                pack[name] = {
-                    "ok": None,
-                    "note": "stub — recipe asked for it; feed not wired yet",
-                    "required": True,
-                }
-        elif name in pack and not (pack.get(name) or {}).get("required"):
-            pack[name] = {"ok": None, "note": "not required by active recipes"}
+    live = {}
+    try:
+        import room3_precursor
+
+        live = room3_precursor.live_sensor_overlay(
+            ticker, tf=str(plan.get("timeframe") or "15m")
+        )
+    except Exception:
+        live = {}
+    extra_notes = {
+        "sec": "filings / 8-K / S-3",
+        "news": "wires / headlines",
+        "social": "retail buzz",
+        "float": "tradable supply",
+        "short_interest": "squeeze pressure",
+        "dilution": "ATM / PIPE / toxic",
+        "halt": "LULD / halt history",
+        "spread": "bid-ask friction",
+        "rvol": "relative volume vs typical",
+        "prints": "aggressive tape (1m)",
+        "bid_ask": "inside spread (1m)",
+        "premarket_rvol": "pre-open volume vs typical (5m)",
+        "float_rotation": "volume vs float (5m)",
+        "offering": "shelf / 424B (15m)",
+        "insider": "Form 4 (15m)",
+        "borrow": "locate / HTB (15m)",
+        "sector": "peer / ETF tape (15m)",
+        "days_to_cover": "short ratio (15m)",
+    }
+    for name in sensors:
+        if name in ("charts", "vwap"):
+            continue
+        found = live.get(name) if isinstance(live.get(name), dict) else None
+        if found and found.get("ok") is not None:
+            cell = dict(found)
+            cell["required"] = True
+            pack[name] = cell
+            continue
+        cur = pack.get(name) or {}
+        if cur.get("ok") is None or not cur:
+            pack[name] = {
+                "ok": None,
+                "note": extra_notes.get(name, "hyper-vol extra") + " — feed filling in",
+                "required": True,
+            }
     packs[ticker] = pack
     return pack
 
@@ -614,36 +647,73 @@ def purge_untouched_maps(book: dict[str, Any]) -> dict[str, Any]:
     return book
 
 
-def _display_state(line: dict[str, Any]) -> str:
-    """Operator-facing state: sticky ≠ queued order-ready."""
+def _line_owns_seat(line: dict[str, Any]) -> bool:
+    """True when this TF is the live pile (in) or has a real entry stamped (queued)."""
+    raw = str(line.get("state") or "")
+    if raw == "in":
+        return True
+    return raw == "committed" and _entry_stamped(line)
+
+
+def _display_state(line: dict[str, Any], book: dict[str, Any] | None = None) -> str:
+    """Operator-facing state: sticky ≠ queued; sibling TFs can show promise without a second pile."""
     raw = str(line.get("state") or "watching")
     if raw == "in":
         return "in"
     if raw == "committed" and _entry_stamped(line):
         return "queued"
+    seat = _sibling_seat_tf(book or {}, line) if book else ""
+    if seat:
+        match = int(line.get("match_pct") or 0)
+        if match >= room3_matrix.MATCH_THRESHOLD_PCT:
+            return "promise"
+        if match >= STICKY_MIN_MATCH_PCT:
+            return "warming"
+        return "scanning"
     if raw == "committed" or line.get("sticky"):
         return "sticky"
     return raw
 
 
-def _why_not_firing(line: dict[str, Any]) -> str:
+def _sibling_seat_tf(book: dict[str, Any], line: dict[str, Any]) -> str:
+    """If another TF on this ticker is already in/queued, return that TF."""
+    ticker = str(line.get("ticker") or "").upper()
+    mine = line_key(ticker, str(line.get("timeframe") or ""))
+    for key, other in (book.get("lines") or {}).items():
+        if key == mine or not isinstance(other, dict):
+            continue
+        if str(other.get("ticker") or "").upper() != ticker:
+            continue
+        if _line_owns_seat(other):
+            return str(other.get("timeframe") or "")
+    return ""
+
+
+def _why_not_firing(line: dict[str, Any], book: dict[str, Any] | None = None) -> str:
     """Short reason when DNA is hot but no order is in flight."""
+    seat = _sibling_seat_tf(book or {}, line) if book else ""
+    match = int(line.get("match_pct") or 0)
+    state = _display_state(line, book)
+    if state == "in":
+        return "live trade"
+    if state == "queued":
+        return "order stamped · waiting fill"
+    if seat:
+        if match >= room3_matrix.MATCH_THRESHOLD_PCT:
+            return f"promise · {seat} has the seat"
+        if match >= STICKY_MIN_MATCH_PCT:
+            return f"warming {match}% · {seat} is in"
+        return f"scanning · {seat} is in"
     note = str(line.get("patience_note") or line.get("last_error") or "").strip()
     if note:
         return note[:48]
-    match = int(line.get("match_pct") or 0)
-    state = _display_state(line)
-    if state == "queued":
-        return "order stamped · waiting fill"
-    if state == "in":
-        return ""
     if match >= room3_matrix.MATCH_THRESHOLD_PCT:
         if state == "sticky":
             return "≥85% · need arm + open gates"
         return "≥85% · waiting arm/gates"
     if match >= STICKY_MIN_MATCH_PCT:
         return f"warming {match}% · need ≥{room3_matrix.MATCH_THRESHOLD_PCT}%"
-    return ""
+    return "scanning"
 
 
 def book_status_rows(book: dict[str, Any]) -> list[dict[str, Any]]:
@@ -652,10 +722,10 @@ def book_status_rows(book: dict[str, Any]) -> list[dict[str, Any]]:
         rows.append(
             {
                 "Line": key,
-                "State": _display_state(line),
+                "State": _display_state(line, book),
                 "Match%": int(line.get("match_pct") or 0),
                 "Layout": str(line.get("nearest_layout") or "—")[:16],
-                "Strategy": str(line.get("nearest_strategy") or "—")[:12],
+                "Strategy": str(line.get("nearest_strategy") or "—")[:20],
                 "Lookback": f"{int(line.get('recipe_lookback_min') or 0)}m"
                 if line.get("recipe_lookback_min")
                 else "—",
@@ -664,12 +734,11 @@ def book_status_rows(book: dict[str, Any]) -> list[dict[str, Any]]:
                     if float(line.get("size_usd") or 0) > 0
                     else "—"
                 ),
+                "Note": _why_not_firing(line, book)[:52],
                 "Slices": len(line.get("slices") or []),
                 "Patience": "yes" if line.get("patience") else "",
                 "Score": f"{float(line.get('score') or 0):.2f}",
-                "Filter": "in" if line.get("in_filter") else ("sticky" if line.get("sticky") else "out"),
                 "Last bar": str(line.get("last_bar_ts") or "—")[-19:],
-                "Err": _why_not_firing(line)[:40],
             }
         )
     return rows

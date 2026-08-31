@@ -199,7 +199,15 @@ def _bucket_key_from_row(row: dict[str, Any]) -> tuple[str, str, str] | None:
         return None
     strategy = str(row.get("execution_strategy") or row.get("strategy") or "").strip() or "—"
     raw_tf = str(row.get("timeframe_resolution") or "").strip()
-    tf = _normalize_tf(raw_tf or strategy)
+    try:
+        import room3_recipes
+
+        tf = room3_recipes.recipe_timeframe(
+            strategy=strategy,
+            timeframe_resolution=raw_tf,
+        ) or _normalize_tf(raw_tf or strategy)
+    except Exception:
+        tf = _normalize_tf(raw_tf or strategy)
     return (layout_id, strategy, tf)
 
 
@@ -217,7 +225,17 @@ def _layout_entry(
 ) -> dict[str, Any] | None:
     if not layout_id or layout_id in PLACEHOLDER_LAYOUT_IDS or not vector:
         return None
-    tf_norm = _normalize_tf(timeframe_resolution or strategy)
+    try:
+        import room3_recipes
+
+        tf_norm = room3_recipes.recipe_timeframe(
+            strategy=strategy,
+            timeframe_resolution=timeframe_resolution,
+        ) or _normalize_tf(timeframe_resolution or strategy)
+        mint_n = int(room3_recipes.STRATEGY_MINT_MIN_SAVES)
+    except Exception:
+        tf_norm = _normalize_tf(timeframe_resolution or strategy)
+        mint_n = 3
     bkey = bucket_key or f"{layout_id}|{strategy}|{tf_norm}"
     entry = {
         "layout_id": layout_id,
@@ -230,6 +248,10 @@ def _layout_entry(
         "strategy": str(strategy or ""),
         "pattern_count": int(pattern_count or 0),
         "vector_source": source or "unknown",
+        "tradeable": bool(
+            int(pattern_count or 0) >= mint_n
+            and str(source or "") in ("vault_genetic", "session")
+        ),
     }
     try:
         import room3_recipes
@@ -254,28 +276,36 @@ def _aggregate_rows_into_layouts(rows: list[dict[str, Any]]) -> list[dict[str, A
 
     out: list[dict[str, Any]] = []
     for (layout_id, strategy, tf_norm), group in sorted(buckets.items()):
-        vectors: list[list[float]] = []
+        genetic: list[list[float]] = []
+        envelopes: list[list[float]] = []
         raw_tfs: list[str] = []
         moves: list[float] = []
-        has_genetic = False
         for row in group:
             raw_sig = _parse_master_signature(row.get("master_signature_json"))
             if raw_sig:
-                has_genetic = True
-                vectors.append(raw_sig)
+                genetic.append(raw_sig)
             else:
-                vec = _parse_signature_from_row(row)
-                if vec:
-                    vectors.append(vec)
+                env = _parse_json_field(row.get("metric_envelopes_json"))
+                if env:
+                    vec = _vector_from_metric_envelopes(env, row)
+                    if vec and any(abs(float(x or 0)) > 1e-9 for x in vec):
+                        envelopes.append(vec)
             raw_tf = str(row.get("timeframe_resolution") or "").strip()
             if raw_tf:
                 raw_tfs.append(raw_tf)
             moves.append(float(row.get("structural_move_pct") or 0))
 
-        canon = _average_vectors(vectors) if vectors else _vector_from_row_metadata(group[0])
+        if genetic:
+            canon = _average_vectors(genetic)
+            source = "vault_genetic"
+        elif envelopes:
+            canon = _average_vectors(envelopes)
+            source = "vault_envelopes"
+        else:
+            # Trip-size proxy is not DNA — do not mint a fake live letter.
+            continue
         display_tf = Counter(raw_tfs).most_common(1)[0][0] if raw_tfs else tf_norm
         sm = sum(moves) / len(moves) if moves else 0.0
-        source = "vault_genetic" if has_genetic else "vault_collective"
         entry = _layout_entry(
             layout_id=layout_id,
             vector=canon,
@@ -480,6 +510,7 @@ def matrix_repertoire(session_state: Any) -> dict[str, Any]:
     deploy_registry = _deploy_registry(session_state, vault_rows)
     genetic_n = sum(1 for x in layouts if str(x.get("vector_source") or "") == "vault_genetic")
     collective_n = sum(1 for x in layouts if str(x.get("vector_source") or "") == "vault_collective")
+    tradeable_n = sum(1 for x in layouts if x.get("tradeable"))
 
     weather = _session_get(session_state, "market_weather_snapshot") or {}
     weather_name = ""
@@ -501,11 +532,20 @@ def matrix_repertoire(session_state: Any) -> dict[str, Any]:
 
     layout_n = len(layouts)
     deploy_n = len(deploy_registry)
-    dna_ready = layout_n > 0
-    return {
+    dna_ready = tradeable_n > 0
+    if layout_n:
+        dna_note = (
+            f"Live strategies: {tradeable_n} (≥3 saves + real DNA). "
+            f"{layout_n} bucket(s) from {pattern_count or len(vault_rows)} save(s). "
+            "Purgatory / trip-size proxies do not fire."
+        )
+    else:
+        dna_note = "Vault connected but no layout buckets found."
+    rep = {
         "layouts": layouts,
         "deploy_registry": deploy_registry,
         "layout_count": layout_n,
+        "tradeable_count": tradeable_n,
         "deploy_count": deploy_n,
         "pattern_count": pattern_count,
         "save_count": save_count,
@@ -515,12 +555,7 @@ def matrix_repertoire(session_state: Any) -> dict[str, Any]:
         "weather": weather_name or "—",
         "ready": dna_ready,
         "source": "vault_collective" if vault_layouts else ("session" if session_layouts else "empty"),
-        "dna_note": (
-            f"Collective matrix loaded — {layout_n} layout·strategy·TF bucket(s) from "
-            f"{pattern_count or len(vault_rows)} pattern save(s)."
-            if dna_ready
-            else "Vault connected but no layout buckets found."
-        ),
+        "dna_note": dna_note,
     }
     rep["_cached_at"] = time.time()
     try:

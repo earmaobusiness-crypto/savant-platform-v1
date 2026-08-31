@@ -1,0 +1,18 @@
+---
+description: Product truth — precursor mint, purgatory, trim, layout umbrella
+alwaysApply: true
+---
+
+# How a strategy is born (do not skip)
+
+Operator gives **one stock, one day, start time → end time, one TF**. That is not a strategy.
+
+**Capture:** From start, hunt **back** (1m: short; 5m/15m: deeper) for move-causes — operator names (SEC, volume, price, news, social) **plus extras** for hyper-vol: float, short interest, dilution/ATM, halts, RVOL, spread; 1m also prints/bid-ask; 5m premarket RVOL/float rotation; 15m offering, insider, borrow, sector tape, days-to-cover. Store that pack. Peek **a little after** start if needed; do not eat the move. Same around the **exit**.
+
+**Replay:** `python3 room3_replay.py --write` fills extras onto existing windows. **Reshuffle:** `python3 room3_recluster.py --write` regroups letters from that DNA (same TF, ≥85%, live only at 3+). Does not wipe rows. Snapshot first.
+
+**Purgatory:** First pack sits. A second similar pack (≥~85%) sits **beside** it. **Do not trim. Do not mint. Do not trade.** A letter is not a live strategy until **three** similar packs + real DNA (not a trip-size proxy). Then **trim fat**. Room 3 fires only those live letters, same-TF, ≥85% on the **before-pack**.
+
+**Layouts:** Market **environment** umbrella — which strategy families fit today. Not one layout only. If another layout/strategy has a real chance, keep it on a **2nd row**. EOD: learn from the names the operator gives.
+
+**Still open:** trim-fat on the third similar pack; layout 2nd row; EOD learn. Cloud still needs a push of this detector.

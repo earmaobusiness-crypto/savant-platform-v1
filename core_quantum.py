@@ -56,6 +56,12 @@ LOOKBACK_LANE_ASSERTIONS = {
     "5-Minute": FIVE_MINUTE_DRAGNET_BARS,
     "15-Minute": FIFTEEN_MINUTE_DRAGNET_BARS,
 }
+# Peek after operator start if the wick looks early — do not eat the trophy move.
+PRECURSOR_PEEK_BARS = {
+    "1-Minute": 1,
+    "5-Minute": 1,
+    "15-Minute": 2,
+}
 # Adaptive lookback — use all valid bars up to ideal depth; only trash if near-empty.
 LOOKBACK_ADAPTIVE_MIN_BARS = {
     "1-Minute": 2,
@@ -981,6 +987,31 @@ def _dynamic_5m_dragnet_window(data_stream, start_dt: datetime.datetime | None):
 def _dynamic_15m_dragnet_window(data_stream, start_dt: datetime.datetime | None):
     """Boundary-less 12-hour / 48-bar lookback on the 15m track from operator Start Time."""
     return _dynamic_bar_dragnet_window(data_stream, start_dt, FIFTEEN_MINUTE_DRAGNET_BARS)
+
+
+def _precursor_fence_end(
+    data_stream,
+    start_dt: datetime.datetime | None,
+    timeframe_resolution: str,
+):
+    """
+    DNA window ends at start wick plus a small peek — not operator end.
+    Looking a bit after start is allowed; eating the whole trip is not.
+    """
+    if start_dt is None:
+        return None
+    peek = int(PRECURSOR_PEEK_BARS.get(str(timeframe_resolution or ""), 1) or 1)
+    frame = _ensure_dataframe(data_stream)
+    if frame is None or frame.empty:
+        return start_dt
+    try:
+        after = frame[frame.index >= start_dt]
+        if after is None or after.empty:
+            return start_dt
+        tail = after.head(max(1, peek + 1))
+        return tail.index[-1]
+    except Exception:
+        return start_dt
 
 
 def _calibrated_lookback_start(
@@ -7668,16 +7699,18 @@ def run_global_vibe_check(
     end_dt = _parse_session_datetime(end_date, end_time)
     start_dt = _parse_session_datetime(start_date, start_time)
     scale = float(REGIME_VIBE_LOOKBACK_SCALE.get(timeframe_resolution, 1.0))
-    velocity = _compute_price_velocity_metrics(data_stream)
     lookback_start = _calibrated_lookback_start(
         end_dt,
         timeframe_resolution,
         start_dt=start_dt,
         data_stream=data_stream,
     )
-    metric_envelopes = compute_metric_envelopes(data_stream, end_dt, lookback_start)
+    precursor_end = _precursor_fence_end(data_stream, start_dt, timeframe_resolution) or start_dt or end_dt
+    precursor_frame = _lookback_window_frame(data_stream, precursor_end, lookback_start)
+    velocity = _compute_price_velocity_metrics(precursor_frame if precursor_frame is not None else data_stream)
+    metric_envelopes = compute_metric_envelopes(data_stream, precursor_end, lookback_start)
     vwap_bias_pct = 0.0
-    frame = _ensure_dataframe(data_stream)
+    frame = precursor_frame if precursor_frame is not None else _ensure_dataframe(data_stream)
     if frame is not None and not frame.empty and "VWAP" in frame.columns and "Close" in frame.columns:
         last_vw = float(frame["VWAP"].iloc[-1] or 0.0)
         last_close = float(frame["Close"].iloc[-1] or 0.0)
@@ -8124,7 +8157,8 @@ def calculate_quantum_frequencies(
         start_dt=start_dt,
         data_stream=data_stream,
     )
-    metric_envelopes = compute_metric_envelopes(data_stream, end_dt, lookback_start)
+    precursor_end = _precursor_fence_end(data_stream, start_dt, timeframe_resolution) or start_dt or end_dt
+    metric_envelopes = compute_metric_envelopes(data_stream, precursor_end, lookback_start)
     vwap_bias_pct = 0.0
     frame = _ensure_dataframe(data_stream)
     if frame is not None and not frame.empty and "VWAP" in frame.columns and "Close" in frame.columns:

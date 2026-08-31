@@ -5,7 +5,9 @@ alwaysApply: true
 
 # Room 3 — wallpaper (distinctive DNA)
 
-**Built (first version):** `match_spatial` downweights DNA dimensions that look the same across almost every saved layout (low spread = wallpaper) and upweights high-spread / distinctive traits. Size still also cuts when two strategies are almost equally close. **Same-TF only** — a 15m watch line never nearest-neighbors a 1m vault recipe.
+**Built (first version):** `match_spatial` downweights DNA dimensions that look the same across almost every saved layout (low spread = wallpaper) and upweights high-spread / distinctive traits. Size still also cuts when two strategies are almost equally close. **Same-TF only** — a 1m watch never nearest-neighbors or stamps a 15m recipe (the letter’s `(15M)` / `(5M)` / `(1M)` wins over a stale vault clock). A 15m watch never borrows 1m DNA.
+
+**Not done:** True corpus IDF from a large pattern library; operator-facing wallpaper diagnostics.
 
 **Not done:** True corpus IDF from a large pattern library; operator-facing wallpaper diagnostics.
 

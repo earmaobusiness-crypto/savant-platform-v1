@@ -10,7 +10,11 @@ Shared sensors across strategies on a ticker are fetched once per tick.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
+
+# 5A (15M) / 1D (15M) — the letter’s own TF token. Wins over a stale vault clock.
+_STRATEGY_TF_TOKEN = re.compile(r"\(\s*(1|5|15)\s*M\s*\)", re.IGNORECASE)
 
 # Default lookback (minutes of tape) when vault doesn't spell it out.
 DEFAULT_LOOKBACK_MIN: dict[str, int] = {
@@ -23,12 +27,44 @@ MAX_LOOKBACK_MIN: dict[str, int] = {
     "5m": 180,
     "15m": 240,
 }
-# Chart always on; others are recipe flags (stubs ok until wired).
-BASE_SENSORS = ("charts", "vwap")
-OPTIONAL_SENSORS = ("sec", "news", "social")
+# Chart + VWAP always. Named catalysts plus hyper-vol extras (not keyword-gated).
+# Operator names SEC/volume/price/news/social; we also pack what those names need.
+BASE_SENSORS = ("charts", "vwap", "rvol")
+SHARED_CATALYST_SENSORS = (
+    "sec",
+    "news",
+    "social",
+    "float",
+    "short_interest",
+    "dilution",
+    "halt",
+    "spread",
+)
+# Extra tells by TF — hyper-volatile names; 15m gets the deepest brew.
+TF_EXTRA_SENSORS: dict[str, tuple[str, ...]] = {
+    "1m": ("prints", "bid_ask"),
+    "5m": ("premarket_rvol", "float_rotation"),
+    "15m": ("offering", "insider", "borrow", "sector", "days_to_cover"),
+}
+OPTIONAL_SENSORS = SHARED_CATALYST_SENSORS + (
+    "prints",
+    "bid_ask",
+    "premarket_rvol",
+    "float_rotation",
+    "offering",
+    "insider",
+    "borrow",
+    "sector",
+    "days_to_cover",
+)
+# Three similar packs before a letter is a live strategy (purgatory until then).
+STRATEGY_MINT_MIN_SAVES = 3
 
 
 def normalize_tf(raw: str) -> str:
+    named = strategy_tf_token(raw)
+    if named:
+        return named
     s = str(raw or "").strip().lower().replace(" ", "")
     if s in {"1", "1m", "1min", "1minute", "m1"}:
         return "1m"
@@ -43,6 +79,54 @@ def normalize_tf(raw: str) -> str:
     if s.startswith("1") or "1m" in s:
         return "1m"
     return "5m"
+
+
+def strategy_tf_token(strategy: str) -> str:
+    """TF printed on a matrix letter, e.g. 5A (15M) → 15m. Empty if unlabeled."""
+    match = _STRATEGY_TF_TOKEN.search(str(strategy or ""))
+    if not match:
+        return ""
+    return {"1": "1m", "5": "5m", "15": "15m"}[match.group(1)]
+
+
+def recipe_timeframe(
+    *,
+    strategy: str = "",
+    timeframe: str = "",
+    timeframe_norm: str = "",
+    timeframe_resolution: str = "",
+) -> str:
+    """
+    Timeframe this DNA actually belongs to.
+
+    The letter’s parenthetical (15M / 5M / 1M) wins over timeframe_norm.
+    That stops a 1m watch from matching a bin whose clock says 1m but whose
+    name is 5A (15M) — CRE Aug 26: 1m ticket, 15M sticker.
+    """
+    named = strategy_tf_token(strategy)
+    if named:
+        return named
+    for raw in (timeframe_norm, timeframe, timeframe_resolution):
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        tf = normalize_tf(text)
+        if tf in ("1m", "5m", "15m"):
+            return tf
+    if str(strategy or "").strip():
+        tf = normalize_tf(strategy)
+        if tf in ("1m", "5m", "15m"):
+            return tf
+    return ""
+
+
+def strategy_tf_agrees(strategy: str, watch_tf: str) -> bool:
+    """False when the letter names a different TF than the live watch."""
+    named = strategy_tf_token(strategy)
+    want = normalize_tf(watch_tf) if str(watch_tf or "").strip() else ""
+    if not named or want not in ("1m", "5m", "15m"):
+        return True
+    return named == want
 
 
 def minutes_to_bars(tf: str, minutes: int) -> int:
@@ -67,8 +151,8 @@ def recipe_for(
 
     Heuristics until vault stores explicit recipes:
       - TF default lookback
-      - strategy/layout name keywords unlock optional sensors
-      - larger structural moves get a bit more tape + patience
+      - always pack catalyst + hyper-vol extras (not keyword-gated)
+      - larger stored trips get a bit more tape + patience
     """
     tf = normalize_tf(timeframe)
     strat = str(strategy or "").strip()
@@ -77,20 +161,15 @@ def recipe_for(
 
     lookback = int(DEFAULT_LOOKBACK_MIN.get(tf, 60))
     sensors: list[str] = list(BASE_SENSORS)
+    for s in SHARED_CATALYST_SENSORS:
+        if s not in sensors:
+            sensors.append(s)
+    for s in TF_EXTRA_SENSORS.get(tf, ()):
+        if s not in sensors:
+            sensors.append(s)
 
     if any(k in blob for k in ("sec", "filing", "8-k", "8k", "10-q", "10q", "earnings")):
-        if "sec" not in sensors:
-            sensors.append("sec")
         lookback = max(lookback, int(DEFAULT_LOOKBACK_MIN.get(tf, 60) * 1.25))
-    if any(k in blob for k in ("news", "headline", "press", "catalyst")):
-        if "news" not in sensors:
-            sensors.append("news")
-    if any(k in blob for k in ("social", "sentiment", "reddit", "twitter", "x.com")):
-        if "social" not in sensors:
-            sensors.append("social")
-    if any(k in blob for k in ("vwap", "volume profile", "anchor")):
-        if "vwap" not in sensors:
-            sensors.append("vwap")
 
     move = abs(float(structural_move_pct or 0))
     if move >= 8.0:
@@ -235,15 +314,15 @@ def plan_for_timeframe(
 
 
 def empty_sensor_pack(ticker: str) -> dict[str, Any]:
-    return {
+    pack: dict[str, Any] = {
         "ticker": str(ticker or "").upper(),
         "charts": {"ok": False, "note": "pending"},
         "vwap": {"ok": False, "note": "pending"},
-        "sec": {"ok": None, "note": "stub — not wired yet"},
-        "news": {"ok": None, "note": "stub — not wired yet"},
-        "social": {"ok": None, "note": "stub — not wired yet"},
         "shared": True,
     }
+    for name in OPTIONAL_SENSORS:
+        pack[name] = {"ok": None, "note": "pending — hyper-vol extra"}
+    return pack
 
 
 def recipes_need_sensor(recipes: list[dict[str, Any]], sensor: str) -> bool:

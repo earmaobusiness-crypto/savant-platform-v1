@@ -149,12 +149,14 @@ def build_live_feature_vector(line: dict[str, Any]) -> list[float] | None:
     mean_close = sum(closes) / len(closes)
     vwap_bias = ((closes[-1] - mean_close) / closes[-1] * 100.0) if closes[-1] else 0.0
     pearson = _pearson_r(closes[-8:])
+    # Log-volume so share-count sigma cannot crush cosine vs Room 2 envelopes.
+    vol_sigma_n = math.log10(1.0 + vol_sigma) if vol_sigma > 0 else 0.0
 
     return [
         round(session_velocity, 4),
         round(peak_bar, 4),
         round(mean_bar, 4),
-        round(vol_sigma, 4),
+        round(vol_sigma_n, 4),
         round(vol_z, 4),
         round(vwap_bias, 4),
         0.0,
@@ -181,15 +183,17 @@ def match_spatial(
         for e in (layouts or [])
         if (e.get("vector") or []) and len(e.get("vector") or []) == len(snapshot_vec)
     ]
-    # Hard TF gate: 15m lanes only rhyme with 15m DNA (never borrow a 1m label).
+    # Hard TF gate + live strategies only (purgatory / trip-size proxy do not fire).
     usable: list[dict[str, Any]] = []
     for e in dim_ok:
-        entry_tf = str(
-            e.get("timeframe_norm")
-            or _normalize_watch_tf(
-                e.get("timeframe_resolution") or e.get("strategy") or ""
-            )
-        )
+        if not e.get("tradeable", True):
+            continue
+        try:
+            if int(e.get("pattern_count") or 0) < int(room3_recipes.STRATEGY_MINT_MIN_SAVES):
+                continue
+        except (TypeError, ValueError):
+            continue
+        entry_tf = _layout_dna_tf(e)
         if watch_tf and entry_tf and entry_tf != watch_tf:
             continue
         if watch_tf and not entry_tf:
@@ -200,12 +204,7 @@ def match_spatial(
     for entry in usable:
         stored = [float(x) for x in (entry.get("vector") or [])]
         cos = cosine_similarity(snapshot_vec, stored, weights)
-        entry_tf = str(
-            entry.get("timeframe_norm")
-            or _normalize_watch_tf(
-                entry.get("timeframe_resolution") or entry.get("strategy") or ""
-            )
-        )
+        entry_tf = _layout_dna_tf(entry)
         if cos > best_cosine:
             second_cosine = best_cosine
             best_cosine = cos
@@ -236,31 +235,52 @@ def match_spatial(
 
 
 def _normalize_watch_tf(raw: str) -> str:
-    t = str(raw or "").lower()
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    named = room3_recipes.strategy_tf_token(text)
+    if named:
+        return named
+    t = text.lower()
     if t in ("1m", "5m", "15m"):
         return t
-    if "15" in t:
-        return "15m"
-    if "5" in t:
-        return "5m"
-    if "1" in t:
-        return "1m"
-    return t
+    return room3_recipes.recipe_timeframe(timeframe=text) or t
 
 
-def strategy_for_layout(layout_id: str, repertoire: dict[str, Any]) -> str:
+def _layout_dna_tf(entry: dict[str, Any]) -> str:
+    return room3_recipes.recipe_timeframe(
+        strategy=str(entry.get("strategy") or entry.get("execution_strategy") or ""),
+        timeframe_norm=str(entry.get("timeframe_norm") or ""),
+        timeframe=str(entry.get("timeframe") or ""),
+        timeframe_resolution=str(entry.get("timeframe_resolution") or ""),
+    )
+
+
+def strategy_for_layout(
+    layout_id: str,
+    repertoire: dict[str, Any],
+    *,
+    timeframe: str = "",
+) -> str:
     lid = str(layout_id or "").strip()
     if not lid or lid in PLACEHOLDER_LAYOUTS:
         return "matrix"
+    want = _normalize_watch_tf(timeframe) if timeframe else ""
+
+    def _ok(strat: str) -> bool:
+        if not strat:
+            return False
+        return room3_recipes.strategy_tf_agrees(strat, want) if want else True
+
     for row in reversed(list(repertoire.get("deploy_registry") or [])):
         if str(row.get("layout") or row.get("layout_id") or "") == lid:
             strat = str(row.get("strategy") or row.get("execution_strategy") or "").strip()
-            if strat:
+            if _ok(strat):
                 return strat
     for row in repertoire.get("layouts") or []:
         if str(row.get("layout_id") or "") == lid:
             strat = str(row.get("strategy") or row.get("execution_strategy") or "").strip()
-            if strat:
+            if _ok(strat):
                 return strat
     return "matrix"
 
@@ -364,12 +384,7 @@ def _tf_layout_counts(layouts: list[dict[str, Any]] | None) -> dict[str, int]:
     counts = {"1m": 0, "5m": 0, "15m": 0}
     seen: set[tuple[str, str, str]] = set()
     for entry in layouts or []:
-        tf = _normalize_watch_tf(
-            entry.get("timeframe_norm")
-            or entry.get("timeframe_resolution")
-            or entry.get("timeframe")
-            or ""
-        )
+        tf = _layout_dna_tf(entry)
         if tf not in counts:
             continue
         key = (
@@ -799,18 +814,29 @@ def maybe_queue_matrix_signals(
     line["match_pct"] = int(match.get("spatial_match_pct") or 0)
     layout_id = str(match.get("nearest_layout_id") or "—")
     line["nearest_layout"] = layout_id
+    tf = str(line.get("timeframe") or "1m")
     nearest_strat = str(match.get("nearest_strategy") or "").strip()
     if (
         (not nearest_strat or nearest_strat in ("—", "-", "matrix"))
         and layout_id not in PLACEHOLDER_LAYOUTS
     ):
-        nearest_strat = strategy_for_layout(layout_id, repertoire)
+        nearest_strat = strategy_for_layout(layout_id, repertoire, timeframe=tf)
+    if nearest_strat and not room3_recipes.strategy_tf_agrees(nearest_strat, tf):
+        nearest_strat = "—"
+        layout_id = "—"
+        line["nearest_layout"] = layout_id
+        match = {
+            **match,
+            "nearest_layout_id": "—",
+            "nearest_strategy": "",
+            "spatial_match_pct": 0,
+        }
+        line["match_pct"] = 0
     line["nearest_strategy"] = nearest_strat or "—"
     line["score"] = float(match.get("display_score") or 0)
     line["second_cosine"] = float(match.get("second_cosine") or 0)
 
     ticker = str(line.get("ticker") or "").upper()
-    tf = str(line.get("timeframe") or "1m")
     slices = list(line.get("slices") or [])
     last_px = float(slices[-1].get("c") or 0) if slices else 0.0
     exclude = ticker if str(line.get("state") or "") in ("in", "committed") else ""
@@ -992,7 +1018,11 @@ def maybe_queue_matrix_signals(
     if layout_id in PLACEHOLDER_LAYOUTS:
         return
 
-    strategy = str(match.get("nearest_strategy") or "") or strategy_for_layout(layout_id, repertoire)
+    strategy = str(match.get("nearest_strategy") or "") or strategy_for_layout(
+        layout_id, repertoire, timeframe=tf
+    )
+    if not room3_recipes.strategy_tf_agrees(strategy, tf):
+        return
     qty, notional = _compute_entry_qty(
         price=last_px,
         session_state=session_state,
