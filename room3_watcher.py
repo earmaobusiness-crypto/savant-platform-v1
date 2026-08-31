@@ -774,6 +774,17 @@ def tick_watcher(
         line["pulse_seconds"] = pulse
 
         due = (not line.get("seeded")) or now_m >= float(line.get("next_pulse_at") or 0)
+        # Armed + already ≥85% must not wait out a 5m/15m clock. 1m is first in rank.
+        if (
+            trade_ok
+            and entries_allowed
+            and line.get("seeded")
+            and (line.get("slices") or [])
+            and int(line.get("match_pct") or 0) >= room3_matrix.MATCH_THRESHOLD_PCT
+            and str(line.get("state") or "") in ("watching", "committed")
+            and not line.get("entry_signal")
+        ):
+            due = True
         if due:
             just_seeded = False
             if not line.get("seeded"):
@@ -868,6 +879,11 @@ def tick_watcher(
         else "maps on · arm engine to trade"
     )
     book["engine_armed"] = bool(trade_ok)
+    book["entries_allowed"] = bool(entries_allowed)
+    try:
+        book["pause_entries"] = bool(session_state.get("room3_pause_entries"))
+    except Exception:
+        book["pause_entries"] = False
     pulse_note = ", ".join(
         f"{tf}@{int(tf_plans[tf].get('pulse_seconds') or 60)}s"
         for tf in TIMEFRAMES
@@ -974,6 +990,10 @@ def _why_not_firing(line: dict[str, Any], book: dict[str, Any] | None = None) ->
         return note[:48]
     if match >= room3_matrix.MATCH_THRESHOLD_PCT:
         if book and book.get("engine_armed"):
+            if book.get("pause_entries"):
+                return "≥85% · Pause is on — no new entries"
+            if book.get("entries_allowed") is False:
+                return "≥85% · session gate off"
             return "≥85% · firing"
         return "≥85% · ready · Arm is OFF — flip Arm to send"
     if match >= STICKY_MIN_MATCH_PCT:

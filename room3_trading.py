@@ -1126,61 +1126,59 @@ def _set_tradable_pct(pct: float, equity: float) -> None:
 
 
 def _stamp_position_timeframes() -> None:
-    """Alpaca positions don't know 1m/5m/15m — copy TF + strategy from a real entry, never today's nearest."""
+    """Alpaca has no TF/letter — copy from the in-line (entry stamp, else live letter)."""
     rows = list(st.session_state.get("room3_open_positions") or [])
     if not rows:
         return
     by_ticker_tf: dict[str, str] = {}
     by_ticker_strat: dict[str, str] = {}
     book = st.session_state.get("room3_watch_book") or {}
+
+    def _usable_strat(layout: str, strat: str) -> str:
+        s = str(strat or "").strip()
+        if not s or s in ("—", "-", "Alpaca", "matrix"):
+            return ""
+        if room3_recipes.is_purgatory_letter(str(layout or ""), s):
+            return ""
+        return s
+
+    ranked: list[tuple[int, dict]] = []
     for line in (book.get("lines") or {}).values():
+        state = str(line.get("state") or "")
+        rank = 0 if state == "in" else 1 if state == "committed" else 2
+        ranked.append((rank, line))
+    ranked.sort(key=lambda x: x[0])
+    for rank, line in ranked:
         ticker = str(line.get("ticker") or "").upper()
         tf = str(line.get("timeframe") or "")
         if not ticker:
             continue
-        if tf in ("1m", "5m", "15m") and str(line.get("state") or "") in (
-            "in",
-            "committed",
-        ):
+        if tf in ("1m", "5m", "15m") and ticker not in by_ticker_tf:
             by_ticker_tf[ticker] = tf
-        strat = str(line.get("entry_strategy") or "").strip()
-        if (
-            strat
-            and strat not in ("—", "-", "Alpaca", "matrix")
-            and not room3_recipes.is_purgatory_letter(
-                str(line.get("entry_layout") or ""), strat
-            )
-        ):
+        strat = _usable_strat(
+            str(line.get("entry_layout") or line.get("nearest_layout") or ""),
+            str(line.get("entry_strategy") or line.get("nearest_strategy") or ""),
+        )
+        if strat and ticker not in by_ticker_strat:
             by_ticker_strat[ticker] = strat
     fill_meta = st.session_state.get("room3_fill_meta_by_ticker") or {}
     for ticker, meta in fill_meta.items():
         sym = str(ticker or "").upper()
         if not sym:
             continue
-        strat = str(meta.get("strategy") or "").strip()
+        strat = _usable_strat(str(meta.get("layout_id") or ""), str(meta.get("strategy") or ""))
         tf = str(meta.get("timeframe") or "").strip()
-        if (
-            strat
-            and strat not in ("—", "-", "Alpaca", "matrix")
-            and not room3_recipes.is_purgatory_letter(str(meta.get("layout_id") or ""), strat)
-            and sym not in by_ticker_strat
-        ):
+        if strat and sym not in by_ticker_strat:
             by_ticker_strat[sym] = strat
         if tf in ("1m", "5m", "15m") and sym not in by_ticker_tf:
             by_ticker_tf[sym] = tf
     for row in list(st.session_state.get("room3_trade_history") or []):
         ticker = str(row.get("ticker") or "").upper()
         tf = str(row.get("timeframe") or "")
-        strat = str(row.get("strategy") or "").strip()
+        strat = _usable_strat(str(row.get("layout_id") or ""), str(row.get("strategy") or ""))
         if ticker and tf in ("1m", "5m", "15m") and ticker not in by_ticker_tf:
             by_ticker_tf[ticker] = tf
-        if (
-            ticker
-            and strat
-            and strat not in ("—", "-", "Alpaca", "matrix")
-            and not room3_recipes.is_purgatory_letter(str(row.get("layout_id") or ""), strat)
-            and ticker not in by_ticker_strat
-        ):
+        if ticker and strat and ticker not in by_ticker_strat:
             by_ticker_strat[ticker] = strat
     for row in rows:
         ticker = str(row.get("ticker") or "").upper()
@@ -1196,6 +1194,26 @@ def _stamp_position_timeframes() -> None:
             and ticker in by_ticker_strat
         ):
             row["strategy"] = by_ticker_strat[ticker]
+    # Keep letters across the next Alpaca fetch (broker always returns "Alpaca").
+    cache = dict(st.session_state.get("room3_fill_meta_by_ticker") or {})
+    for row in rows:
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker:
+            continue
+        meta = dict(cache.get(ticker) or {})
+        strat = str(row.get("strategy") or "").strip()
+        tf = str(row.get("timeframe") or "").strip()
+        layout = str(row.get("layout_id") or "").strip()
+        if strat and strat not in ("—", "-", "Alpaca", "matrix"):
+            if not room3_recipes.is_purgatory_letter(layout, strat):
+                meta["strategy"] = strat
+        if tf in ("1m", "5m", "15m"):
+            meta["timeframe"] = tf
+        if layout and layout not in ("—", "-"):
+            meta["layout_id"] = layout
+        if meta:
+            cache[ticker] = meta
+    st.session_state.room3_fill_meta_by_ticker = cache
     st.session_state.room3_open_positions = rows
 
 
@@ -2003,16 +2021,34 @@ def _reconcile_watch_book_with_broker() -> int:
         if any(str(line.get("state") or "") == "in" for line in owned):
             continue
         pick = None
-        for tf in ("15m", "5m", "1m"):
-            pick = lines.get(room3_watcher.line_key(sym, tf))
-            if pick:
-                break
-        if pick is None and owned:
-            pick = owned[0]
+        if owned:
+            def _pick_key(line: dict) -> tuple:
+                tf = str(line.get("timeframe") or "")
+                tf_rank = {"1m": 0, "5m": 1, "15m": 2}.get(tf, 9)
+                return (int(line.get("match_pct") or 0), -tf_rank)
+
+            pick = max(owned, key=_pick_key)
         if pick is not None:
             pick["state"] = "in"
             pick["sticky"] = False
             pick.pop("sticky_until", None)
+            layout = str(pick.get("nearest_layout") or "").strip()
+            strat = str(pick.get("nearest_strategy") or "").strip()
+            if strat and strat not in ("—", "-", "Alpaca", "matrix"):
+                if not room3_recipes.is_purgatory_letter(layout, strat):
+                    pick["entry_strategy"] = strat
+                    if layout and layout not in ("—", "-"):
+                        pick["entry_layout"] = layout
+                    cache = dict(st.session_state.get("room3_fill_meta_by_ticker") or {})
+                    meta = dict(cache.get(sym) or {})
+                    meta["strategy"] = strat
+                    tf = str(pick.get("timeframe") or "").strip()
+                    if tf in ("1m", "5m", "15m"):
+                        meta["timeframe"] = tf
+                    if layout and layout not in ("—", "-"):
+                        meta["layout_id"] = layout
+                    cache[sym] = meta
+                    st.session_state.room3_fill_meta_by_ticker = cache
             n += 1
     st.session_state.room3_watch_book = book
     return n
@@ -2537,14 +2573,8 @@ def _render_open_positions() -> None:
         display.append(
             {
                 "Ticker": r.get("ticker"),
-                "TF": r.get("timeframe"),
-                "Strategy": (
-                    "—"
-                    if room3_recipes.is_purgatory_letter(
-                        str(r.get("layout_id") or ""), str(r.get("strategy") or "")
-                    )
-                    else r.get("strategy")
-                ),
+                "TF": _display_trade_timeframe(r),
+                "Strategy": _display_trade_strategy(r),
                 "Entry": r.get("entry_time"),
                 "Entry $": f"{float(r.get('entry_price') or 0):.2f}",
                 "Exit $": f"{float(r.get('last_price') or 0):.2f}",
@@ -3631,7 +3661,6 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     )
     # Open = still open at broker. Flat account ⇒ empty open table.
     st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(paper=paper) or []
-    _stamp_position_timeframes()
     # Closed fills across lookback (Friday+) stay in history / Session history.
     dbg = room3_alpaca.fetch_closed_trades_today_debug(paper=paper)
     closed = dbg.get("closed") or []
@@ -3649,6 +3678,8 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     st.session_state.room3_last_broker_sync = datetime.now(ET).strftime("%H:%M:%S ET")
     st.session_state.pop("room3_positions_pinned_empty", None)
     _reconcile_watch_book_with_broker()
+    # After adopt: leftover rows have a letter/TF to copy. Alpaca itself has neither.
+    _stamp_position_timeframes()
     return result
 
 

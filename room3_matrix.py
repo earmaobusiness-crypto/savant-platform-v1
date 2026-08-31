@@ -1027,10 +1027,18 @@ def maybe_queue_matrix_signals(
     ):
         return
 
-    strategy = str(match.get("nearest_strategy") or "") or strategy_for_layout(
-        layout_id, repertoire, timeframe=tf
-    )
+    strategy = str(line.get("nearest_strategy") or "").strip()
+    if strategy in ("", "—", "-", "matrix"):
+        strategy = str(match.get("nearest_strategy") or "") or strategy_for_layout(
+            layout_id, repertoire, timeframe=tf
+        )
+    if strategy and not room3_recipes.strategy_tf_agrees(strategy, tf):
+        strategy = strategy_for_layout(layout_id, repertoire, timeframe=tf)
+    if not strategy or strategy in ("", "—", "-", "matrix"):
+        return
     if not room3_recipes.strategy_tf_agrees(strategy, tf):
+        return
+    if room3_recipes.is_purgatory_letter(layout_id, strategy):
         return
     qty, notional = _compute_entry_qty(
         price=last_px,
