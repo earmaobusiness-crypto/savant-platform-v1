@@ -231,6 +231,11 @@ def execute_matrix_signal(
     result["intent"] = intent
     result["strategy"] = str(signal.get("strategy") or "matrix")
     result["timeframe"] = str(signal.get("timeframe") or "—")
+    result["layout_id"] = str(signal.get("layout_id") or "")
+    result["letter"] = str(signal.get("letter") or "")
+    result["lot_id"] = str(signal.get("lot_id") or "")
+    result["add_lot"] = bool(signal.get("add_lot"))
+    result["scale_in"] = bool(signal.get("scale_in"))
     result["blocked"] = False
     return result
 

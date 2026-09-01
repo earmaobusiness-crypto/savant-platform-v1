@@ -24,6 +24,7 @@ import room3_engine
 import room3_matrix
 import room3_precursor
 import room3_recipes
+import room3_lots
 
 ET = ZoneInfo("America/New_York")
 
@@ -565,9 +566,11 @@ def evaluate_line_signals(line: dict[str, Any]) -> dict[str, Any] | None:
         sig = dict(line["exit_signal"])
         line["exit_signal"] = None
         return sig
+    entry = line.get("entry_signal") or {}
+    add_or_scale = bool(entry.get("scale_in") or entry.get("add_lot"))
     if line.get("entry_signal") and (
         line.get("state") in ("watching", "committed")
-        or (line.get("state") == "in" and (line.get("entry_signal") or {}).get("scale_in"))
+        or (line.get("state") == "in" and add_or_scale)
     ):
         sig = dict(line["entry_signal"])
         line["entry_signal"] = None
@@ -605,6 +608,7 @@ def queue_entry_signal(
         "qty": float(qty),
         "strategy": strategy,
         "timeframe": timeframe,
+        "layout_id": str(layout_id or ""),
         "scale_in": bool(scale_in),
         "order_style": style,
     }
@@ -640,6 +644,7 @@ def queue_exit_signal(
         "qty": float(qty),
         "strategy": strategy,
         "timeframe": timeframe,
+        "layout_id": str(layout_id or ""),
         "order_style": style,
     }
     return True
@@ -742,18 +747,29 @@ def tick_watcher(
         tf = str(line.get("timeframe") or "1m")
         ticker = str(line.get("ticker") or "").upper()
         plan = tf_plans.get(tf) or room3_recipes.plan_for_timeframe(layouts, tf)
+        hot = None
+        kids = [c for c in (line.get("children") or []) if isinstance(c, dict)]
+        if kids:
+            hot = max(kids, key=lambda c: int(c.get("match_pct") or 0))
+        hot_strat = str((hot or {}).get("strategy") or line.get("nearest_strategy") or line.get("strategy") or "")
+        hot_layout = str((hot or {}).get("layout_id") or line.get("nearest_layout") or line.get("entry_layout") or "")
+        hot_struct = float(
+            (hot or {}).get("structural_move_pct")
+            or line.get("structural_move_pct")
+            or 0
+        )
         letter = room3_recipes.recipe_for(
-            str(line.get("nearest_strategy") or line.get("strategy") or ""),
+            hot_strat,
             tf,
-            layout_id=str(line.get("nearest_layout") or line.get("entry_layout") or ""),
-            structural_move_pct=float(line.get("structural_move_pct") or 0),
+            layout_id=hot_layout,
+            structural_move_pct=hot_struct,
         )
         in_trade = str(line.get("state") or "") == "in"
         cadence = room3_recipes.cadence_for(
-            str(line.get("nearest_strategy") or line.get("strategy") or ""),
+            hot_strat,
             tf,
-            layout_id=str(line.get("nearest_layout") or line.get("entry_layout") or ""),
-            structural_move_pct=float(line.get("structural_move_pct") or 0),
+            layout_id=hot_layout,
+            structural_move_pct=hot_struct,
             in_trade=in_trade,
         )
         pulse = int(cadence.get("pulse_seconds") or letter.get("pulse_seconds") or 60)
@@ -774,15 +790,19 @@ def tick_watcher(
         line["pulse_seconds"] = pulse
 
         due = (not line.get("seeded")) or now_m >= float(line.get("next_pulse_at") or 0)
-        # Armed + already ≥85% must not wait out a 5m/15m clock. 1m is first in rank.
+        hot_match = int(line.get("match_pct") or 0)
+        if kids:
+            hot_match = max(hot_match, max(int(c.get("match_pct") or 0) for c in kids))
+        # Armed + a live letter already ≥85% must not wait out a 5m/15m clock.
         if (
             trade_ok
             and entries_allowed
             and line.get("seeded")
             and (line.get("slices") or [])
-            and int(line.get("match_pct") or 0) >= room3_matrix.MATCH_THRESHOLD_PCT
-            and str(line.get("state") or "") in ("watching", "committed")
+            and hot_match >= room3_matrix.MATCH_THRESHOLD_PCT
+            and str(line.get("state") or "") in ("watching", "committed", "in")
             and not line.get("entry_signal")
+            and not line.get("exit_signal")
         ):
             due = True
         if due:
@@ -979,8 +999,8 @@ def _why_not_firing(line: dict[str, Any], book: dict[str, Any] | None = None) ->
     if line.get("in_filter") is False and state not in ("in", "queued"):
         return "leftover · exit only · no new buy"
     if seat:
-        if match >= room3_matrix.MATCH_THRESHOLD_PCT:
-            return f"promise · {seat} has the seat"
+        if match >= room3_matrix.CHILD_READY_PCT:
+            return f"would add · {seat} already in"
         if match >= STICKY_MIN_MATCH_PCT:
             return f"warming {match}% · {seat} is in"
         return f"scanning · {seat} is in"
@@ -1005,32 +1025,76 @@ def _why_not_firing(line: dict[str, Any], book: dict[str, Any] | None = None) ->
 
 def book_status_rows(book: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
+    pad = "\u00a0\u00a0\u00a0"
     for key, line in sorted((book.get("lines") or {}).items()):
         layout = str(line.get("nearest_layout") or "—")
         strat = str(line.get("nearest_strategy") or "—")
         match_pct = int(line.get("match_pct") or 0)
         if room3_recipes.is_purgatory_letter(layout, strat):
             layout, strat, match_pct = "—", "—", 0
+        ticker = str(line.get("ticker") or "")
+        tf = str(line.get("timeframe") or "")
+        kids = [c for c in (line.get("children") or []) if isinstance(c, dict)]
+        main_note = "scanning live letters" if kids else _why_not_firing(line, book)[:52]
         rows.append(
             {
-                "Line": key,
-                "State": _display_state(line, book),
-                "Match%": match_pct,
-                "Layout": layout[:16],
-                "Strategy": strat[:20],
+                "Line": f"{ticker} {tf}".strip() or key,
+                "Kind": "main",
+                "State": "scanning" if kids else _display_state(line, book),
+                "Match%": match_pct if not kids else "scanning",
+                "Layout": "all live" if kids else layout[:16],
+                "Strategy": "—",
                 "Lookback": f"{int(line.get('recipe_lookback_min') or 0)}m"
                 if line.get("recipe_lookback_min")
                 else "—",
-                "Size $": (
-                    f"${float(line.get('size_usd') or 0):,.0f}"
-                    if float(line.get("size_usd") or 0) > 0
-                    else "—"
-                ),
-                "Note": _why_not_firing(line, book)[:52],
+                "Size $": "—",
+                "Note": main_note[:72],
                 "Slices": len(line.get("slices") or []),
                 "Patience": "yes" if line.get("patience") else "",
                 "Score": f"{float(line.get('score') or 0):.2f}",
                 "Last bar": str(line.get("last_bar_ts") or "—")[-19:],
             }
         )
+        queued_letter = str((line.get("entry_signal") or {}).get("letter") or (line.get("entry_signal") or {}).get("strategy") or "")
+        in_letter = str(line.get("entry_strategy") or "")
+        for child in kids:
+            letter = str(child.get("letter") or "")
+            clayout = str(child.get("layout_id") or "—")[:16]
+            cstrat = str(child.get("strategy") or letter)[:20]
+            cm = int(child.get("match_pct") or 0)
+            if room3_recipes.is_purgatory_letter(clayout, cstrat):
+                continue
+            if child.get("in_lot") or (in_letter and room3_lots.letter_token("", in_letter) == letter and str(line.get("state") or "") == "in"):
+                cstate = "in"
+            elif queued_letter and room3_lots.letter_token("", queued_letter) == letter:
+                cstate = "queued"
+            elif cm >= room3_matrix.MATCH_THRESHOLD_PCT:
+                cstate = "ready"
+            else:
+                cstate = "warming"
+            fire_size = (
+                f"${float(line.get('size_usd') or 0):,.0f}"
+                if float(line.get("size_usd") or 0) > 0 and cm >= room3_matrix.CHILD_READY_PCT
+                else "—"
+            )
+            note = str(child.get("patience_note") or "")[:52]
+            if cstate == "in":
+                note = note or "live lot · exits on this letter"
+            rows.append(
+                {
+                    "Line": f"{pad}{letter}",
+                    "Kind": "sub-lane",
+                    "State": cstate,
+                    "Match%": cm,
+                    "Layout": clayout,
+                    "Strategy": cstrat,
+                    "Lookback": "—",
+                    "Size $": fire_size,
+                    "Note": note or _why_not_firing(line, book)[:52],
+                    "Slices": "",
+                    "Patience": "",
+                    "Score": "",
+                    "Last bar": "",
+                }
+            )
     return rows

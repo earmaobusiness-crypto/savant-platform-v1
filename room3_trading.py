@@ -28,6 +28,7 @@ import room3_recipes
 import room3_screener
 import room3_watcher
 import room3_review_learn
+import room3_lots
 
 ROOM3_MODE_PAPER = "paper"
 ROOM3_MODE_LIVE = "live"
@@ -283,6 +284,8 @@ def init_room3_session_state() -> None:
         st.session_state.room3_review_block_ids = []
     if "room3_filed_session_dates" not in st.session_state:
         st.session_state.room3_filed_session_dates = []
+    if "room3_lots" not in st.session_state:
+        st.session_state.room3_lots = []
     _hydrate_screener_from_disk()
     if "room3_broker_day_pl" not in st.session_state:
         st.session_state.room3_broker_day_pl = None
@@ -2140,12 +2143,14 @@ def _reconcile_watch_book_with_broker() -> int:
         if not isinstance(line, dict):
             continue
         room3_recipes.scrub_purgatory_line(line)
+        ticker = str(line.get("ticker") or "").upper()
         if str(line.get("state") or "") != "in":
             continue
-        ticker = str(line.get("ticker") or "").upper()
         if ticker and ticker in open_syms:
             continue
         _reset_line_to_watching(line)
+        if ticker:
+            room3_lots.close_lots_for_ticker(st.session_state, ticker)
         n += 1
     for sym in open_syms:
         room3_watcher.ensure_ticker_maps(book, sym)
@@ -2154,6 +2159,34 @@ def _reconcile_watch_book_with_broker() -> int:
             for line in lines.values()
             if str(line.get("ticker") or "").upper() == sym
         ]
+        lots = room3_lots.open_lots(st.session_state, sym)
+        lots_by_tf: dict[str, dict] = {}
+        for lot in lots:
+            tf = str(lot.get("tf") or "")
+            if tf and tf not in lots_by_tf:
+                lots_by_tf[tf] = lot
+        if lots_by_tf:
+            for line in owned:
+                tf = str(line.get("timeframe") or "")
+                lot = lots_by_tf.get(tf)
+                if lot:
+                    if str(line.get("state") or "") != "in":
+                        n += 1
+                    line["state"] = "in"
+                    line["sticky"] = False
+                    line.pop("sticky_until", None)
+                    strat = str(lot.get("strategy") or lot.get("letter") or "")
+                    layout = str(lot.get("layout_id") or "")
+                    if strat and not room3_recipes.is_purgatory_letter(layout, strat):
+                        line["entry_strategy"] = strat
+                        if layout and layout not in ("—", "-"):
+                            line["entry_layout"] = layout
+                    line["entry_qty"] = float(lot.get("qty") or 0)
+                    line["entry_price"] = float(lot.get("entry_px") or 0)
+                    line["entry_match_pct"] = int(lot.get("entry_match_pct") or 0)
+                elif str(line.get("state") or "") == "in":
+                    _reset_line_to_watching(line)
+            continue
         if any(str(line.get("state") or "") == "in" for line in owned):
             continue
         pick = None
@@ -2245,6 +2278,7 @@ def _kill_go_flat() -> str:
                 result = room3_alpaca.close_position_now(sym, paper=paper, aggressive=True)
                 if result.get("ok"):
                     closed += 1
+                    room3_lots.close_lots_for_ticker(st.session_state, sym)
                 else:
                     errs.append(f"{sym}:{result.get('error') or 'fail'}")
             except Exception as exc:
@@ -2689,6 +2723,8 @@ def _render_open_positions() -> None:
                     if not sym:
                         continue
                     results.append(room3_alpaca.close_position_now(sym, paper=paper, aggressive=True))
+                    if results[-1].get("ok"):
+                        room3_lots.close_lots_for_ticker(st.session_state, sym)
                 _sync_alpaca_account_into_session(paper=paper)
                 ok_n = sum(1 for x in results if x.get("ok"))
                 err = next((x.get("error") for x in results if not x.get("ok")), "")
@@ -2722,6 +2758,22 @@ def _render_open_positions() -> None:
             }
         )
     _render_dark_table(display)
+    lots = room3_lots.open_lots(st.session_state)
+    if lots:
+        st.caption("App lots (Alpaca is one pile per ticker — each letter peels its own qty):")
+        lot_rows = []
+        for lot in lots:
+            lot_rows.append(
+                {
+                    "Ticker": lot.get("ticker"),
+                    "Clock": lot.get("tf"),
+                    "Letter": lot.get("letter") or lot.get("strategy"),
+                    "Qty": f"{float(lot.get('qty') or 0):.0f}",
+                    "Entry $": f"{float(lot.get('entry_px') or 0):.2f}",
+                    "Exits on": f"{lot.get('letter') or lot.get('strategy')} trigger",
+                }
+            )
+        _render_dark_table(lot_rows)
     window = room3_engine.detect_session_window()
     st.caption(
         f"Session now: {room3_engine.session_label(window)}. "
@@ -3665,6 +3717,7 @@ def _maybe_flatten_on_cloud_process_boot() -> None:
             if result.get("ok"):
                 ok_n += 1
                 _log_alpaca_order_fill({**result, "symbol": sym, "side": "sell"})
+                room3_lots.close_lots_for_ticker(st.session_state, sym)
             else:
                 errs.append(f"{sym}:{result.get('error') or 'fail'}")
         except Exception as exc:
@@ -4107,6 +4160,7 @@ def _log_alpaca_order_fill(result: dict) -> None:
             strat = _st
     now = datetime.now(ET).strftime("%H:%M:%S")
     oid = str(result.get("order_id") or "").strip()
+    cache = (st.session_state.get("room3_fill_meta_by_ticker") or {}).get(ticker) or {}
     row = {
         "id": f"alpaca-exit-{oid or now}",
         "ticker": ticker,
@@ -4124,8 +4178,10 @@ def _log_alpaca_order_fill(result: dict) -> None:
         "broker_status": result.get("status"),
         "status": f"closing · {result.get('status')}",
         "reviewed": False,
+        "layout_id": str(result.get("layout_id") or cache.get("layout_id") or ""),
+        "letter": str(result.get("letter") or ""),
+        "lot_id": str(result.get("lot_id") or ""),
     }
-    cache = (st.session_state.get("room3_fill_meta_by_ticker") or {}).get(ticker) or {}
     if cache.get("entry_order_id"):
         row["entry_order_id"] = cache["entry_order_id"]
     _upsert_trade_history_row(row)
@@ -4406,6 +4462,9 @@ def _hydrate_screener_from_disk() -> None:
             )
         )
         st.session_state.room3_filed_session_dates = merged_filed[-30:]
+    lot_snap = (snap.get("lots") or []) if snap else []
+    if isinstance(lot_snap, list) and lot_snap and not (st.session_state.get("room3_lots") or []):
+        st.session_state.room3_lots = lot_snap
     rl = (snap.get("review_learn") or {}) if snap else {}
     if isinstance(rl, dict) and (rl.get("observations") or rl.get("versions")) and not (
         (st.session_state.get("room3_review_learn") or {}).get("observations")
@@ -4475,6 +4534,7 @@ def _persist_screener_to_disk() -> None:
             "pending_reviews": st.session_state.get("room3_pending_reviews") or [],
             "review_void_ids": st.session_state.get("room3_review_void_ids") or [],
             "filed_session_dates": st.session_state.get("room3_filed_session_dates") or [],
+            "lots": st.session_state.get("room3_lots") or [],
             "review_learn": st.session_state.get("room3_review_learn") or room3_review_learn.state_from_session(st.session_state),
             "last_hub": str(st.session_state.get("terminal_hub") or ""),
         }
@@ -4797,6 +4857,7 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
             result = room3_alpaca.close_position_now(sym, paper=paper, aggressive=True)
             if result.get("ok"):
                 ok_n += 1
+                room3_lots.close_lots_for_ticker(st.session_state, sym)
             else:
                 errs.append(f"{sym}:{result.get('error') or 'fail'}")
         except Exception as exc:
@@ -4918,6 +4979,22 @@ def _room3_heartbeat_fragment() -> None:
                 filled = float(result.get("filled_qty") or 0)
                 if filled > 0 or sym in _broker_open_symbols():
                     line["state"] = "in"
+                    fill_qty = filled if filled > 0 else abs(float(sig.get("qty") or 0))
+                    room3_lots.append_lot(
+                        st.session_state,
+                        {
+                            "ticker": sym,
+                            "tf": str(sig.get("timeframe") or line.get("timeframe") or ""),
+                            "strategy": str(sig.get("strategy") or line.get("entry_strategy") or ""),
+                            "layout_id": str(sig.get("layout_id") or line.get("entry_layout") or ""),
+                            "qty": fill_qty,
+                            "entry_px": result.get("filled_avg_price")
+                            or sig.get("ref_price")
+                            or line.get("entry_price"),
+                            "entry_match_pct": sig.get("match_pct") or line.get("entry_match_pct"),
+                            "structural_move_pct": line.get("entry_structural_move_pct"),
+                        },
+                    )
                     if not sig.get("scale_in"):
                         line["trades_today"] = int(line.get("trades_today") or 0) + 1
                     else:
@@ -4931,7 +5008,35 @@ def _room3_heartbeat_fragment() -> None:
                 line["entry_signal"] = None
                 _clear_line_entry_stamps(line)
         elif str(sig.get("intent")) == "exit" and result.get("ok"):
-            _reset_line_to_watching(line)
+            lot_id = str(sig.get("lot_id") or "")
+            if lot_id:
+                room3_lots.close_lot(st.session_state, lot_id)
+            else:
+                letter = room3_lots.letter_token(
+                    str(sig.get("layout_id") or ""),
+                    str(sig.get("strategy") or ""),
+                )
+                tf = str(sig.get("timeframe") or "")
+                peeled = room3_lots.open_lots(st.session_state, sym, tf=tf, letter=letter)
+                if peeled:
+                    room3_lots.close_lot(st.session_state, str(peeled[0].get("id") or ""))
+            remain = room3_lots.open_lots(
+                st.session_state,
+                sym,
+                tf=str(sig.get("timeframe") or line.get("timeframe") or ""),
+            )
+            if remain:
+                keep = remain[0]
+                line["state"] = "in"
+                line["entry_strategy"] = str(keep.get("strategy") or "")
+                line["entry_layout"] = str(keep.get("layout_id") or "")
+                line["entry_qty"] = float(keep.get("qty") or 0)
+                line["entry_price"] = float(keep.get("entry_px") or 0)
+                line["entry_match_pct"] = int(keep.get("entry_match_pct") or 0)
+                line["entry_structural_move_pct"] = float(keep.get("structural_move_pct") or 0)
+                line["exit_signal"] = None
+            else:
+                _reset_line_to_watching(line)
             line["trades_today"] = int(line.get("trades_today") or 0) + 1
 
     _persist_screener_to_disk()
@@ -4988,7 +5093,8 @@ def _render_watch_book_panel() -> None:
         st.caption(
             "Maps / Match% / ticks refresh in the **Live** pulse below "
             "(every ~30s) — belt controls stay here. Each name maps 1m, 5m, and 15m. "
-            "One open pile per ticker; other TFs keep scanning and show promise if they're hot."
+            "Main row stays all day. A strategy sub-lane appears when a live letter is "
+            "fire-ready (~84%+). A second hot letter adds onto the same Alpaca pile as its own lot."
         )
 
 

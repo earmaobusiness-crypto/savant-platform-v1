@@ -9,10 +9,12 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import room3_lots
 import room3_recipes
 import room3_review_learn
 
 MATCH_THRESHOLD_PCT = 85
+CHILD_READY_PCT = 84  # show a strategy sub-lane; fire still waits for MATCH_THRESHOLD
 EXIT_MATCH_FLOOR_PCT = 65
 STOP_LOSS_PCT = 2.5
 MIN_SLICES = {"1m": 5, "5m": 4, "15m": 3}
@@ -200,10 +202,21 @@ def match_spatial(
         usable.append(e)
     weights = _wallpaper_weights(usable, len(snapshot_vec))
 
+    ranked_hits: list[dict[str, Any]] = []
     for entry in usable:
         stored = [float(x) for x in (entry.get("vector") or [])]
         cos = cosine_similarity(snapshot_vec, stored, weights)
         entry_tf = _layout_dna_tf(entry)
+        ranked_hits.append(
+            {
+                "cosine": cos,
+                "layout_id": str(entry.get("layout_id") or "—"),
+                "strategy": str(entry.get("strategy") or ""),
+                "structural_move_pct": float(entry.get("structural_move_pct") or 0.0),
+                "ticker": str(entry.get("ticker") or ""),
+                "timeframe": str(entry.get("timeframe_resolution") or entry_tf),
+            }
+        )
         if cos > best_cosine:
             second_cosine = best_cosine
             best_cosine = cos
@@ -214,6 +227,28 @@ def match_spatial(
             best_tf = str(entry.get("timeframe_resolution") or entry_tf)
         elif cos > second_cosine:
             second_cosine = cos
+    ranked_hits.sort(key=lambda h: -float(h.get("cosine") or 0))
+    ranked: list[dict[str, Any]] = []
+    seen_letters: set[str] = set()
+    for hit in ranked_hits:
+        if float(hit.get("cosine") or 0) <= 0:
+            continue
+        token = room3_lots.letter_token(str(hit.get("layout_id") or ""), str(hit.get("strategy") or ""))
+        if not token or token in seen_letters:
+            continue
+        seen_letters.add(token)
+        ranked.append(
+            {
+                "layout_id": hit["layout_id"],
+                "strategy": hit["strategy"] or token,
+                "letter": token,
+                "spatial_match_pct": int(round(float(hit["cosine"]) * 100)),
+                "cosine_similarity": round(float(hit["cosine"]), 4),
+                "structural_move_pct": float(hit.get("structural_move_pct") or 0),
+            }
+        )
+        if len(ranked) >= 8:
+            break
     # No positive hit → do not invent "NEW_LAYOUT" (Room 2 mint jargon). Show blank.
     if best_cosine <= 0:
         nearest = "—"
@@ -221,6 +256,7 @@ def match_spatial(
         structural_move = 0.0
         best_ticker = ""
         best_tf = ""
+        ranked = []
     return {
         "spatial_match_pct": int(round(best_cosine * 100)),
         "cosine_similarity": round(best_cosine, 4),
@@ -230,6 +266,7 @@ def match_spatial(
         "structural_move_pct": structural_move,
         "layout_ticker": best_ticker,
         "layout_timeframe": best_tf,
+        "ranked": ranked,
     }
 
 
@@ -307,6 +344,7 @@ def score_line_against_repertoire(
             "spatial_match_pct": 0,
             "nearest_layout_id": "—",
             "vector_ready": False,
+            "ranked": [],
         }
 
     spatial = match_spatial(vec, layouts, watch_timeframe=str(line.get("timeframe") or "1m"))
@@ -341,30 +379,244 @@ def _ticker_already_engaged(
     *,
     except_key: str = "",
     session_state: Any = None,
+    letter: str = "",
 ) -> bool:
-    """True if another line already owns this ticker (open or real entry queued).
-
-    Sticky watch also uses state=committed — that alone must NOT block the
-    line that is trying to stamp an entry, or ≥85% never fires.
-    """
-    sym = str(ticker).upper()
-    if session_state is not None and _open_qty(session_state, sym) > 0:
-        return True
+    """True if this letter is already in/queued. A different letter may add."""
+    token = room3_lots.letter_token("", letter) if letter else ""
+    if token and session_state is not None:
+        if room3_lots.open_lots(session_state, ticker, letter=token):
+            return True
     for key, line in (book.get("lines") or {}).items():
         if except_key and key == except_key:
             continue
-        if str(line.get("ticker") or "").upper() != sym:
+        if str(line.get("ticker") or "").upper() != str(ticker).upper():
             continue
-        if line.get("state") == "in" or line.get("entry_signal"):
+        queued = str((line.get("entry_signal") or {}).get("strategy") or "")
+        if token and queued and room3_lots.letter_token("", queued) == token:
             return True
-        # Real matrix commitment (sized/layout stamped), not sticky-only.
-        if line.get("state") == "committed" and (
-            line.get("entry_layout")
-            or line.get("entry_qty")
-            or line.get("entry_match_pct")
-        ):
-            return True
+        if token:
+            continue
+        # No letter asked: only block a duplicate queue on this same line.
+        if except_key and key == except_key:
+            continue
     return False
+
+
+def _sync_hot_children(
+    line: dict[str, Any],
+    ranked: list[dict[str, Any]],
+    session_state: Any,
+    ticker: str,
+    tf: str,
+) -> list[dict[str, Any]]:
+    """Mint/keep fire-ready sub-lanes. Open lots stay even if Match% cools."""
+    prev = {
+        str(c.get("letter") or ""): dict(c)
+        for c in (line.get("children") or [])
+        if isinstance(c, dict) and str(c.get("letter") or "").strip()
+    }
+    open_tokens = {
+        str(r.get("letter") or "")
+        for r in room3_lots.open_lots(session_state, ticker, tf=tf)
+        if str(r.get("letter") or "").strip()
+    }
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in ranked or []:
+        layout = str(row.get("layout_id") or "")
+        strat = str(row.get("strategy") or "")
+        if room3_recipes.is_purgatory_letter(layout, strat):
+            continue
+        letter = str(row.get("letter") or room3_lots.letter_token(layout, strat))
+        if not letter or letter in seen:
+            continue
+        pct = int(row.get("spatial_match_pct") or 0)
+        if pct < CHILD_READY_PCT and letter not in open_tokens:
+            continue
+        seen.add(letter)
+        old = prev.get(letter) or {}
+        child = {
+            "letter": letter,
+            "layout_id": layout,
+            "strategy": strat or letter,
+            "match_pct": pct,
+            "structural_move_pct": float(row.get("structural_move_pct") or 0),
+            "cosine_similarity": float(row.get("cosine_similarity") or 0),
+            "family_armed_px": old.get("family_armed_px"),
+            "family_armed_high": old.get("family_armed_high"),
+            "pullback_low": old.get("pullback_low"),
+            "trigger_phase": old.get("trigger_phase"),
+            "entry_skipped_late": old.get("entry_skipped_late"),
+            "patience_note": str(old.get("patience_note") or ""),
+            "in_lot": letter in open_tokens,
+        }
+        if pct < WARMING_MATCH_PCT and letter not in open_tokens:
+            _reset_entry_trigger(child)
+        out.append(child)
+    for letter in open_tokens:
+        if letter in seen:
+            continue
+        old = prev.get(letter) or {}
+        old["letter"] = letter
+        old["in_lot"] = True
+        out.append(old)
+    line["children"] = out
+    return out
+
+
+def _child_match_floor(session_state: Any, child: dict[str, Any], tf: str) -> float:
+    floor = float(MATCH_THRESHOLD_PCT)
+    try:
+        floor += float(
+            room3_review_learn.overlay_match_floor_delta(
+                session_state,
+                str(child.get("layout_id") or ""),
+                str(child.get("strategy") or ""),
+                tf,
+            )
+        )
+    except Exception:
+        pass
+    return max(70.0, min(95.0, floor))
+
+
+def _try_queue_child_entry(
+    book: dict[str, Any],
+    line: dict[str, Any],
+    *,
+    session_state: Any,
+    ticker: str,
+    tf: str,
+    last_px: float,
+    slices: list[dict[str, Any]],
+    layouts: list[dict[str, Any]],
+    match: dict[str, Any],
+) -> bool:
+    """Queue one child that is fire-ready. Second letter on the pile is an add."""
+    import room3_watcher
+
+    if line.get("entry_signal"):
+        return False
+    children = list(line.get("children") or [])
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        letter = str(child.get("letter") or "")
+        layout_id = str(child.get("layout_id") or "")
+        strategy = str(child.get("strategy") or letter)
+        if not letter or room3_recipes.is_purgatory_letter(layout_id, strategy):
+            continue
+        if child.get("in_lot"):
+            continue
+        if _ticker_already_engaged(
+            book, ticker, except_key=room3_watcher.line_key(ticker, tf),
+            session_state=session_state, letter=letter,
+        ):
+            continue
+        pct = int(child.get("match_pct") or 0)
+        floor = _child_match_floor(session_state, child, tf)
+        if pct < floor:
+            if pct >= WARMING_MATCH_PCT:
+                child["patience_note"] = f"warming {pct}% · need ≥{int(floor)}%"
+            continue
+        structural = float(child.get("structural_move_pct") or 0)
+        ready, trigger_note = _entry_trigger_ready(
+            child,
+            slices,
+            last_px=last_px,
+            tf=tf,
+            strategy=strategy,
+            layout_id=layout_id,
+            structural=structural,
+        )
+        child["patience_note"] = trigger_note
+        if not ready:
+            continue
+        add_lot = bool(room3_lots.open_lots(session_state, ticker) or _open_qty(session_state, ticker) > 0)
+        qty, notional = _compute_entry_qty(
+            price=last_px,
+            session_state=session_state,
+            timeframe=tf,
+            match_pct=pct,
+            second_cosine=float(match.get("second_cosine") or 0),
+            best_cosine=float(child.get("cosine_similarity") or match.get("cosine_similarity") or 0),
+            layouts=layouts,
+            exclude_ticker=ticker if add_lot else "",
+        )
+        if qty < 1 or notional <= 0:
+            child["patience_note"] = "size $0 — not enough room or price too high"
+            continue
+        _claim_cash(session_state, notional)
+        room3_watcher.queue_entry_signal(
+            book,
+            ticker,
+            tf,
+            side="buy",
+            qty=qty,
+            strategy=strategy,
+            keep_in=add_lot and str(line.get("state") or "") == "in",
+            scale_in=False,
+            layout_id=layout_id,
+        )
+        key = room3_watcher.line_key(ticker, tf)
+        stamped = (book.get("lines") or {}).get(key) or line
+        stamped["entry_match_pct"] = pct
+        stamped["entry_layout"] = layout_id
+        stamped["entry_strategy"] = strategy
+        stamped["entry_price"] = last_px
+        stamped["entry_qty"] = qty
+        stamped["entry_structural_move_pct"] = structural
+        sig = stamped.get("entry_signal")
+        if isinstance(sig, dict):
+            sig["ref_price"] = last_px
+            sig["notional"] = notional
+            sig["match_pct"] = pct
+            sig["layout_id"] = layout_id
+            sig["strategy"] = strategy
+            sig["add_lot"] = add_lot
+            sig["letter"] = letter
+            sig["trigger"] = trigger_note
+            sig["order_style"] = room3_recipes.order_style_for(
+                strategy,
+                tf,
+                layout_id=layout_id,
+                structural_move_pct=structural,
+            )
+        line["nearest_strategy"] = strategy
+        line["patience"] = False
+        line.pop("patience_note", None)
+        return True
+    return False
+
+
+def _lot_should_exit(
+    lot: dict[str, Any],
+    *,
+    cur_match: int,
+    last_px: float,
+    patience: bool,
+) -> str:
+    entry_px = float(lot.get("entry_px") or 0)
+    entry_match = int(lot.get("entry_match_pct") or MATCH_THRESHOLD_PCT)
+    structural = float(lot.get("structural_move_pct") or 0)
+    pnl_pct = ((last_px - entry_px) / entry_px * 100.0) if entry_px > 0 and last_px > 0 else 0.0
+    hard_fade = cur_match < EXIT_MATCH_FLOOR_PCT and cur_match < entry_match - 15
+    soft_fade = cur_match < EXIT_MATCH_FLOOR_PCT and cur_match < entry_match - 10
+    if hard_fade:
+        return f"match faded {cur_match}%"
+    if soft_fade and not patience:
+        return f"match faded {cur_match}%"
+    if soft_fade and patience and structural > 0 and pnl_pct < structural * 0.25:
+        return ""
+    if soft_fade:
+        return f"match faded {cur_match}%"
+    if pnl_pct <= -STOP_LOSS_PCT:
+        return f"stop {pnl_pct:.1f}%"
+    if structural > 0 and pnl_pct >= structural * 0.5:
+        return f"target {pnl_pct:.1f}%"
+    if _approaching_day_close():
+        return "day close · second-best exit"
+    return ""
 
 
 def _open_qty(session_state: Any, symbol: str) -> float:
@@ -922,7 +1174,7 @@ def maybe_queue_matrix_signals(
 ) -> None:
     """
     Stamp entry_signal or exit_signal on a line when DNA rules pass.
-    One entry per ticker across all TF lines.
+    One Alpaca pile per ticker. App lots are per letter; a second letter adds.
     """
     import room3_watcher
 
@@ -945,7 +1197,7 @@ def maybe_queue_matrix_signals(
         nearest_strat = "—"
         line["nearest_layout"] = "—"
         line["match_pct"] = 0
-        match = {**match, "nearest_layout_id": "—", "nearest_strategy": "", "spatial_match_pct": 0}
+        match = {**match, "nearest_layout_id": "—", "nearest_strategy": "", "spatial_match_pct": 0, "ranked": []}
     line["nearest_strategy"] = nearest_strat or "—"
     line["score"] = float(match.get("display_score") or 0)
     line["second_cosine"] = float(match.get("second_cosine") or 0)
@@ -953,6 +1205,15 @@ def maybe_queue_matrix_signals(
     ticker = str(line.get("ticker") or "").upper()
     slices = list(line.get("slices") or [])
     last_px = float(slices[-1].get("c") or 0) if slices else 0.0
+    _sync_hot_children(
+        line,
+        list(match.get("ranked") or []),
+        session_state,
+        ticker,
+        tf,
+    )
+    if _off_belt(line, book):
+        line["children"] = []
     exclude = ticker if str(line.get("state") or "") in ("in", "committed") else ""
     # Watch Size $ = fire-ready ticket (at ≥85%), not the shrunk warming preview.
     raw_match = float(line.get("match_pct") or 0)
@@ -980,61 +1241,90 @@ def maybe_queue_matrix_signals(
         return
 
     if line.get("state") == "in":
+        tf_lots = room3_lots.open_lots(session_state, ticker, tf=tf)
+        children_by = {
+            str(c.get("letter") or ""): c
+            for c in (line.get("children") or [])
+            if isinstance(c, dict)
+        }
+        if tf_lots:
+            for lot in tf_lots:
+                letter = str(lot.get("letter") or "")
+                child = children_by.get(letter) or {}
+                lot_match = int(child.get("match_pct") or line.get("match_pct") or 0)
+                exit_reason = _lot_should_exit(
+                    lot, cur_match=lot_match, last_px=last_px, patience=True
+                )
+                if not exit_reason or line.get("exit_signal"):
+                    if not exit_reason and lot_match < EXIT_MATCH_FLOOR_PCT:
+                        line["patience"] = True
+                        line["patience_note"] = (
+                            f"holding {letter} · match {lot_match}%"
+                        )
+                    continue
+                qty = abs(float(lot.get("qty") or 0))
+                if qty <= 0:
+                    qty = _open_qty(session_state, ticker)
+                if qty <= 0:
+                    continue
+                strat = str(lot.get("strategy") or line.get("entry_strategy") or "matrix")
+                room3_watcher.queue_exit_signal(
+                    book,
+                    ticker,
+                    tf,
+                    side="sell",
+                    qty=qty,
+                    strategy=strat,
+                    layout_id=str(lot.get("layout_id") or line.get("entry_layout") or ""),
+                )
+                line["last_exit_reason"] = exit_reason
+                line["patience"] = False
+                es = line.get("exit_signal")
+                if isinstance(es, dict):
+                    es["ref_price"] = last_px
+                    es["lot_id"] = str(lot.get("id") or "")
+                    es["letter"] = letter
+                return
+        else:
+            entry_px = float(line.get("entry_price") or last_px or 0)
+            entry_match = int(line.get("entry_match_pct") or MATCH_THRESHOLD_PCT)
+            cur_match = int(line.get("match_pct") or 0)
+            structural = float(line.get("entry_structural_move_pct") or 0.0)
+            dummy = {
+                "entry_px": entry_px,
+                "entry_match_pct": entry_match,
+                "structural_move_pct": structural,
+            }
+            exit_reason = _lot_should_exit(
+                dummy, cur_match=cur_match, last_px=last_px, patience=True
+            )
+            if exit_reason and not line.get("exit_signal"):
+                qty = _open_qty(session_state, ticker)
+                if qty <= 0:
+                    qty = float(line.get("entry_qty") or 0)
+                if qty <= 0:
+                    return
+                strat = str(line.get("entry_strategy") or "matrix")
+                room3_watcher.queue_exit_signal(
+                    book,
+                    ticker,
+                    tf,
+                    side="sell",
+                    qty=qty,
+                    strategy=strat,
+                    layout_id=str(line.get("entry_layout") or ""),
+                )
+                line["last_exit_reason"] = exit_reason
+                line["patience"] = False
+                es = line.get("exit_signal")
+                if isinstance(es, dict):
+                    es["ref_price"] = last_px
+                return
+
         entry_px = float(line.get("entry_price") or last_px or 0)
-        entry_match = int(line.get("entry_match_pct") or MATCH_THRESHOLD_PCT)
         cur_match = int(line.get("match_pct") or 0)
         structural = float(line.get("entry_structural_move_pct") or 0.0)
         pnl_pct = ((last_px - entry_px) / entry_px * 100.0) if entry_px > 0 and last_px > 0 else 0.0
-
-        # Patience: stock may lag the pattern — don't panic-exit on mild fade
-        # while DNA still warm and structural target not yet reached.
-        patience = True
-        exit_reason = ""
-        hard_fade = cur_match < EXIT_MATCH_FLOOR_PCT and cur_match < entry_match - 15
-        soft_fade = cur_match < EXIT_MATCH_FLOOR_PCT and cur_match < entry_match - 10
-        if hard_fade:
-            exit_reason = f"match faded {cur_match}%"
-        elif soft_fade and not patience:
-            exit_reason = f"match faded {cur_match}%"
-        elif soft_fade and patience and structural > 0 and pnl_pct < structural * 0.25:
-            line["patience"] = True
-            line["patience_note"] = (
-                f"holding · match {cur_match}% · waiting for move "
-                f"(target ~{structural:.1f}%)"
-            )
-            exit_reason = ""
-        elif soft_fade:
-            exit_reason = f"match faded {cur_match}%"
-        elif pnl_pct <= -STOP_LOSS_PCT:
-            exit_reason = f"stop {pnl_pct:.1f}%"
-        elif structural > 0 and pnl_pct >= structural * 0.5:
-            exit_reason = f"target {pnl_pct:.1f}%"
-        elif _approaching_day_close():
-            exit_reason = "day close · second-best exit"
-
-        if exit_reason and not line.get("exit_signal"):
-            qty = _open_qty(session_state, ticker)
-            if qty <= 0:
-                qty = float(line.get("entry_qty") or 0)
-            if qty <= 0:
-                return
-            strat = str(line.get("entry_strategy") or "matrix")
-            room3_watcher.queue_exit_signal(
-                book,
-                ticker,
-                tf,
-                side="sell",
-                qty=qty,
-                strategy=strat,
-                layout_id=str(line.get("entry_layout") or ""),
-            )
-            line["last_exit_reason"] = exit_reason
-            line["patience"] = False
-            es = line.get("exit_signal")
-            if isinstance(es, dict):
-                es["ref_price"] = last_px
-            return
-
         if (
             entries_allowed
             and not _off_belt(line, book)
@@ -1070,6 +1360,7 @@ def maybe_queue_matrix_signals(
                     strategy=strat,
                     keep_in=True,
                     scale_in=True,
+                    layout_id=str(line.get("entry_layout") or ""),
                 )
                 _claim_cash(session_state, add_usd)
                 line["scale_ins"] = int(line.get("scale_ins") or 0) + 1
@@ -1083,7 +1374,28 @@ def maybe_queue_matrix_signals(
                     sig["entry_signal"]["notional"] = add_usd
                     sig["entry_signal"]["ref_price"] = last_px
                     sig["entry_signal"]["scale_in"] = True
-                    sig["entry_signal"]["order_style"] = "limit"  # add-on, not a pop
+                    sig["entry_signal"]["order_style"] = "limit"
+                    sig["entry_signal"]["letter"] = room3_lots.letter_token(
+                        str(line.get("entry_layout") or ""), strat
+                    )
+        if (
+            entries_allowed
+            and not _off_belt(line, book)
+            and not _approaching_day_close()
+            and not line.get("entry_signal")
+            and not line.get("exit_signal")
+        ):
+            _try_queue_child_entry(
+                book,
+                line,
+                session_state=session_state,
+                ticker=ticker,
+                tf=tf,
+                last_px=last_px,
+                slices=slices,
+                layouts=layouts,
+                match=match,
+            )
         return
 
     if not entries_allowed:
@@ -1091,125 +1403,46 @@ def maybe_queue_matrix_signals(
     if _off_belt(line, book):
         line["patience"] = True
         line["patience_note"] = "leftover · exit only · no new buy"
+        line["children"] = []
         return
-    if line.get("entry_signal") or line.get("state") not in ("watching", "committed"):
+    if line.get("entry_signal"):
+        return
+    if line.get("state") not in ("watching", "committed"):
         return
     if not match.get("vector_ready"):
-        return
-
-    cur_match = int(match.get("spatial_match_pct") or 0)
-    # Warm DNA but not full signal yet — keep mapping; stock may still fill the puzzle.
-    layout_for_floor = str(match.get("nearest_layout_id") or line.get("nearest_layout") or "")
-    strat_for_floor = str(match.get("nearest_strategy") or line.get("nearest_strategy") or "")
-    floor = float(MATCH_THRESHOLD_PCT)
-    try:
-        floor += float(
-            room3_review_learn.overlay_match_floor_delta(
-                session_state,
-                layout_for_floor,
-                strat_for_floor,
-                tf,
-            )
-        )
-    except Exception:
-        pass
-    floor = max(70.0, min(95.0, floor))
-    if cur_match < floor:
-        if cur_match < WARMING_MATCH_PCT:
-            _reset_entry_trigger(line)
-        if cur_match >= WARMING_MATCH_PCT:
-            line["patience"] = True
-            line["patience_note"] = (
-                f"warming {cur_match}% · need ≥{int(floor)}% · "
-                f"30s snaps continue"
-            )
-        else:
+        if not line.get("children"):
             line["patience"] = False
             line.pop("patience_note", None)
         return
-    layout_id = str(match.get("nearest_layout_id") or "")
-    if layout_id in PLACEHOLDER_LAYOUTS:
-        return
-    if room3_recipes.is_purgatory_letter(
-        layout_id, str(match.get("nearest_strategy") or "")
-    ):
-        return
-
-    strategy = str(line.get("nearest_strategy") or "").strip()
-    if strategy in ("", "—", "-", "matrix"):
-        strategy = str(match.get("nearest_strategy") or "") or strategy_for_layout(
-            layout_id, repertoire, timeframe=tf
-        )
-    if strategy and not room3_recipes.strategy_tf_agrees(strategy, tf):
-        strategy = strategy_for_layout(layout_id, repertoire, timeframe=tf)
-    if not strategy or strategy in ("", "—", "-", "matrix"):
-        return
-    if not room3_recipes.strategy_tf_agrees(strategy, tf):
-        return
-    if room3_recipes.is_purgatory_letter(layout_id, strategy):
-        return
-
-    structural = float(match.get("structural_move_pct") or 0.0)
-    ready, trigger_note = _entry_trigger_ready(
-        line,
-        slices,
-        last_px=last_px,
-        tf=tf,
-        strategy=strategy,
-        layout_id=layout_id,
-        structural=structural,
-    )
-    line["patience"] = not ready
-    line["patience_note"] = trigger_note
-    if not ready:
-        return
-    line["patience"] = False
-    line.pop("patience_note", None)
-    if _ticker_already_engaged(
-        book, ticker, except_key=room3_watcher.line_key(ticker, tf),
-        session_state=session_state,
-    ):
-        return
-
-    qty, notional = _compute_entry_qty(
-        price=last_px,
-        session_state=session_state,
-        timeframe=tf,
-        match_pct=cur_match,
-        second_cosine=float(match.get("second_cosine") or 0),
-        best_cosine=float(match.get("cosine_similarity") or 0),
-        layouts=list(repertoire.get("layouts") or []),
-    )
-    if qty < 1 or notional <= 0:
-        line["size_note"] = "size $0 — not enough room or price too high"
-        return
-    _claim_cash(session_state, notional)
-    room3_watcher.queue_entry_signal(
+    queued = _try_queue_child_entry(
         book,
-        ticker,
-        tf,
-        side="buy",
-        qty=qty,
-        strategy=strategy,
+        line,
+        session_state=session_state,
+        ticker=ticker,
+        tf=tf,
+        last_px=last_px,
+        slices=slices,
+        layouts=layouts,
+        match=match,
     )
-    key = room3_watcher.line_key(ticker, tf)
-    stamped = (book.get("lines") or {}).get(key) or line
-    stamped["entry_match_pct"] = int(match.get("spatial_match_pct") or 0)
-    stamped["entry_layout"] = layout_id
-    stamped["entry_strategy"] = strategy
-    stamped["entry_price"] = last_px
-    stamped["entry_qty"] = qty
-    stamped["entry_structural_move_pct"] = float(match.get("structural_move_pct") or 0.0)
-    stamped["entry_signal"]["ref_price"] = last_px
-    stamped["entry_signal"]["notional"] = notional
-    stamped["entry_signal"]["match_pct"] = stamped["entry_match_pct"]
-    stamped["entry_signal"]["layout_id"] = layout_id
-    stamped["entry_signal"]["strategy"] = strategy
-    stamped["entry_signal"]["order_style"] = room3_recipes.order_style_for(
-        strategy,
-        tf,
-        layout_id=layout_id,
-        structural_move_pct=float(match.get("structural_move_pct") or 0.0),
-    )
-    stamped["entry_signal"]["trigger"] = trigger_note
-    line["nearest_strategy"] = strategy
+    if queued:
+        return
+    if line.get("children"):
+        line["patience"] = True
+        notes = [
+            str(c.get("patience_note") or "")
+            for c in line["children"]
+            if str(c.get("patience_note") or "").strip()
+        ]
+        line["patience_note"] = notes[0] if notes else "scanning live letters"
+        return
+    cur_match = int(match.get("spatial_match_pct") or 0)
+    if cur_match < WARMING_MATCH_PCT:
+        _reset_entry_trigger(line)
+        line["patience"] = False
+        line.pop("patience_note", None)
+    else:
+        line["patience"] = True
+        line["patience_note"] = (
+            f"warming {cur_match}% · need ≥{MATCH_THRESHOLD_PCT}%"
+        )
