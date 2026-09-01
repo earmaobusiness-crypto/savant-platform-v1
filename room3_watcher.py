@@ -887,6 +887,9 @@ def tick_watcher(
             else:
                 _clear_sticky_watch(line)
 
+        else:
+            room3_matrix.stamp_line_size(line, session_state, repertoire=repertoire)
+
         if trade_ok:
             sig = evaluate_line_signals(line)
             if sig:

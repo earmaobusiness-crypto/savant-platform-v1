@@ -1008,6 +1008,45 @@ def _distinctiveness(best_cosine: float, second_cosine: float) -> float:
     return max(0.50, min(1.0, 0.50 + gap / 0.10 * 0.50))
 
 
+def stamp_line_size(
+    line: dict[str, Any],
+    session_state: Any,
+    *,
+    repertoire: dict[str, Any] | None = None,
+    last_px: float | None = None,
+    second_cosine: float | None = None,
+    best_cosine: float | None = None,
+) -> None:
+    """Size $ follows Trading today now — do not wait for a 5m/15m tape pulse."""
+    slices = list(line.get("slices") or [])
+    if last_px is None:
+        last_px = float(slices[-1].get("c") or 0) if slices else 0.0
+    tf = str(line.get("timeframe") or "1m")
+    ticker = str(line.get("ticker") or "").upper()
+    exclude = ticker if str(line.get("state") or "") in ("in", "committed") else ""
+    raw_match = float(line.get("match_pct") or 0)
+    preview_match = (
+        float(MATCH_THRESHOLD_PCT)
+        if 0 < raw_match < MATCH_THRESHOLD_PCT
+        else raw_match
+    )
+    layouts = list((repertoire or {}).get("layouts") or []) or _layouts_from_session(session_state)
+    cos = float(best_cosine if best_cosine is not None else (raw_match / 100.0))
+    preview = compute_entry_plan(
+        price=float(last_px or 0),
+        timeframe=tf,
+        match_pct=preview_match,
+        session_state=session_state,
+        second_cosine=float(second_cosine if second_cosine is not None else line.get("second_cosine") or 0),
+        best_cosine=cos,
+        layouts=layouts,
+        exclude_ticker=exclude,
+    )
+    line["size_usd"] = float(preview.get("notional") or 0)
+    line["size_qty"] = float(preview.get("qty") or 0)
+    line["size_note"] = str(preview.get("note") or "")
+
+
 def compute_entry_plan(
     *,
     price: float,
@@ -1216,27 +1255,14 @@ def maybe_queue_matrix_signals(
     )
     if _off_belt(line, book):
         line["children"] = []
-    exclude = ticker if str(line.get("state") or "") in ("in", "committed") else ""
-    # Watch Size $ = fire-ready ticket (at ≥85%), not the shrunk warming preview.
-    raw_match = float(line.get("match_pct") or 0)
-    preview_match = (
-        float(MATCH_THRESHOLD_PCT)
-        if 0 < raw_match < MATCH_THRESHOLD_PCT
-        else raw_match
-    )
-    preview = compute_entry_plan(
-        price=last_px,
-        timeframe=tf,
-        match_pct=preview_match,
-        session_state=session_state,
+    stamp_line_size(
+        line,
+        session_state,
+        repertoire=repertoire,
+        last_px=last_px,
         second_cosine=float(match.get("second_cosine") or 0),
         best_cosine=float(match.get("cosine_similarity") or 0),
-        layouts=list(repertoire.get("layouts") or []),
-        exclude_ticker=exclude,
     )
-    line["size_usd"] = float(preview.get("notional") or 0)
-    line["size_qty"] = float(preview.get("qty") or 0)
-    line["size_note"] = str(preview.get("note") or "")
 
     layouts = list(repertoire.get("layouts") or [])
     if not layouts or not engine_armed:

@@ -1157,6 +1157,31 @@ def _set_tradable_pct(pct: float, equity: float) -> None:
     pct = max(0.0, min(100.0, float(pct)))
     st.session_state.room3_tradable_pct_ui = pct
     st.session_state.room3_tradable_today = round(equity * (pct / 100.0), 2)
+    st.session_state.room3_tradable_custom_input = float(
+        st.session_state.room3_tradable_today
+    )
+    _refresh_book_ticket_sizes()
+
+
+def _apply_custom_tradable() -> None:
+    equity = float(st.session_state.get("room3_account_equity") or 0)
+    custom = float(st.session_state.get("room3_tradable_custom_input") or 0)
+    if equity > 0:
+        custom = max(0.0, min(custom, equity))
+    else:
+        custom = max(0.0, custom)
+    st.session_state.room3_tradable_today = round(custom, 2)
+    st.session_state.room3_tradable_pct_ui = (
+        (custom / equity * 100.0) if equity > 0 else 0.0
+    )
+    _refresh_book_ticket_sizes()
+
+
+def _refresh_book_ticket_sizes() -> None:
+    book = st.session_state.get("room3_watch_book") or {}
+    for line in (book.get("lines") or {}).values():
+        if isinstance(line, dict):
+            room3_matrix.stamp_line_size(line, st.session_state)
 
 
 def _stamp_position_timeframes() -> None:
@@ -2971,23 +2996,22 @@ def _render_live_dashboard(mode: str) -> None:
         with p5:
             c_in, c_btn = st.columns([2.2, 1])
             with c_in:
+                if "room3_tradable_custom_input" not in st.session_state:
+                    st.session_state.room3_tradable_custom_input = float(
+                        min(tradable, equity) if equity else 0.0
+                    )
                 st.number_input(
                     "Custom trading $",
                     min_value=0.0,
                     max_value=float(max(equity, 0.0)),
-                    value=float(min(tradable, equity)) if equity else 0.0,
-                    step=1000.0,
+                    step=100.0,
                     key="room3_tradable_custom_input",
+                    on_change=_apply_custom_tradable,
                     label_visibility="collapsed",
                 )
             with c_btn:
                 if st.button("Set $", key="room3_tradable_set_btn", use_container_width=True):
-                    custom = float(st.session_state.get("room3_tradable_custom_input") or 0)
-                    custom = max(0.0, min(custom, equity))
-                    st.session_state.room3_tradable_today = round(custom, 2)
-                    st.session_state.room3_tradable_pct_ui = (
-                        (custom / equity * 100.0) if equity > 0 else 0.0
-                    )
+                    _apply_custom_tradable()
                     st.rerun()
 
     c1, c2, c3, c4, c5 = st.columns(5)
