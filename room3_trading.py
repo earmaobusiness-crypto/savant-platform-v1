@@ -45,8 +45,8 @@ _VOID_LEARN_TICKERS = frozenset({"AEHL", "NCRA", "WETO", "VVOS"})
 _VOID_LEARN_PNL = frozenset(
     {("AEHL", -92), ("AEHL", -14), ("NCRA", -52), ("WETO", -709), ("VVOS", -113)}
 )
-# Tonight only: hide the real tape and show nested main + strategy sub-lanes.
-_TRADE_LOG_NEST_DEMO_DAY = "2026-08-31"
+# Operator closed this session out of the live tape so it lives under Session history.
+_FILE_SESSION_DATES = frozenset({"2026-08-31"})
 
 _SESSION_KEYS = (
     "room3_execution_mode",
@@ -281,6 +281,8 @@ def init_room3_session_state() -> None:
         st.session_state.room3_review_void_ids = []
     if "room3_review_block_ids" not in st.session_state:
         st.session_state.room3_review_block_ids = []
+    if "room3_filed_session_dates" not in st.session_state:
+        st.session_state.room3_filed_session_dates = []
     _hydrate_screener_from_disk()
     if "room3_broker_day_pl" not in st.session_state:
         st.session_state.room3_broker_day_pl = None
@@ -297,6 +299,8 @@ def init_room3_session_state() -> None:
     _maybe_reconnect_alpaca()
     _maybe_flatten_on_cloud_process_boot()
     _void_session_reviews_no_learn()
+    for day_key in _FILE_SESSION_DATES:
+        _file_session_day(day_key)
 
 
 def _inject_room3_css() -> None:
@@ -993,13 +997,20 @@ def _sync_equity_curve_with_today() -> None:
             }
         )
     day_pl = float(_session_pl_stats().get("day_pl") or 0)
-    today_eq = round(running + day_pl, 2)
+    today_key = _trading_day_key()
+    archived_dates = {str(d.get("date") or "") for d in archive}
+    today_eq = running if today_key in archived_dates else round(running + day_pl, 2)
     # Broker is truth when connected — don't invent equity from local P/L only.
     if st.session_state.get("room3_broker_truth"):
         broker_eq = float(st.session_state.get("room3_broker_equity") or 0)
         if broker_eq > 0:
             today_eq = broker_eq
-    rebuilt.append({"date": _trading_day_key(), "equity": today_eq, "day_pl": day_pl})
+    if today_key not in archived_dates:
+        rebuilt.append({"date": today_key, "equity": today_eq, "day_pl": day_pl})
+    else:
+        for pt in rebuilt:
+            if str(pt.get("date")) == today_key:
+                pt["equity"] = today_eq
     st.session_state.room3_equity_curve = rebuilt
     st.session_state.room3_account_equity = today_eq
 
@@ -1039,10 +1050,13 @@ def _all_time_stats() -> dict:
     all_time_pct = (all_time_pl / start * 100.0) if start else 0.0
     archive = list(st.session_state.room3_archive_days or [])
     today_key = _trading_day_key()
+    filed = _filed_session_dates()
     today_trades = [
         r
         for r in _dedupe_trade_history()
-        if _trade_is_closed_row(r) and _trade_session_date(r) == today_key
+        if _trade_is_closed_row(r)
+        and _trade_session_date(r) == today_key
+        and today_key not in filed
     ]
     sessions = len(archive) + (1 if today_trades else 0)
     total_trades = sum(int(d.get("trade_count") or 0) for d in archive) + len(today_trades)
@@ -1386,15 +1400,43 @@ def _archive_entry_from_trades(day_key: str, trades: list[dict]) -> dict:
     }
 
 
+def _filed_session_dates() -> set[str]:
+    extra = {str(x).strip()[:10] for x in (st.session_state.get("room3_filed_session_dates") or [])}
+    return set(_FILE_SESSION_DATES) | {d for d in extra if len(d) == 10}
+
+
+def _file_session_day(day_key: str) -> None:
+    """Move a finished session into Session history and off Today's trade log."""
+    day_key = str(day_key or "").strip()[:10]
+    if len(day_key) != 10:
+        return
+    filed = list(st.session_state.get("room3_filed_session_dates") or [])
+    added = day_key not in filed
+    if added:
+        filed.append(day_key)
+        st.session_state.room3_filed_session_dates = filed[-30:]
+    for row in list(st.session_state.get("room3_trade_history") or []):
+        if not isinstance(row, dict):
+            continue
+        if _trade_is_closed_row(row) and _trade_session_date(row) == day_key:
+            row["session_date"] = day_key
+    _rebuild_archive_from_history()
+    if added:
+        _persist_screener_to_disk()
+
+
 def _rebuild_archive_from_history() -> None:
     """Upsert Session history from closed rows so Friday stays after day roll / Cloud refresh."""
     today = _trading_day_key()
+    filed = _filed_session_dates()
     by_day: dict[str, list[dict]] = {}
     for row in _dedupe_trade_history():
         if not _trade_is_closed_row(row):
             continue
         dk = _trade_session_date(row)
-        if not dk or dk == today:
+        if not dk:
+            continue
+        if dk == today and dk not in filed:
             continue
         stamped = dict(row)
         stamped["session_date"] = dk
@@ -1414,7 +1456,7 @@ def _rebuild_archive_from_history() -> None:
 
     # Keep prior archive days that still have trades even if history briefly empty.
     for dk, row in list(existing.items()):
-        if dk == today:
+        if dk == today and dk not in filed:
             existing.pop(dk, None)
             continue
         if dk not in by_day and not (row.get("trades") or []):
@@ -2697,168 +2739,13 @@ def _trade_widget_key(prefix: str, trade: dict, index: int = 0) -> str:
     return f"{prefix}_{index}_{rid}_{ticker}_{exit_t}"
 
 
-def _trade_log_nest_demo_on() -> bool:
-    """One-night look at nested lanes. Real closes stay in history; this does not trade."""
-    return _trading_day_key() == _TRADE_LOG_NEST_DEMO_DAY
-
-
-def _nested_lane_demo_rows() -> list[dict]:
-    """Look-only nested lanes — same shape the operator described (AEHL main + strategy sub)."""
-    pad = "\u00a0\u00a0\u00a0"
-    return [
-        {
-            "Kind": "main",
-            "Row": "AEHL",
-            "Clock": "15m",
-            "Match": "scanning",
-            "Layout": "all live letters",
-            "Letter": "—",
-            "What this lane is doing": (
-                "Main row all day. Watches every live 15m letter. Stays after a child exits."
-            ),
-            "Size $": "—",
-        },
-        {
-            "Kind": "sub-lane",
-            "Row": f"{pad}2B (15M)",
-            "Clock": "15m",
-            "Match": "87%",
-            "Layout": "2 — Tight",
-            "Letter": "2B (15M)",
-            "What this lane is doing": (
-                "This specific letter is fire-ready. Hunting 2B’s trigger (dip, then reclaim). Can fill."
-            ),
-            "Size $": "19,800",
-        },
-        {
-            "Kind": "sub-lane",
-            "Row": f"{pad}1C (15M)",
-            "Clock": "15m",
-            "Match": "84%",
-            "Layout": "1 — Volatile / Risk-Off",
-            "Letter": "1C (15M)",
-            "What this lane is doing": (
-                "Second hot letter on the same name. Own child, own trigger — not the same trade as 2B."
-            ),
-            "Size $": "19,800",
-        },
-        {
-            "Kind": "main",
-            "Row": "AEHL",
-            "Clock": "5m",
-            "Match": "scanning",
-            "Layout": "all live letters",
-            "Letter": "—",
-            "What this lane is doing": (
-                "Same stock, other clock. Own main row. Not a child of the 15m line."
-            ),
-            "Size $": "—",
-        },
-        {
-            "Kind": "sub-lane",
-            "Row": f"{pad}8B (5M)",
-            "Clock": "5m",
-            "Match": "86%",
-            "Layout": "8 family",
-            "Letter": "8B (5M)",
-            "What this lane is doing": (
-                "Adds onto the AEHL pile (Alpaca is one stack of shares). "
-                "App keeps a second lot. Exits on 8B’s trigger and peels that qty."
-            ),
-            "Size $": "11,900",
-        },
-        {
-            "Kind": "main",
-            "Row": "NCRA",
-            "Clock": "15m",
-            "Match": "41%",
-            "Layout": "nearest live",
-            "Letter": "—",
-            "What this lane is doing": "Main only. Nothing close enough — no sub-lane, no ticket.",
-            "Size $": "—",
-        },
-        {
-            "Kind": "main",
-            "Row": "VVOS",
-            "Clock": "15m",
-            "Match": "72%",
-            "Layout": "nearest live",
-            "Letter": "—",
-            "What this lane is doing": (
-                "Warming on the main row. Still no child until a letter is fire-ready (~84%+)."
-            ),
-            "Size $": "—",
-        },
-        {
-            "Kind": "leftover",
-            "Row": "WETO",
-            "Clock": "—",
-            "Match": "—",
-            "Layout": "—",
-            "Letter": "—",
-            "What this lane is doing": (
-                "Off-belt leftover. Not a child of AEHL. Exit-only if it were still open — "
-                "no new buy, no add, no strategy sub-lane."
-            ),
-            "Size $": "—",
-        },
-    ]
-
-
-def _render_nested_lane_demo() -> None:
-    """Look-only nested watch/log shape: main ticker+TF row, strategy sub-lane under it."""
-    st.caption(
-        "Look-only for tonight — nested lanes, not today’s fills. "
-        "AEHL / NCRA / WETO / VVOS still happened: summary, session history, and account P/L "
-        "are unchanged. After the 4:00 AM ET session roll this tape goes back to the real log. "
-        "Does not Arm, size, or vote."
-    )
-    size = st.radio(
-        "Table size",
-        ("Compact", "Comfortable", "Tall"),
-        index=1,
-        horizontal=True,
-        key="room3_lane_demo_size",
-        help="Same toolbar as the watch book: hover the table’s top-right for search, download, and fullscreen.",
-    )
-    height = {"Compact": 240, "Comfortable": 380, "Tall": 560}[str(size)]
-    df = pd.DataFrame(_nested_lane_demo_rows())
-    st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True,
-        height=height,
-        column_config={
-            "Kind": st.column_config.TextColumn("Kind", width="small"),
-            "Row": st.column_config.TextColumn("Row", width="medium"),
-            "Clock": st.column_config.TextColumn("Clock", width="small"),
-            "Match": st.column_config.TextColumn("Match", width="small"),
-            "Layout": st.column_config.TextColumn("Layout", width="medium"),
-            "Letter": st.column_config.TextColumn("Letter", width="medium"),
-            "What this lane is doing": st.column_config.TextColumn(
-                "What this lane is doing", width="large"
-            ),
-            "Size $": st.column_config.TextColumn("Size $", width="small"),
-        },
-    )
-    st.caption(
-        "Hover the top-right of the table for search, download, and fullscreen (expand). "
-        "Compact / Tall shrinks or magnifies the grid. "
-        "Indented Row + Kind “sub-lane” = that specific letter. Main row never becomes the letter. "
-        "Purgatory never shows here. Size $ is the fire-ready TF slot, not a fill."
-    )
-
-
 def _render_trade_history() -> None:
     st.markdown("### Today's trade log")
-    if _trade_log_nest_demo_on():
-        _render_nested_lane_demo()
-        return
     st.caption(
         "Closes land here and in Operator review. After you vote ✓/✗ the row leaves this tape "
         "(history stays under All-time). If you don't vote, this tape rolls at the next session day; "
         "the review pile keeps the unvoted close at least 24h. "
-        "X'd-out closes stay on this tape and in session history; they do not sit in review and do not vote."
+        "A finished session is filed into Session history and leaves this tape."
     )
     pending_ids = {
         str(r.get("id") or "")
@@ -2867,11 +2754,14 @@ def _render_trade_history() -> None:
     }
     # One list only — pending is a status, not a second copy of the trade.
     today_key = _trading_day_key()
+    filed = _filed_session_dates()
     history = _dedupe_trade_history()
     st.session_state.room3_trade_history = history[:200]
     rows = []
     for r in history:
         if _trade_session_date(r) != today_key:
+            continue
+        if _trade_session_date(r) in filed:
             continue
         if not _trade_is_closed_row(r) and "closing" not in str(r.get("status") or "").lower():
             continue
@@ -2925,7 +2815,11 @@ def _render_trade_history() -> None:
             if sync_meta.get("error"):
                 detail += f" · {sync_meta.get('error')}"
         st.caption(
-            "Log empty for today — prior-session fills live under All-time / Session history."
+            (
+                f"Live tape is clear — {_trading_day_display(today_key)} is under Session history."
+                if today_key in filed
+                else "Log empty for today — prior-session fills live under All-time / Session history."
+            )
             + detail
         )
         return
@@ -3384,8 +3278,9 @@ def _render_session_history() -> None:
     st.markdown("---")
     st.markdown("### Session history")
     st.caption(
-        "Past trading days · click a day to expand tickers · click a ticker for full detail · "
-        "one panel open at a time"
+        "Finished trading days · click a day to expand tickers · click a ticker for full detail · "
+        "one panel open at a time. The live day stays on Today's log until it is filed or the "
+        "session rolls at 4:00 AM ET."
     )
     # Ensure end_equity is stamped from curve
     if st.session_state.get("room3_archive_days"):
@@ -4502,6 +4397,15 @@ def _hydrate_screener_from_disk() -> None:
             )
         )
         st.session_state.room3_review_void_ids = merged_void[-200:]
+    filed_snap = (snap.get("filed_session_dates") or []) if snap else []
+    if isinstance(filed_snap, list) and filed_snap:
+        merged_filed = list(
+            dict.fromkeys(
+                [str(x) for x in (st.session_state.get("room3_filed_session_dates") or [])]
+                + [str(x) for x in filed_snap]
+            )
+        )
+        st.session_state.room3_filed_session_dates = merged_filed[-30:]
     rl = (snap.get("review_learn") or {}) if snap else {}
     if isinstance(rl, dict) and (rl.get("observations") or rl.get("versions")) and not (
         (st.session_state.get("room3_review_learn") or {}).get("observations")
@@ -4570,6 +4474,7 @@ def _persist_screener_to_disk() -> None:
             "operator_reviews": st.session_state.get("room3_operator_reviews") or [],
             "pending_reviews": st.session_state.get("room3_pending_reviews") or [],
             "review_void_ids": st.session_state.get("room3_review_void_ids") or [],
+            "filed_session_dates": st.session_state.get("room3_filed_session_dates") or [],
             "review_learn": st.session_state.get("room3_review_learn") or room3_review_learn.state_from_session(st.session_state),
             "last_hub": str(st.session_state.get("terminal_hub") or ""),
         }
