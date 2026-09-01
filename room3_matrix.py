@@ -9,9 +9,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
-import room3_lots
+import room3_engine
 import room3_recipes
 import room3_review_learn
+
+room3_lots = room3_engine.lots
 
 MATCH_THRESHOLD_PCT = 85
 CHILD_READY_PCT = 84  # show a strategy sub-lane; fire still waits for MATCH_THRESHOLD

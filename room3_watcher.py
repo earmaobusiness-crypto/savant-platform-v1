@@ -24,7 +24,8 @@ import room3_engine
 import room3_matrix
 import room3_precursor
 import room3_recipes
-import room3_lots
+
+room3_lots = room3_engine.lots
 
 ET = ZoneInfo("America/New_York")
 

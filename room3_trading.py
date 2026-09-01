@@ -28,7 +28,8 @@ import room3_recipes
 import room3_screener
 import room3_watcher
 import room3_review_learn
-import room3_lots
+
+room3_lots = room3_engine.lots
 
 ROOM3_MODE_PAPER = "paper"
 ROOM3_MODE_LIVE = "live"
