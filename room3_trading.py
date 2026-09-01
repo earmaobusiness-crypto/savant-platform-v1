@@ -5245,6 +5245,36 @@ def _render_rth_filter_attach() -> None:
                     _sync_belt_query(remaining)
                     st.rerun()
 
+    leftover = []
+    seen = {str(x).upper() for x in belt}
+    for row in list(st.session_state.get("room3_open_positions") or []):
+        sym = str(row.get("ticker") or row.get("symbol") or "").upper()
+        if sym and sym not in seen:
+            leftover.append(sym)
+            seen.add(sym)
+    if leftover:
+        st.caption(
+            "In, not on the belt (reboot dropped the chip) — × flattens this name. "
+            "That is not a belt drop; it closes the leftover pile."
+        )
+        n_cols = min(6, max(1, len(leftover)))
+        cols = st.columns(n_cols)
+        for i, t in enumerate(leftover):
+            with cols[i % n_cols]:
+                if st.button(f"× {t}", key=f"room3_leftover_flat_{t}", use_container_width=True):
+                    mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
+                    paper = mode != ROOM3_MODE_LIVE
+                    result = room3_alpaca.close_position_now(t, paper=paper, aggressive=True)
+                    if result.get("ok"):
+                        room3_lots.close_lots_for_ticker(st.session_state, t)
+                        _sync_alpaca_account_into_session(paper=paper)
+                        st.session_state.room3_belt_flash = f"Flattened leftover {t}"
+                    else:
+                        st.session_state.room3_belt_flash = (
+                            f"{t} still in · {result.get('error') or 'flatten failed'}"
+                        )
+                    st.rerun()
+
     if room3_screener.BUILTIN_SCREENER_ENABLED:
         _render_builtin_screener_panel()
 
