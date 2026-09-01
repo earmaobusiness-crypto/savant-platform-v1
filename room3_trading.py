@@ -45,6 +45,8 @@ _VOID_LEARN_TICKERS = frozenset({"AEHL", "NCRA", "WETO", "VVOS"})
 _VOID_LEARN_PNL = frozenset(
     {("AEHL", -92), ("AEHL", -14), ("NCRA", -52), ("WETO", -709), ("VVOS", -113)}
 )
+# Tonight only: hide the real tape and show nested main + strategy sub-lanes.
+_TRADE_LOG_NEST_DEMO_DAY = "2026-08-31"
 
 _SESSION_KEYS = (
     "room3_execution_mode",
@@ -580,6 +582,49 @@ def _inject_room3_css() -> None:
             margin-bottom: 10px;
             background: #101010;
         }
+        .room3-lane-demo {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            color: #E8E8E8;
+            margin: 4px 0 8px 0;
+        }
+        .room3-lane-demo th {
+            text-align: left;
+            color: #9A9A9A;
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            padding: 8px 10px;
+            border-bottom: 1px solid #2A2A2A;
+            background: #1A1A1A;
+        }
+        .room3-lane-demo td {
+            padding: 9px 10px;
+            border-bottom: 1px solid #252525;
+            vertical-align: top;
+        }
+        .room3-lane-demo tr.lane-main td {
+            background: #161616;
+            font-weight: 600;
+        }
+        .room3-lane-demo tr.lane-child td {
+            background: #101010;
+            color: #D0D0D0;
+            font-weight: 400;
+        }
+        .room3-lane-demo tr.lane-child td.lane-name {
+            padding-left: 28px;
+            border-left: 2px solid #3B6EA5;
+            font-weight: 500;
+            color: #C8D6E8;
+        }
+        .room3-lane-demo tr.lane-left td {
+            background: #141010;
+            color: #B8B0B0;
+        }
+        .room3-lane-demo .lane-muted { color: #888; font-weight: 400; }
         .room3-verdict-good { color: #7BC67E; font-weight: 700; }
         .room3-verdict-bad { color: #FF6B6B; font-weight: 700; }
         .room3-history-wrap {
@@ -2695,8 +2740,120 @@ def _trade_widget_key(prefix: str, trade: dict, index: int = 0) -> str:
     return f"{prefix}_{index}_{rid}_{ticker}_{exit_t}"
 
 
+def _trade_log_nest_demo_on() -> bool:
+    """One-night look at nested lanes. Real closes stay in history; this does not trade."""
+    return _trading_day_key() == _TRADE_LOG_NEST_DEMO_DAY
+
+
+def _render_nested_lane_demo() -> None:
+    """Look-only nested watch/log shape: main ticker+TF row, strategy sub-lane under it."""
+    st.caption(
+        "Look-only for tonight — nested lanes, not today’s fills. "
+        "AEHL / NCRA / WETO / VVOS still happened: summary, session history, and account P/L "
+        "are unchanged. After the 4:00 AM ET session roll this tape goes back to the real log. "
+        "Does not Arm, size, or vote."
+    )
+    html = """
+    <table class="room3-lane-demo">
+      <thead>
+        <tr>
+          <th>Row</th>
+          <th>Clock</th>
+          <th>Match</th>
+          <th>Layout</th>
+          <th>Letter</th>
+          <th>What this lane is doing</th>
+          <th>Size $</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="lane-main">
+          <td>AEHL</td>
+          <td>15m</td>
+          <td class="lane-muted">scanning</td>
+          <td>all live letters</td>
+          <td class="lane-muted">—</td>
+          <td>Main row all day. Watches every live 15m letter. Stays after a child exits.</td>
+          <td class="lane-muted">—</td>
+        </tr>
+        <tr class="lane-child">
+          <td class="lane-name">2B (15M)</td>
+          <td>15m</td>
+          <td>87%</td>
+          <td>2 — Tight</td>
+          <td>2B (15M)</td>
+          <td>This specific letter is fire-ready. Hunting 2B’s trigger (dip, then reclaim). Can fill.</td>
+          <td>19,800</td>
+        </tr>
+        <tr class="lane-child">
+          <td class="lane-name">1C (15M)</td>
+          <td>15m</td>
+          <td>84%</td>
+          <td>1 — Volatile / Risk-Off</td>
+          <td>1C (15M)</td>
+          <td>Second hot letter on the same name. Own child, own trigger — not the same trade as 2B.</td>
+          <td>19,800</td>
+        </tr>
+        <tr class="lane-main">
+          <td>AEHL</td>
+          <td>5m</td>
+          <td class="lane-muted">scanning</td>
+          <td>all live letters</td>
+          <td class="lane-muted">—</td>
+          <td>Same stock, other clock. Own main row. Not a child of the 15m line.</td>
+          <td class="lane-muted">—</td>
+        </tr>
+        <tr class="lane-child">
+          <td class="lane-name">8B (5M)</td>
+          <td>5m</td>
+          <td>86%</td>
+          <td>8 family</td>
+          <td>8B (5M)</td>
+          <td>Adds onto the AEHL pile (Alpaca is one stack of shares). App keeps a second lot. Exits on 8B’s trigger and peels that qty.</td>
+          <td>11,900</td>
+        </tr>
+        <tr class="lane-main">
+          <td>NCRA</td>
+          <td>15m</td>
+          <td>41%</td>
+          <td>nearest live</td>
+          <td class="lane-muted">—</td>
+          <td>Main only. Nothing close enough — no sub-lane, no ticket.</td>
+          <td class="lane-muted">—</td>
+        </tr>
+        <tr class="lane-main">
+          <td>VVOS</td>
+          <td>15m</td>
+          <td>72%</td>
+          <td>nearest live</td>
+          <td class="lane-muted">—</td>
+          <td>Warming on the main row. Still no child until a letter is fire-ready (~84%+).</td>
+          <td class="lane-muted">—</td>
+        </tr>
+        <tr class="lane-left">
+          <td>WETO</td>
+          <td class="lane-muted">—</td>
+          <td class="lane-muted">—</td>
+          <td class="lane-muted">—</td>
+          <td class="lane-muted">—</td>
+          <td>Off-belt leftover. Not a child of AEHL. Exit-only if it were still open — no new buy, no add, no strategy sub-lane.</td>
+          <td class="lane-muted">—</td>
+        </tr>
+      </tbody>
+    </table>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+    st.caption(
+        "Indent + blue edge = strategy sub-lane. Main row never becomes the letter. "
+        "Purgatory never shows here. Size $ is the fire-ready TF slot, not a fill."
+    )
+
+
 def _render_trade_history() -> None:
     st.markdown("### Today's trade log")
+    if _trade_log_nest_demo_on():
+        _render_nested_lane_demo()
+        return
     st.caption(
         "Closes land here and in Operator review. After you vote ✓/✗ the row leaves this tape "
         "(history stays under All-time). If you don't vote, this tape rolls at the next session day; "
