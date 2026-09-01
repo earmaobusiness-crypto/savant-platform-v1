@@ -732,6 +732,8 @@ def process_operator_vote(
     traits: list[str] | None = None,
 ) -> dict[str, Any]:
     """Bank vote, auto-compile anything that crossed the TF bar, persist."""
+    if trade.get("skip_matrix_learn") or trade.get("gap_exit"):
+        return {"observation": None, "applied": [], "pending": {}, "versions": []}
     state = state_from_session(session_state)
     primary = ingest_review(
         state,

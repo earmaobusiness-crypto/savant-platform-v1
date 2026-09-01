@@ -37,6 +37,8 @@ ROOM3_LIVE_SECURITY_ENABLED = False
 ROOM3_DEFAULT_EQUITY = 0.0
 ROOM3_SESSION_ROLL_HOUR_ET = 4  # next trading day starts 4:00 AM Eastern
 ET = ZoneInfo("America/New_York")
+_PROCESS_GAP_FLATTEN_DONE = False
+_GAP_EXIT_NOTE = "reboot — closed so the hold was not left hanging"
 
 _SESSION_KEYS = (
     "room3_execution_mode",
@@ -281,6 +283,7 @@ def init_room3_session_state() -> None:
         st.session_state.pop("room3_repertoire_cache", None)
         st.session_state.room3_layout_hydrated_once = True
     _maybe_reconnect_alpaca()
+    _maybe_flatten_on_cloud_process_boot()
 
 
 def _inject_room3_css() -> None:
@@ -2145,6 +2148,8 @@ def _record_operator_review(trade_id: str, vote: str) -> None:
         trade = next((t for t in hist if str(t.get("id")) == str(trade_id)), None)
     if not trade:
         return
+    if trade.get("gap_exit") or trade.get("skip_matrix_learn"):
+        return
     st.session_state.room3_pending_reviews = [
         t for t in pending if str(t.get("id")) != str(trade_id)
     ]
@@ -2632,7 +2637,9 @@ def _render_trade_history() -> None:
         if r.get("reviewed") and str(r.get("operator_vote") or "").strip():
             continue
         rid = str(r.get("id") or "")
-        if r.get("broker_source"):
+        if r.get("gap_exit") or r.get("skip_matrix_learn"):
+            status = "closed · reboot note"
+        elif r.get("broker_source"):
             status = str(r.get("status") or "closed · alpaca")
         elif r.get("reviewed") and r.get("operator_vote"):
             status = f"reviewed · {r.get('operator_vote', '—')}"
@@ -3297,21 +3304,28 @@ def _render_operator_review_panel() -> None:
         return
     for i, trade in enumerate(pending):
         tid = str(trade.get("id") or "").strip()
+        is_gap = bool(trade.get("gap_exit") or trade.get("skip_matrix_learn"))
         verdict = str(trade.get("system_verdict") or "neutral")
         verdict_class = "room3-verdict-good" if verdict == "good" else "room3-verdict-bad"
+        note = str(trade.get("review_note") or trade.get("system_reason") or "")
+        strat = _display_trade_strategy(trade)
+        tf = _display_trade_timeframe(trade)
         st.markdown(
             f"<div class='room3-review-card'>"
-            f"<strong>{trade.get('ticker')}</strong> · {trade.get('timeframe')} · "
-            f"{trade.get('strategy')}<br>"
+            f"<strong>{trade.get('ticker')}</strong> · {tf} · "
+            f"{strat}<br>"
             f"Entry {trade.get('entry_time')} @ {trade.get('entry_price')} → "
             f"Exit {trade.get('exit_time')} @ {trade.get('exit_price')}<br>"
             f"P/L <strong>${float(trade.get('pnl_usd') or 0):,.2f}</strong> "
             f"({float(trade.get('pnl_pct') or 0):+.2f}%)<br>"
             f"<span class='{verdict_class}'>System: {verdict}</span> — "
-            f"{trade.get('system_reason', '')}"
+            f"{escape(note or str(trade.get('system_reason') or ''))}"
             f"</div>",
             unsafe_allow_html=True,
         )
+        if is_gap:
+            st.caption("Note only — reboot cut this hold. Not a ✓/✗. Does not feed Room 2.")
+            continue
         b1, b2, _ = st.columns([1, 1, 2])
         with b1:
             if st.button(
@@ -3366,6 +3380,103 @@ def _maybe_reconnect_alpaca() -> None:
         f"Handshake OK · equity ${equity:,.2f} · cash ${cash:,.2f} · "
         f"buying power ${buying_power:,.2f} · status {result.get('status')}"
     )
+
+
+def _mark_recent_closes_as_gap_exits(symbols: set[str]) -> None:
+    """Stamp FIFO/history rows we just flattened so review is a note, not a vote."""
+    if not symbols:
+        return
+    now_s = datetime.now(ET).strftime("%H:%M:%S")
+    for row in list(st.session_state.get("room3_trade_history") or []):
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker not in symbols:
+            continue
+        if not _trade_is_closed_row(row) and "closing" not in str(row.get("status") or "").lower():
+            continue
+        exit_t = str(row.get("exit_time") or "")
+        if exit_t and exit_t not in ("—", "-") and not _times_near(exit_t, now_s, window_sec=600):
+            continue
+        row["gap_exit"] = True
+        row["skip_matrix_learn"] = True
+        row["system_verdict"] = "note"
+        row["system_reason"] = _GAP_EXIT_NOTE
+        row["review_note"] = _GAP_EXIT_NOTE
+        row["status"] = "closed · reboot note"
+    for row in list(st.session_state.get("room3_pending_reviews") or []):
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker not in symbols:
+            continue
+        row["gap_exit"] = True
+        row["skip_matrix_learn"] = True
+        row["system_verdict"] = "note"
+        row["system_reason"] = _GAP_EXIT_NOTE
+        row["review_note"] = _GAP_EXIT_NOTE
+
+
+def _maybe_flatten_on_cloud_process_boot() -> None:
+    """
+    New Cloud process (push / reboot) does not talk to Alpaca by itself.
+    First Room 3 load of that process flattens open paper and leaves a note.
+    Same process + refresh does not fire again. Local Streamlit is skipped.
+    """
+    global _PROCESS_GAP_FLATTEN_DONE
+    if _PROCESS_GAP_FLATTEN_DONE:
+        return
+    if not room3_engine.is_cloud_host():
+        _PROCESS_GAP_FLATTEN_DONE = True
+        return
+    if str(st.session_state.get("room3_broker") or "alpaca") != "alpaca":
+        return
+    if not _broker_is_connected():
+        return
+    pid = os.getpid()
+    marker = room3_screener.load_process_boot()
+    if int(marker.get("pid") or 0) == pid:
+        _PROCESS_GAP_FLATTEN_DONE = True
+        return
+    paper = True
+    room3_screener.save_process_boot({"pid": pid, "gap_flatten_done": False, "claimed": True})
+    _sync_alpaca_account_into_session(paper=paper)
+    positions = list(st.session_state.get("room3_open_positions") or [])
+    symbols: set[str] = set()
+    ok_n = 0
+    errs: list[str] = []
+    for pos in positions:
+        sym = str(pos.get("ticker") or pos.get("symbol") or "").upper()
+        if not sym:
+            continue
+        symbols.add(sym)
+        try:
+            result = room3_alpaca.close_position_now(sym, paper=paper, aggressive=True)
+            if result.get("ok"):
+                ok_n += 1
+                _log_alpaca_order_fill({**result, "symbol": sym, "side": "sell"})
+            else:
+                errs.append(f"{sym}:{result.get('error') or 'fail'}")
+        except Exception as exc:
+            errs.append(f"{sym}:{exc}")
+    if symbols:
+        _sync_alpaca_account_into_session(paper=paper)
+        _mark_recent_closes_as_gap_exits(symbols)
+        _sync_pending_from_closed_history()
+        _wipe_maps_and_belt()
+    room3_screener.save_process_boot(
+        {
+            "pid": pid,
+            "gap_flatten_done": True,
+            "closed": sorted(symbols),
+            "ok_n": ok_n,
+            "errors": errs[:6],
+        }
+    )
+    _PROCESS_GAP_FLATTEN_DONE = True
+    if symbols:
+        bits = [f"reboot · flattened {ok_n}/{len(symbols)}"]
+        if errs:
+            bits.append(" · ".join(errs[:3]))
+        note = " · ".join(bits) + f" · {_GAP_EXIT_NOTE}"
+        st.session_state.room3_gap_flatten_note = note
+        st.session_state.room3_last_session_flat_note = note
 
 
 def _ibkr_is_connected() -> bool:

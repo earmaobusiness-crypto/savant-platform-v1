@@ -1,0 +1,17 @@
+---
+description: How letters exist (Purgatory vs live) and how the belt watch book branches.
+alwaysApply: true
+---
+
+# Room 3 — families and the belt book (locked 2026-08-31)
+
+**No unfinished live letters.** Purgatory is Room 2 only: packs sit until three similar + DNA, then a live letter. Room 3 never matches, shows, or trades Purgatory. “Bad” DNA is an operator vote, not the system minting a half letter.
+
+**Belt row (e.g. CRE 15m):** one main line all day. It scans live layouts/strategies for that ticker+TF, spreads attention early, then weights toward whatever family is actually printing; dead families get a weak eye, not zero, and can come back if the tape shifts.
+
+**Child row:** only when one letter is really close (about ≥84% / fire-ready). Indent under the main TF row (layout, letter, Match%). That child hunts that letter’s trigger and can fire. After exit the child vanishes; the main CRE 15m row stays. A second hot letter = a second child, not a new stock. Children are not the same trade.
+
+**Same ticker, two hot letters (any TF):** Alpaca is one pile — the second fill **adds**. The app keeps **two lots**: letter, TF, qty, entry, exit. Each lot exits on *its* trigger (sell that qty). Operator review / Room 2 learn per lot, not “one CRE blob.” A 5m child adding onto a live 15m CRE pile is the same rule. Children are not one trade just because the broker merged the shares.
+
+**Off-belt leftovers** (name not on the belt): exit-only. No new buy. That is not a CRE child row.
+

@@ -377,6 +377,116 @@ def _open_qty(session_state: Any, symbol: str) -> float:
     return 0.0
 
 
+def _off_belt(line: dict[str, Any], book: dict[str, Any]) -> bool:
+    """Open leftover maps (keep_tickers) that are not on the operator belt."""
+    if line.get("in_filter") is False:
+        return True
+    ticker = str(line.get("ticker") or "").upper()
+    uni = {str(t).upper() for t in (book.get("universe") or []) if str(t).strip()}
+    return bool(ticker) and ticker not in uni
+
+
+def _enter_on_print(
+    strategy: str,
+    tf: str,
+    layout_id: str,
+    structural_move_pct: float,
+) -> bool:
+    """1m pops: the start is the trigger. Everything else waits a first hold/pullback."""
+    tf_n = room3_recipes.normalize_tf(tf)
+    style = room3_recipes.order_style_for(
+        strategy,
+        tf_n,
+        layout_id=layout_id,
+        structural_move_pct=structural_move_pct,
+    )
+    return tf_n == "1m" and style == "market"
+
+
+def _reset_entry_trigger(line: dict[str, Any]) -> None:
+    line.pop("family_armed_px", None)
+    line.pop("family_armed_high", None)
+    line.pop("pullback_low", None)
+    line.pop("trigger_phase", None)
+    line.pop("entry_skipped_late", None)
+
+
+def _entry_is_late(line: dict[str, Any], last_px: float, structural: float) -> bool:
+    armed = float(line.get("family_armed_px") or 0)
+    if armed <= 0 or last_px <= 0:
+        return False
+    run_pct = (last_px - armed) / armed * 100.0
+    if run_pct >= 8.0:
+        return True
+    if structural > 0 and run_pct >= max(2.0, structural * 0.5):
+        return True
+    return False
+
+
+def _entry_trigger_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    tf: str,
+    strategy: str,
+    layout_id: str,
+    structural: float,
+) -> tuple[bool, str]:
+    """
+    ≥85% = family. Fill = letter style, else TF fallback.
+    Late (half the expected move already in) = skip this shot.
+    """
+    if line.get("entry_skipped_late"):
+        return False, "late · skipped · wait next pattern"
+    if last_px <= 0:
+        return False, "no last print"
+    if not line.get("family_armed_px"):
+        line["family_armed_px"] = last_px
+        last_h = float((slices[-1] or {}).get("h") or last_px) if slices else last_px
+        line["family_armed_high"] = last_h
+        if _enter_on_print(strategy, tf, layout_id, structural):
+            line["trigger_phase"] = "ready"
+        else:
+            line["trigger_phase"] = "wait_dip"
+    if _entry_is_late(line, last_px, structural):
+        line["entry_skipped_late"] = True
+        line["trigger_phase"] = "skipped"
+        return False, "late · move already gone · skip"
+    if _enter_on_print(strategy, tf, layout_id, structural):
+        return True, "pop · enter now"
+    tf_n = room3_recipes.normalize_tf(tf)
+    armed_px = float(line.get("family_armed_px") or last_px)
+    last = slices[-1] if slices else {}
+    last_c = float(last.get("c") or last_px)
+    last_l = float(last.get("l") or last_c)
+    dip_frac = 0.012 if tf_n == "15m" else 0.008 if tf_n == "5m" else 0.004
+    phase = str(line.get("trigger_phase") or "wait_dip")
+    if phase == "ready":
+        return True, "trigger ready"
+    if phase == "wait_dip":
+        if last_l <= armed_px * (1.0 - dip_frac) or last_c < armed_px:
+            line["trigger_phase"] = "wait_reclaim"
+            line["pullback_low"] = last_l
+            return False, "≥85% · first dip · waiting reclaim"
+        return False, "≥85% · waiting first pullback"
+    if phase == "wait_reclaim":
+        pb = min(float(line.get("pullback_low") or last_l), last_l)
+        line["pullback_low"] = pb
+        if tf_n == "15m":
+            if last_c > pb and last_c >= armed_px * 0.997:
+                line["trigger_phase"] = "ready"
+                return True, "15m hold after pullback"
+            return False, "15m · waiting hold after dip"
+        prior = slices[-2] if len(slices) >= 2 else last
+        prior_high = float(prior.get("h") or prior.get("c") or 0)
+        if last_c > pb and (prior_high <= 0 or last_c >= prior_high):
+            line["trigger_phase"] = "ready"
+            return True, "reclaim after pullback"
+        return False, "waiting reclaim after dip"
+    return False, "≥85% · waiting trigger"
+
+
 def _ss_get(session_state: Any, key: str, default: Any = None) -> Any:
     if session_state is None:
         return default
@@ -927,6 +1037,7 @@ def maybe_queue_matrix_signals(
 
         if (
             entries_allowed
+            and not _off_belt(line, book)
             and not _approaching_day_close()
             and tf == "15m"
             and not line.get("entry_signal")
@@ -977,6 +1088,10 @@ def maybe_queue_matrix_signals(
 
     if not entries_allowed:
         return
+    if _off_belt(line, book):
+        line["patience"] = True
+        line["patience_note"] = "leftover · exit only · no new buy"
+        return
     if line.get("entry_signal") or line.get("state") not in ("watching", "committed"):
         return
     if not match.get("vector_ready"):
@@ -1000,6 +1115,8 @@ def maybe_queue_matrix_signals(
         pass
     floor = max(70.0, min(95.0, floor))
     if cur_match < floor:
+        if cur_match < WARMING_MATCH_PCT:
+            _reset_entry_trigger(line)
         if cur_match >= WARMING_MATCH_PCT:
             line["patience"] = True
             line["patience_note"] = (
@@ -1007,18 +1124,9 @@ def maybe_queue_matrix_signals(
                 f"30s snaps continue"
             )
         else:
-            # Drop stale warming Err when Match% falls back under the floor.
             line["patience"] = False
             line.pop("patience_note", None)
         return
-    line["patience"] = False
-    line.pop("patience_note", None)
-    if _ticker_already_engaged(
-        book, ticker, except_key=room3_watcher.line_key(ticker, tf),
-        session_state=session_state,
-    ):
-        return
-
     layout_id = str(match.get("nearest_layout_id") or "")
     if layout_id in PLACEHOLDER_LAYOUTS:
         return
@@ -1040,6 +1148,29 @@ def maybe_queue_matrix_signals(
         return
     if room3_recipes.is_purgatory_letter(layout_id, strategy):
         return
+
+    structural = float(match.get("structural_move_pct") or 0.0)
+    ready, trigger_note = _entry_trigger_ready(
+        line,
+        slices,
+        last_px=last_px,
+        tf=tf,
+        strategy=strategy,
+        layout_id=layout_id,
+        structural=structural,
+    )
+    line["patience"] = not ready
+    line["patience_note"] = trigger_note
+    if not ready:
+        return
+    line["patience"] = False
+    line.pop("patience_note", None)
+    if _ticker_already_engaged(
+        book, ticker, except_key=room3_watcher.line_key(ticker, tf),
+        session_state=session_state,
+    ):
+        return
+
     qty, notional = _compute_entry_qty(
         price=last_px,
         session_state=session_state,
@@ -1080,4 +1211,5 @@ def maybe_queue_matrix_signals(
         layout_id=layout_id,
         structural_move_pct=float(match.get("structural_move_pct") or 0.0),
     )
+    stamped["entry_signal"]["trigger"] = trigger_note
     line["nearest_strategy"] = strategy

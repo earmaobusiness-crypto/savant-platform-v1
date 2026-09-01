@@ -976,6 +976,8 @@ def _why_not_firing(line: dict[str, Any], book: dict[str, Any] | None = None) ->
         return "live trade"
     if state == "queued":
         return "order stamped · waiting fill"
+    if line.get("in_filter") is False and state not in ("in", "queued"):
+        return "leftover · exit only · no new buy"
     if seat:
         if match >= room3_matrix.MATCH_THRESHOLD_PCT:
             return f"promise · {seat} has the seat"

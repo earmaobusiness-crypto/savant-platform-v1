@@ -24,6 +24,7 @@ import room3_alpaca
 ET = ZoneInfo("America/New_York")
 
 _SNAPSHOT_PATH = Path(__file__).resolve().parent / "room3_data" / "screener_snapshot.json"
+_PROCESS_BOOT_PATH = Path(__file__).resolve().parent / "room3_data" / "process_boot.json"
 
 SCAN_INTERVAL_MINUTES = 18
 # Parked: set True to restore Yahoo universe Job 1 UI + ~18 min auto-scan.
@@ -893,3 +894,23 @@ def merge_screener_snapshot(updates: dict[str, Any]) -> None:
     blob = load_screener_snapshot()
     blob.update(dict(updates or {}))
     save_screener_snapshot(blob)
+
+
+def load_process_boot() -> dict[str, Any]:
+    try:
+        if not _PROCESS_BOOT_PATH.is_file():
+            return {}
+        raw = json.loads(_PROCESS_BOOT_PATH.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_process_boot(payload: dict[str, Any]) -> None:
+    try:
+        _PROCESS_BOOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        blob = dict(payload or {})
+        blob["saved_at"] = datetime.now(ET).isoformat()
+        _PROCESS_BOOT_PATH.write_text(json.dumps(blob, default=str), encoding="utf-8")
+    except Exception:
+        pass
