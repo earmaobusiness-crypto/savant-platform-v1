@@ -582,49 +582,6 @@ def _inject_room3_css() -> None:
             margin-bottom: 10px;
             background: #101010;
         }
-        .room3-lane-demo {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 13px;
-            color: #E8E8E8;
-            margin: 4px 0 8px 0;
-        }
-        .room3-lane-demo th {
-            text-align: left;
-            color: #9A9A9A;
-            font-weight: 600;
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 0.06em;
-            padding: 8px 10px;
-            border-bottom: 1px solid #2A2A2A;
-            background: #1A1A1A;
-        }
-        .room3-lane-demo td {
-            padding: 9px 10px;
-            border-bottom: 1px solid #252525;
-            vertical-align: top;
-        }
-        .room3-lane-demo tr.lane-main td {
-            background: #161616;
-            font-weight: 600;
-        }
-        .room3-lane-demo tr.lane-child td {
-            background: #101010;
-            color: #D0D0D0;
-            font-weight: 400;
-        }
-        .room3-lane-demo tr.lane-child td.lane-name {
-            padding-left: 28px;
-            border-left: 2px solid #3B6EA5;
-            font-weight: 500;
-            color: #C8D6E8;
-        }
-        .room3-lane-demo tr.lane-left td {
-            background: #141010;
-            color: #B8B0B0;
-        }
-        .room3-lane-demo .lane-muted { color: #888; font-weight: 400; }
         .room3-verdict-good { color: #7BC67E; font-weight: 700; }
         .room3-verdict-bad { color: #FF6B6B; font-weight: 700; }
         .room3-history-wrap {
@@ -2745,6 +2702,109 @@ def _trade_log_nest_demo_on() -> bool:
     return _trading_day_key() == _TRADE_LOG_NEST_DEMO_DAY
 
 
+def _nested_lane_demo_rows() -> list[dict]:
+    """Look-only nested lanes — same shape the operator described (AEHL main + strategy sub)."""
+    pad = "\u00a0\u00a0\u00a0"
+    return [
+        {
+            "Kind": "main",
+            "Row": "AEHL",
+            "Clock": "15m",
+            "Match": "scanning",
+            "Layout": "all live letters",
+            "Letter": "—",
+            "What this lane is doing": (
+                "Main row all day. Watches every live 15m letter. Stays after a child exits."
+            ),
+            "Size $": "—",
+        },
+        {
+            "Kind": "sub-lane",
+            "Row": f"{pad}2B (15M)",
+            "Clock": "15m",
+            "Match": "87%",
+            "Layout": "2 — Tight",
+            "Letter": "2B (15M)",
+            "What this lane is doing": (
+                "This specific letter is fire-ready. Hunting 2B’s trigger (dip, then reclaim). Can fill."
+            ),
+            "Size $": "19,800",
+        },
+        {
+            "Kind": "sub-lane",
+            "Row": f"{pad}1C (15M)",
+            "Clock": "15m",
+            "Match": "84%",
+            "Layout": "1 — Volatile / Risk-Off",
+            "Letter": "1C (15M)",
+            "What this lane is doing": (
+                "Second hot letter on the same name. Own child, own trigger — not the same trade as 2B."
+            ),
+            "Size $": "19,800",
+        },
+        {
+            "Kind": "main",
+            "Row": "AEHL",
+            "Clock": "5m",
+            "Match": "scanning",
+            "Layout": "all live letters",
+            "Letter": "—",
+            "What this lane is doing": (
+                "Same stock, other clock. Own main row. Not a child of the 15m line."
+            ),
+            "Size $": "—",
+        },
+        {
+            "Kind": "sub-lane",
+            "Row": f"{pad}8B (5M)",
+            "Clock": "5m",
+            "Match": "86%",
+            "Layout": "8 family",
+            "Letter": "8B (5M)",
+            "What this lane is doing": (
+                "Adds onto the AEHL pile (Alpaca is one stack of shares). "
+                "App keeps a second lot. Exits on 8B’s trigger and peels that qty."
+            ),
+            "Size $": "11,900",
+        },
+        {
+            "Kind": "main",
+            "Row": "NCRA",
+            "Clock": "15m",
+            "Match": "41%",
+            "Layout": "nearest live",
+            "Letter": "—",
+            "What this lane is doing": "Main only. Nothing close enough — no sub-lane, no ticket.",
+            "Size $": "—",
+        },
+        {
+            "Kind": "main",
+            "Row": "VVOS",
+            "Clock": "15m",
+            "Match": "72%",
+            "Layout": "nearest live",
+            "Letter": "—",
+            "What this lane is doing": (
+                "Warming on the main row. Still no child until a letter is fire-ready (~84%+)."
+            ),
+            "Size $": "—",
+        },
+        {
+            "Kind": "leftover",
+            "Row": "WETO",
+            "Clock": "—",
+            "Match": "—",
+            "Layout": "—",
+            "Letter": "—",
+            "What this lane is doing": (
+                "Off-belt leftover. Not a child of AEHL. Exit-only if it were still open — "
+                "no new buy, no add, no strategy sub-lane."
+            ),
+            "Size $": "—",
+        },
+    ]
+
+
 def _render_nested_lane_demo() -> None:
     """Look-only nested watch/log shape: main ticker+TF row, strategy sub-lane under it."""
     st.caption(
@@ -2753,98 +2813,38 @@ def _render_nested_lane_demo() -> None:
         "are unchanged. After the 4:00 AM ET session roll this tape goes back to the real log. "
         "Does not Arm, size, or vote."
     )
-    html = """
-    <table class="room3-lane-demo">
-      <thead>
-        <tr>
-          <th>Row</th>
-          <th>Clock</th>
-          <th>Match</th>
-          <th>Layout</th>
-          <th>Letter</th>
-          <th>What this lane is doing</th>
-          <th>Size $</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr class="lane-main">
-          <td>AEHL</td>
-          <td>15m</td>
-          <td class="lane-muted">scanning</td>
-          <td>all live letters</td>
-          <td class="lane-muted">—</td>
-          <td>Main row all day. Watches every live 15m letter. Stays after a child exits.</td>
-          <td class="lane-muted">—</td>
-        </tr>
-        <tr class="lane-child">
-          <td class="lane-name">2B (15M)</td>
-          <td>15m</td>
-          <td>87%</td>
-          <td>2 — Tight</td>
-          <td>2B (15M)</td>
-          <td>This specific letter is fire-ready. Hunting 2B’s trigger (dip, then reclaim). Can fill.</td>
-          <td>19,800</td>
-        </tr>
-        <tr class="lane-child">
-          <td class="lane-name">1C (15M)</td>
-          <td>15m</td>
-          <td>84%</td>
-          <td>1 — Volatile / Risk-Off</td>
-          <td>1C (15M)</td>
-          <td>Second hot letter on the same name. Own child, own trigger — not the same trade as 2B.</td>
-          <td>19,800</td>
-        </tr>
-        <tr class="lane-main">
-          <td>AEHL</td>
-          <td>5m</td>
-          <td class="lane-muted">scanning</td>
-          <td>all live letters</td>
-          <td class="lane-muted">—</td>
-          <td>Same stock, other clock. Own main row. Not a child of the 15m line.</td>
-          <td class="lane-muted">—</td>
-        </tr>
-        <tr class="lane-child">
-          <td class="lane-name">8B (5M)</td>
-          <td>5m</td>
-          <td>86%</td>
-          <td>8 family</td>
-          <td>8B (5M)</td>
-          <td>Adds onto the AEHL pile (Alpaca is one stack of shares). App keeps a second lot. Exits on 8B’s trigger and peels that qty.</td>
-          <td>11,900</td>
-        </tr>
-        <tr class="lane-main">
-          <td>NCRA</td>
-          <td>15m</td>
-          <td>41%</td>
-          <td>nearest live</td>
-          <td class="lane-muted">—</td>
-          <td>Main only. Nothing close enough — no sub-lane, no ticket.</td>
-          <td class="lane-muted">—</td>
-        </tr>
-        <tr class="lane-main">
-          <td>VVOS</td>
-          <td>15m</td>
-          <td>72%</td>
-          <td>nearest live</td>
-          <td class="lane-muted">—</td>
-          <td>Warming on the main row. Still no child until a letter is fire-ready (~84%+).</td>
-          <td class="lane-muted">—</td>
-        </tr>
-        <tr class="lane-left">
-          <td>WETO</td>
-          <td class="lane-muted">—</td>
-          <td class="lane-muted">—</td>
-          <td class="lane-muted">—</td>
-          <td class="lane-muted">—</td>
-          <td>Off-belt leftover. Not a child of AEHL. Exit-only if it were still open — no new buy, no add, no strategy sub-lane.</td>
-          <td class="lane-muted">—</td>
-        </tr>
-      </tbody>
-    </table>
-    """
-    st.markdown(html, unsafe_allow_html=True)
+    size = st.radio(
+        "Table size",
+        ("Compact", "Comfortable", "Tall"),
+        index=1,
+        horizontal=True,
+        key="room3_lane_demo_size",
+        help="Same toolbar as the watch book: hover the table’s top-right for search, download, and fullscreen.",
+    )
+    height = {"Compact": 240, "Comfortable": 380, "Tall": 560}[str(size)]
+    df = pd.DataFrame(_nested_lane_demo_rows())
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        height=height,
+        column_config={
+            "Kind": st.column_config.TextColumn("Kind", width="small"),
+            "Row": st.column_config.TextColumn("Row", width="medium"),
+            "Clock": st.column_config.TextColumn("Clock", width="small"),
+            "Match": st.column_config.TextColumn("Match", width="small"),
+            "Layout": st.column_config.TextColumn("Layout", width="medium"),
+            "Letter": st.column_config.TextColumn("Letter", width="medium"),
+            "What this lane is doing": st.column_config.TextColumn(
+                "What this lane is doing", width="large"
+            ),
+            "Size $": st.column_config.TextColumn("Size $", width="small"),
+        },
+    )
     st.caption(
-        "Indent + blue edge = strategy sub-lane. Main row never becomes the letter. "
+        "Hover the top-right of the table for search, download, and fullscreen (expand). "
+        "Compact / Tall shrinks or magnifies the grid. "
+        "Indented Row + Kind “sub-lane” = that specific letter. Main row never becomes the letter. "
         "Purgatory never shows here. Size $ is the fire-ready TF slot, not a fill."
     )
 
