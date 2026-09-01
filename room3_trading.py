@@ -39,6 +39,12 @@ ROOM3_SESSION_ROLL_HOUR_ET = 4  # next trading day starts 4:00 AM Eastern
 ET = ZoneInfo("America/New_York")
 _PROCESS_GAP_FLATTEN_DONE = False
 _GAP_EXIT_NOTE = "reboot — closed so the hold was not left hanging"
+# Operator-cleared hose day: keep the log / P/L, never vote, never feed Room 2.
+_VOID_LEARN_SESSION_DATES = frozenset({"2026-08-31"})
+_VOID_LEARN_TICKERS = frozenset({"AEHL", "NCRA", "WETO", "VVOS"})
+_VOID_LEARN_PNL = frozenset(
+    {("AEHL", -92), ("AEHL", -14), ("NCRA", -52), ("WETO", -709), ("VVOS", -113)}
+)
 
 _SESSION_KEYS = (
     "room3_execution_mode",
@@ -269,6 +275,10 @@ def init_room3_session_state() -> None:
         st.session_state.room3_screener_day_cache = {}
     if "room3_filter_rules" not in st.session_state:
         st.session_state.room3_filter_rules = room3_screener.default_rules()
+    if "room3_review_void_ids" not in st.session_state:
+        st.session_state.room3_review_void_ids = []
+    if "room3_review_block_ids" not in st.session_state:
+        st.session_state.room3_review_block_ids = []
     _hydrate_screener_from_disk()
     if "room3_broker_day_pl" not in st.session_state:
         st.session_state.room3_broker_day_pl = None
@@ -284,6 +294,7 @@ def init_room3_session_state() -> None:
         st.session_state.room3_layout_hydrated_once = True
     _maybe_reconnect_alpaca()
     _maybe_flatten_on_cloud_process_boot()
+    _void_session_reviews_no_learn()
 
 
 def _inject_room3_css() -> None:
@@ -1633,13 +1644,80 @@ def _within_review_hold(row: dict) -> bool:
         return False
 
 
+def _row_matches_voided_session(row: dict) -> bool:
+    """True for closes the operator X'd out of review (log/P/L stay; no Room 2 vote)."""
+    if not isinstance(row, dict):
+        return False
+    if row.get("review_void"):
+        return True
+    rid = str(row.get("id") or "").strip()
+    void_ids = {str(x) for x in (st.session_state.get("room3_review_void_ids") or [])}
+    if rid and rid in void_ids:
+        return True
+    ticker = str(row.get("ticker") or "").upper()
+    if not ticker and not rid:
+        return False
+    day = _trade_session_date(row)
+    if day in _VOID_LEARN_SESSION_DATES:
+        return True
+    blob = " ".join(
+        str(row.get(k) or "")
+        for k in (
+            "exit_at",
+            "filled_at",
+            "entry_at",
+            "timestamp",
+            "closed_at",
+            "session_date",
+            "date",
+        )
+    )
+    if ticker in _VOID_LEARN_TICKERS and "2026-08-31" in blob:
+        return True
+    try:
+        pnl = int(round(float(row.get("pnl_usd") or 0)))
+    except (TypeError, ValueError):
+        pnl = None
+    if ticker and pnl is not None and (ticker, pnl) in _VOID_LEARN_PNL:
+        return True
+    if (
+        ticker in _VOID_LEARN_TICKERS
+        and _within_review_hold(row)
+        and _trading_day_key() in ("2026-08-31", "2026-09-01")
+    ):
+        return True
+    return False
+
+
+def _stamp_review_void(row: dict) -> None:
+    """Keep the close on the books; strip votes so it cannot feed DNA."""
+    row["review_void"] = True
+    row["skip_matrix_learn"] = True
+    row["reviewed"] = False
+    row.pop("operator_vote", None)
+    row.pop("reviewed_at", None)
+    ticker = str(row.get("ticker") or "").upper()
+    day = _trade_session_date(row)
+    if day in _VOID_LEARN_SESSION_DATES:
+        row["session_date"] = day
+    elif ticker in _VOID_LEARN_TICKERS:
+        row["session_date"] = "2026-08-31"
+    rid = str(row.get("id") or "").strip()
+    if rid:
+        void_ids = set(str(x) for x in (st.session_state.get("room3_review_void_ids") or []))
+        void_ids.add(rid)
+        st.session_state.room3_review_void_ids = list(void_ids)[-200:]
+
+
 def _sync_pending_from_closed_history() -> None:
     """Closed fills belong in Operator review until ✓/✗, held ≥24h across day roll."""
     now_iso = datetime.now(timezone.utc).isoformat()
     pending = [
         p
         for p in list(st.session_state.get("room3_pending_reviews") or [])
-        if not str(p.get("operator_vote") or "").strip() and _within_review_hold(p)
+        if not str(p.get("operator_vote") or "").strip()
+        and _within_review_hold(p)
+        and not _row_matches_voided_session(p)
     ]
     for row in list(st.session_state.get("room3_trade_history") or []):
         if not _trade_is_closed_row(row):
@@ -1648,6 +1726,8 @@ def _sync_pending_from_closed_history() -> None:
         if "closing" in status and not row.get("broker_source"):
             continue
         if str(row.get("operator_vote") or "").strip():
+            continue
+        if _row_matches_voided_session(row):
             continue
         if not _within_review_hold(row):
             continue
@@ -1924,8 +2004,12 @@ def _merge_broker_closed_trades(closed: list) -> None:
         # Preserve human vote if we already have this round-trip reviewed.
         hist = list(st.session_state.get("room3_trade_history") or [])
         idx = _find_matching_trade_index(hist, enriched)
-        if idx >= 0:
-            old = hist[idx]
+        old = hist[idx] if idx >= 0 else {}
+        if _row_matches_voided_session(enriched) or (
+            idx >= 0 and _row_matches_voided_session(old)
+        ):
+            _stamp_review_void(enriched)
+        elif idx >= 0:
             if old.get("operator_vote") and rid not in blocked:
                 enriched["operator_vote"] = old.get("operator_vote")
                 enriched["reviewed"] = True
@@ -2616,7 +2700,8 @@ def _render_trade_history() -> None:
     st.caption(
         "Closes land here and in Operator review. After you vote ✓/✗ the row leaves this tape "
         "(history stays under All-time). If you don't vote, this tape rolls at the next session day; "
-        "the review pile keeps the unvoted close at least 24h."
+        "the review pile keeps the unvoted close at least 24h. "
+        "X'd-out closes stay on this tape and in session history; they do not sit in review and do not vote."
     )
     pending_ids = {
         str(r.get("id") or "")
@@ -2637,7 +2722,9 @@ def _render_trade_history() -> None:
         if r.get("reviewed") and str(r.get("operator_vote") or "").strip():
             continue
         rid = str(r.get("id") or "")
-        if r.get("gap_exit") or r.get("skip_matrix_learn"):
+        if r.get("review_void"):
+            status = "closed · kept in log · not for review"
+        elif r.get("gap_exit") or r.get("skip_matrix_learn"):
             status = "closed · reboot note"
         elif r.get("broker_source"):
             status = str(r.get("status") or "closed · alpaca")
@@ -3295,7 +3382,8 @@ def _render_operator_review_panel() -> None:
         "System proposes · you confirm ✓ good or ✗ bad · votes bank first · "
         "DNA hardens only after TF bars (15m≥2 · 5m≥3 · 1m≥4) · prior DNA snapshotted for revert. "
         "A close lands here and in Today's log. After you vote it leaves this pile and Today's log. "
-        "If you don't vote, it stays here at least 24h even after Today's log rolls to the next day."
+        "If you don't vote, it stays here at least 24h even after Today's log rolls to the next day. "
+        "X'd-out closes stay in the log / session history only — not this pile, not a Room 2 vote."
     )
     _sync_pending_from_closed_history()
     pending = st.session_state.room3_pending_reviews or []
@@ -3303,6 +3391,8 @@ def _render_operator_review_panel() -> None:
         st.caption("No closed trades waiting for your vote.")
         return
     for i, trade in enumerate(pending):
+        if trade.get("review_void") or _row_matches_voided_session(trade):
+            continue
         tid = str(trade.get("id") or "").strip()
         is_gap = bool(trade.get("gap_exit") or trade.get("skip_matrix_learn"))
         verdict = str(trade.get("system_verdict") or "neutral")
@@ -3380,6 +3470,78 @@ def _maybe_reconnect_alpaca() -> None:
         f"Handshake OK · equity ${equity:,.2f} · cash ${cash:,.2f} · "
         f"buying power ${buying_power:,.2f} · status {result.get('status')}"
     )
+
+
+def _void_session_reviews_no_learn() -> None:
+    """X today's hose closes out of Operator review. Log, archive, and account P/L stay."""
+    void_ids = set(str(x) for x in (st.session_state.get("room3_review_void_ids") or []))
+    changed = False
+    learn_state = room3_review_learn.state_from_session(st.session_state)
+    fb = dict(st.session_state.get("room3_strategy_feedback") or {})
+
+    def _undo_vote(row: dict) -> None:
+        nonlocal changed, fb
+        vote = str(row.get("operator_vote") or "").strip()
+        if vote not in ("good", "bad"):
+            return
+        strat = _display_trade_strategy(row)
+        if strat in ("—", "-", ""):
+            strat = "unknown"
+        bucket = dict(fb.get(strat) or {"good": 0, "bad": 0})
+        bucket[vote] = max(0, int(bucket.get(vote) or 0) - 1)
+        fb[strat] = bucket
+        tid = str(row.get("id") or "")
+        if tid:
+            room3_review_learn.remove_observations_for_trade(learn_state, tid)
+        changed = True
+
+    def _touch(row: dict) -> None:
+        nonlocal changed
+        if not isinstance(row, dict) or not _row_matches_voided_session(row):
+            return
+        if not row.get("review_void") or row.get("operator_vote"):
+            _undo_vote(row)
+            _stamp_review_void(row)
+            changed = True
+        rid = str(row.get("id") or "").strip()
+        if rid:
+            void_ids.add(rid)
+
+    for row in list(st.session_state.get("room3_trade_history") or []):
+        _touch(row)
+    for day in list(st.session_state.get("room3_archive_days") or []):
+        for row in list(day.get("trades") or []):
+            _touch(row)
+    for row in list(st.session_state.get("room3_operator_reviews") or []):
+        _touch(row)
+
+    kept_reviews = [
+        r
+        for r in list(st.session_state.get("room3_operator_reviews") or [])
+        if not _row_matches_voided_session(r)
+    ]
+    if len(kept_reviews) != len(list(st.session_state.get("room3_operator_reviews") or [])):
+        st.session_state.room3_operator_reviews = kept_reviews
+        changed = True
+
+    pending = [
+        p
+        for p in list(st.session_state.get("room3_pending_reviews") or [])
+        if not _row_matches_voided_session(p)
+    ]
+    if len(pending) != len(list(st.session_state.get("room3_pending_reviews") or [])):
+        st.session_state.room3_pending_reviews = pending
+        changed = True
+
+    old_ids = set(str(x) for x in (st.session_state.get("room3_review_void_ids") or []))
+    if void_ids != old_ids:
+        st.session_state.room3_review_void_ids = list(void_ids)[-200:]
+        changed = True
+    st.session_state.room3_strategy_feedback = fb
+    if changed:
+        room3_review_learn.save_state(learn_state)
+        room3_review_learn.sync_state_to_session(st.session_state, learn_state)
+        _persist_screener_to_disk()
 
 
 def _mark_recent_closes_as_gap_exits(symbols: set[str]) -> None:
@@ -4174,6 +4336,15 @@ def _hydrate_screener_from_disk() -> None:
     pend = (snap.get("pending_reviews") or []) if snap else []
     if isinstance(pend, list) and pend and not (st.session_state.get("room3_pending_reviews") or []):
         st.session_state.room3_pending_reviews = pend
+    void_ids = (snap.get("review_void_ids") or []) if snap else []
+    if isinstance(void_ids, list) and void_ids:
+        merged_void = list(
+            dict.fromkeys(
+                [str(x) for x in (st.session_state.get("room3_review_void_ids") or [])]
+                + [str(x) for x in void_ids]
+            )
+        )
+        st.session_state.room3_review_void_ids = merged_void[-200:]
     rl = (snap.get("review_learn") or {}) if snap else {}
     if isinstance(rl, dict) and (rl.get("observations") or rl.get("versions")) and not (
         (st.session_state.get("room3_review_learn") or {}).get("observations")
@@ -4241,6 +4412,7 @@ def _persist_screener_to_disk() -> None:
             "strategy_feedback": st.session_state.get("room3_strategy_feedback") or {},
             "operator_reviews": st.session_state.get("room3_operator_reviews") or [],
             "pending_reviews": st.session_state.get("room3_pending_reviews") or [],
+            "review_void_ids": st.session_state.get("room3_review_void_ids") or [],
             "review_learn": st.session_state.get("room3_review_learn") or room3_review_learn.state_from_session(st.session_state),
             "last_hub": str(st.session_state.get("terminal_hub") or ""),
         }
