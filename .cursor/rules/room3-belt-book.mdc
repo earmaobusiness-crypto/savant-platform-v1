@@ -11,7 +11,7 @@ alwaysApply: true
 
 **Child row:** only when one letter is really close (about ≥84% / fire-ready). Indent under the main TF row (layout, letter, Match%). That child hunts that letter’s trigger and can fire. After exit the child vanishes; the main CRE 15m row stays. A second hot letter = a second child, not a new stock. Children are not the same trade.
 
-**Same ticker, two hot letters (any TF):** Alpaca is one pile — the second fill **adds**. The app keeps **two lots**: letter, TF, qty, entry, exit. Each lot exits on *its* trigger (sell that qty). Operator review / Room 2 learn per lot, not “one CRE blob.” A 5m child adding onto a live 15m CRE pile is the same rule. Children are not one trade just because the broker merged the shares.
+**Same ticker, two hot letters (any TF):** Alpaca is one pile — the second fill **adds**. The app keeps **two lots**: letter, TF, qty, entry, exit. Each lot exits on *its* trigger (sell that qty). Operator review / Room 2 learn per lot, not “one CRE blob.” A 5m child adding onto a live 15m CRE pile is the same rule. Children are not one trade just because the broker merged the shares. **Today’s log and Operator review freeze that lot’s TF + letter at close** — the live watch-book stamp must not relabel old cards.
 
 **Off-belt leftovers** (name not on the belt): exit-only. No new buy. That is not a CRE child row.
 

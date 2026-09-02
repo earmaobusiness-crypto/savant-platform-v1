@@ -535,6 +535,9 @@ def _try_queue_child_entry(
         if not ready:
             continue
         add_lot = bool(room3_lots.open_lots(session_state, ticker) or _open_qty(session_state, ticker) > 0)
+        if tf == "15m" and not _15m_can_open_lot(session_state, ticker, scale_in=False):
+            child["patience_note"] = "15m add already used · wait exit"
+            continue
         qty, notional = _compute_entry_qty(
             price=last_px,
             session_state=session_state,
@@ -629,6 +632,40 @@ def _open_qty(session_state: Any, symbol: str) -> float:
     except Exception:
         pass
     return 0.0
+
+
+def _15m_scale_in_used(session_state: Any, ticker: str) -> bool:
+    try:
+        book = session_state.get("room3_watch_book") or {}
+        for line in (book.get("lines") or {}).values():
+            if str(line.get("ticker") or "").upper() != str(ticker).upper():
+                continue
+            if str(line.get("timeframe") or "") != "15m":
+                continue
+            if int(line.get("scale_ins") or 0) >= SCALE_IN_MAX:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _15m_can_open_lot(
+    session_state: Any,
+    ticker: str,
+    *,
+    scale_in: bool = False,
+) -> bool:
+    """A live 15m can add once: initial lot + one add (scale-in or a second 15m letter)."""
+    n15 = len(room3_lots.open_lots(session_state, ticker, tf="15m"))
+    if n15 <= 0:
+        return True
+    if n15 >= 2:
+        return False
+    if scale_in:
+        return not _15m_scale_in_used(session_state, ticker)
+    if _15m_scale_in_used(session_state, ticker):
+        return False
+    return True
 
 
 def _off_belt(line: dict[str, Any], book: dict[str, Any]) -> bool:
@@ -1360,6 +1397,7 @@ def maybe_queue_matrix_signals(
             and tf == "15m"
             and not line.get("entry_signal")
             and int(line.get("scale_ins") or 0) < SCALE_IN_MAX
+            and _15m_can_open_lot(session_state, ticker, scale_in=True)
             and cur_match >= MATCH_THRESHOLD_PCT
             and structural > 0
             and pnl_pct > 0

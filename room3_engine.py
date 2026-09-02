@@ -376,10 +376,115 @@ class lots:
         return row
 
     @staticmethod
+    def _label_queue(session_state: Any) -> list[dict[str, Any]]:
+        if session_state is None:
+            return []
+        try:
+            rows = session_state.get("room3_lot_close_labels")
+        except Exception:
+            return []
+        if not isinstance(rows, list):
+            return []
+        return rows
+
+    @staticmethod
+    def queue_close_label(session_state: Any, lot_row: dict[str, Any] | None) -> None:
+        """Keep TF+letter after a peel/flatten so review/log do not inherit the live stamp."""
+        if session_state is None or not isinstance(lot_row, dict):
+            return
+        ticker = str(lot_row.get("ticker") or "").upper()
+        if not ticker:
+            return
+        letter = str(lot_row.get("letter") or lot_row.get("strategy") or "").strip()
+        tf = str(lot_row.get("tf") or lot_row.get("timeframe") or "").strip()
+        payload = {
+            "ticker": ticker,
+            "tf": tf,
+            "letter": letter,
+            "layout_id": str(lot_row.get("layout_id") or ""),
+            "strategy": str(lot_row.get("strategy") or letter),
+            "qty": abs(float(lot_row.get("qty") or 0)),
+            "entry_px": float(lot_row.get("entry_px") or lot_row.get("entry_price") or 0),
+            "lot_id": str(lot_row.get("id") or ""),
+            "entry_match_pct": int(lot_row.get("entry_match_pct") or 0),
+            "used": False,
+        }
+        q = lots._label_queue(session_state)
+        q.append(payload)
+        try:
+            session_state.room3_lot_close_labels = q[-80:]
+        except Exception:
+            pass
+
+    @staticmethod
+    def take_close_label(
+        session_state: Any,
+        ticker: str,
+        *,
+        qty: float = 0.0,
+        lot_id: str = "",
+        letter: str = "",
+        tf: str = "",
+    ) -> dict[str, Any] | None:
+        """Pop the unused close-label that best matches this broker/FIFO row."""
+        if session_state is None:
+            return None
+        sym = str(ticker or "").upper()
+        want_id = str(lot_id or "").strip()
+        want_letter = str(letter or "").strip()
+        want_tf = str(tf or "").strip()
+        want_qty = abs(float(qty or 0))
+        q = lots._label_queue(session_state)
+        best_i = -1
+        best_score = -1
+        for i, row in enumerate(q):
+            if not isinstance(row, dict) or row.get("used"):
+                continue
+            if str(row.get("ticker") or "").upper() != sym:
+                continue
+            score = 0
+            if want_id and str(row.get("lot_id") or "") == want_id:
+                score += 8
+            if want_letter and str(row.get("letter") or "") == want_letter:
+                score += 4
+            if want_tf and str(row.get("tf") or "") == want_tf:
+                score += 2
+            row_qty = abs(float(row.get("qty") or 0))
+            if want_qty > 0 and row_qty > 0 and abs(row_qty - want_qty) <= max(1.0, 0.05 * want_qty):
+                score += 3
+            elif want_qty <= 0 and not want_id and not want_letter:
+                score += 1
+            if score > best_score:
+                best_score = score
+                best_i = i
+        if best_i < 0 or best_score < 1:
+            return None
+        q[best_i]["used"] = True
+        try:
+            session_state.room3_lot_close_labels = q[-80:]
+        except Exception:
+            pass
+        return dict(q[best_i])
+
+    @staticmethod
+    def unused_close_labels(session_state: Any, ticker: str = "") -> list[dict[str, Any]]:
+        sym = str(ticker or "").upper()
+        out = []
+        for row in lots._label_queue(session_state):
+            if not isinstance(row, dict) or row.get("used"):
+                continue
+            if sym and str(row.get("ticker") or "").upper() != sym:
+                continue
+            out.append(dict(row))
+        return out
+
+    @staticmethod
     def close_lot(session_state: Any, lot_id: str) -> dict[str, Any] | None:
         row = lots.find_lot(session_state, lot_id)
         if not row:
             return None
+        if str(row.get("status") or "open") == "open":
+            lots.queue_close_label(session_state, row)
         row["status"] = "closed"
         return row
 
@@ -387,6 +492,7 @@ class lots:
     def close_lots_for_ticker(session_state: Any, ticker: str) -> int:
         n = 0
         for row in lots.open_lots(session_state, ticker):
+            lots.queue_close_label(session_state, row)
             row["status"] = "closed"
             n += 1
         return n
