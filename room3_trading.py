@@ -11,7 +11,7 @@ import hashlib
 import os
 import secrets as py_secrets
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -42,13 +42,13 @@ ET = ZoneInfo("America/New_York")
 _PROCESS_GAP_FLATTEN_DONE = False
 _GAP_EXIT_NOTE = "reboot — closed so the hold was not left hanging"
 # Operator-cleared hose day: keep the log / P/L, never vote, never feed Room 2.
-_VOID_LEARN_SESSION_DATES = frozenset({"2026-08-31"})
+_VOID_LEARN_SESSION_DATES = frozenset({"2026-08-31", "2026-09-01"})
 _VOID_LEARN_TICKERS = frozenset({"AEHL", "NCRA", "WETO", "VVOS"})
 _VOID_LEARN_PNL = frozenset(
     {("AEHL", -92), ("AEHL", -14), ("NCRA", -52), ("WETO", -709), ("VVOS", -113)}
 )
 # Operator closed this session out of the live tape so it lives under Session history.
-_FILE_SESSION_DATES = frozenset({"2026-08-31"})
+_FILE_SESSION_DATES = frozenset({"2026-08-31", "2026-09-01"})
 
 _SESSION_KEYS = (
     "room3_execution_mode",
@@ -594,8 +594,19 @@ def _inject_room3_css() -> None:
             margin-bottom: 10px;
             background: #101010;
         }
+        .room3-review-card.pl-up {
+            border-color: #2E5A38;
+            background: #101810;
+            color: #7BC67E;
+        }
+        .room3-review-card.pl-down {
+            border-color: #5A2E2E;
+            background: #181010;
+            color: #FF6B6B;
+        }
         .room3-verdict-good { color: #7BC67E; font-weight: 700; }
         .room3-verdict-bad { color: #FF6B6B; font-weight: 700; }
+        .room3-verdict-note { color: #888888; font-weight: 600; }
         .room3-history-wrap {
             margin-top: 8px;
         }
@@ -968,6 +979,7 @@ def _maybe_roll_trading_session() -> None:
         return
     if prev == key:
         return
+    _file_session_day(prev)
     _rebuild_archive_from_history()
     st.session_state.room3_session_day_key = key
     st.session_state.room3_open_positions = []
@@ -1766,37 +1778,50 @@ def _pending_has_row(pending: list, row: dict) -> bool:
 REVIEW_HOLD = timedelta(hours=24)
 
 
-def _parse_iso_utc(raw: str) -> datetime | None:
-    text = str(raw or "").strip()
-    if not text:
+def _trade_exit_dt(row: dict) -> datetime | None:
+    day = _trade_session_date(row)
+    secs = _parse_hhmmss(str(row.get("exit_time") or row.get("entry_time") or ""))
+    if not day or secs is None:
         return None
     try:
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+        d = datetime.strptime(day, "%Y-%m-%d").date()
     except ValueError:
         return None
+    h, rem = divmod(int(secs), 3600)
+    m, s = divmod(rem, 60)
+    try:
+        return datetime(d.year, d.month, d.day, h, m, min(s, 59), tzinfo=ET)
+    except ValueError:
+        return None
+
+
+def _review_hold_until(row: dict) -> datetime:
+    """24h after the session window that contained this close actually ended."""
+    dt = _trade_exit_dt(row)
+    if dt is None:
+        day = _trade_session_date(row)
+        try:
+            d = datetime.strptime(day, "%Y-%m-%d").date()
+        except ValueError:
+            d = datetime.now(ET).date()
+        window_end = datetime.combine(d, dt_time(16, 0)).replace(tzinfo=ET)
+        return window_end + REVIEW_HOLD
+    window = room3_engine.detect_session_window(dt)
+    d = dt.date()
+    if window == room3_engine.SESSION_PRE:
+        end_t = dt_time(9, 30)
+    elif window == room3_engine.SESSION_RTH:
+        end_t = dt_time(16, 0)
+    else:
+        end_t = dt_time(20, 0)
+    return datetime.combine(d, end_t).replace(tzinfo=ET) + REVIEW_HOLD
 
 
 def _within_review_hold(row: dict) -> bool:
-    """Unvoted closes stay reviewable at least 24h, including after the day log rolls."""
+    """Unvoted closes stay reviewable 24h after that window ended (pre / RTH / post)."""
     if str(row.get("operator_vote") or "").strip():
         return False
-    queued = _parse_iso_utc(str(row.get("review_queued_at") or ""))
-    now = datetime.now(timezone.utc)
-    if queued is not None:
-        return (now - queued) <= REVIEW_HOLD
-    day = _trade_session_date(row)
-    today = _trading_day_key()
-    if day == today:
-        return True
-    try:
-        d0 = datetime.strptime(day, "%Y-%m-%d").date()
-        d1 = datetime.strptime(today, "%Y-%m-%d").date()
-        return (d1 - d0).days <= 1
-    except ValueError:
-        return False
+    return datetime.now(ET) <= _review_hold_until(row)
 
 
 def _row_matches_voided_session(row: dict) -> bool:
@@ -2695,6 +2720,27 @@ def _render_dark_table(rows: list[dict], *, height: int | None = None) -> None:
         ]
     )
 
+    def _row_tone(s):
+        pl = ""
+        for col in s.index:
+            if "P/L $" in str(col):
+                pl = str(s[col])
+                break
+        if not pl:
+            for col in s.index:
+                if "P/L" in str(col):
+                    pl = str(s[col])
+                    break
+        if pl.startswith("+"):
+            bg, fg = "#142018", "#7BC67E"
+        elif pl.startswith("-"):
+            bg, fg = "#201414", "#FF6B6B"
+        else:
+            return [""] * len(s)
+        return [f"background-color: {bg}; color: {fg}"] * len(s)
+
+    styled = styled.apply(_row_tone, axis=1)
+
     def _pl_color(val):
         text = str(val)
         if text.startswith("+"):
@@ -2966,7 +3012,8 @@ def _render_trade_history() -> None:
         "Closes land here and in Operator review with the TF and strategy frozen at that fill — "
         "not whatever letter the watch book is showing now. After you vote ✓/✗ the row leaves this tape "
         "(history stays under All-time). If you don't vote, this tape rolls at the next session day; "
-        "the review pile keeps the unvoted close at least 24h. "
+        "the review pile keeps the unvoted close 24 hours after the window it closed in ended "
+        "(pre → 9:30 ET next day · RTH → 4:00 PM next day · post → 8:00 PM next day). "
         "A finished session is filed into Session history and leaves this tape."
     )
     pending_ids = {
@@ -3474,21 +3521,29 @@ def _render_history_trade_detail(trade: dict) -> None:
     vote_html = ""
     if vote:
         cls = "room3-verdict-good" if vote == "good" else "room3-verdict-bad"
-        vote_html = f"<span class='{cls}'>Review: {vote}</span>"
-    layout = trade.get("layout") or "—"
+        vote_html = f"<p><span class='{cls}'>Review: {vote}</span></p>"
+    layout = trade.get("layout") or trade.get("layout_id") or trade.get("matrix_layout") or ""
+    layout_html = f"<p>{escape(str(layout))}</p>" if layout and str(layout) not in ("—", "-") else ""
     qty = trade.get("qty")
     qty_line = f"<p>Qty <strong>{qty}</strong></p>" if qty else ""
+    try:
+        pnl = float(trade.get("pnl_usd") or 0)
+    except (TypeError, ValueError):
+        pnl = 0.0
+    pl_cls = "pl-up" if pnl > 0 else "pl-down" if pnl < 0 else ""
+    tf = _display_trade_timeframe(trade)
+    strat = _display_trade_strategy(trade)
     st.markdown(
-        f"<div class='room3-history-detail'>"
-        f"<p><strong>{trade.get('ticker')}</strong> · {trade.get('timeframe')} · "
-        f"{trade.get('strategy')}</p>"
-        f"<p>{layout}</p>"
+        f"<div class='room3-history-detail room3-review-card {pl_cls}'>"
+        f"<p><strong>{trade.get('ticker')}</strong> · {tf} · "
+        f"{strat}</p>"
+        f"{layout_html}"
         f"<p>Entry <strong>{trade.get('entry_time')}</strong> @ "
         f"${float(trade.get('entry_price') or 0):.2f} → "
         f"Exit <strong>{trade.get('exit_time')}</strong> @ "
         f"${float(trade.get('exit_price') or 0):.2f}</p>"
         f"{qty_line}"
-        f"<p>P/L <strong>{_fmt_pl_usd(trade.get('pnl_usd'))}</strong> · "
+        f"<p>P/L <strong>{_fmt_pl_usd(pnl)}</strong> · "
         f"<strong>{_fmt_pl_pct(trade.get('pnl_pct'))}</strong></p>"
         f"{vote_html}"
         f"</div>",
@@ -3565,7 +3620,8 @@ def _render_session_history() -> None:
                 ticker_arrow = "▾" if is_trade_open else "▸"
                 trade_label = (
                     f"{ticker_arrow} {trade.get('ticker')} · "
-                    f"{_fmt_pl_pct(trade.get('pnl_pct'))}"
+                    f"{_display_trade_timeframe(trade)} · {_display_trade_strategy(trade)} · "
+                    f"{_fmt_pl_usd(trade.get('pnl_usd'))} ({_fmt_pl_pct(trade.get('pnl_pct'))})"
                 )
                 if st.button(
                     trade_label,
@@ -3653,11 +3709,12 @@ def _render_strategy_health_strip() -> None:
 def _render_operator_review_panel() -> None:
     st.markdown("### Operator review")
     st.caption(
-        "System proposes · you confirm ✓ good or ✗ bad · votes bank first · "
+        "You vote ✓ good or ✗ bad · votes bank first · "
         "DNA hardens only after TF bars (15m≥2 · 5m≥3 · 1m≥4) · prior DNA snapshotted for revert. "
-        "Each card is one lot: ticker · TF · strategy. That stamp is frozen at close so you can "
-        "critique the letter that actually traded. After you vote it leaves this pile and Today's log. "
-        "If you don't vote, it stays here at least 24h even after Today's log rolls to the next day. "
+        "Each card is one lot: ticker · TF · strategy, frozen at close. "
+        "Green card = profit · red card = loss. "
+        "If you don't vote, it stays here 24 hours after the window it closed in ended "
+        "(pre → 9:30 ET next day · RTH → 4:00 PM next day · post → 8:00 PM next day). "
         "X'd-out closes stay in the log / session history only — not this pile, not a Room 2 vote."
     )
     _sync_pending_from_closed_history()
@@ -3665,26 +3722,47 @@ def _render_operator_review_panel() -> None:
     if not pending:
         st.caption("No closed trades waiting for your vote.")
         return
+    shown = 0
     for i, trade in enumerate(pending):
         if trade.get("review_void") or _row_matches_voided_session(trade):
             continue
+        shown += 1
         tid = str(trade.get("id") or "").strip()
         is_gap = bool(trade.get("gap_exit") or trade.get("skip_matrix_learn"))
-        verdict = str(trade.get("system_verdict") or "neutral")
-        verdict_class = "room3-verdict-good" if verdict == "good" else "room3-verdict-bad"
+        verdict = str(trade.get("system_verdict") or "").strip()
         note = str(trade.get("review_note") or trade.get("system_reason") or "")
         strat = _display_trade_strategy(trade)
         tf = _display_trade_timeframe(trade)
+        try:
+            pnl = float(trade.get("pnl_usd") or 0)
+        except (TypeError, ValueError):
+            pnl = 0.0
+        pl_cls = "pl-up" if pnl > 0 else "pl-down" if pnl < 0 else ""
+        verdict_html = ""
+        if verdict == "good":
+            verdict_html = (
+                f"<br><span class='room3-verdict-good'>System: good</span>"
+                f"{(' — ' + escape(note)) if note else ''}"
+            )
+        elif verdict == "bad":
+            verdict_html = (
+                f"<br><span class='room3-verdict-bad'>System: bad</span>"
+                f"{(' — ' + escape(note)) if note else ''}"
+            )
+        elif verdict == "note" or is_gap:
+            verdict_html = (
+                f"<br><span class='room3-verdict-note'>Note</span>"
+                f"{(' — ' + escape(note)) if note else ''}"
+            )
         st.markdown(
-            f"<div class='room3-review-card'>"
+            f"<div class='room3-review-card {pl_cls}'>"
             f"<strong>{trade.get('ticker')}</strong> · {tf} · "
             f"{strat}<br>"
             f"Entry {trade.get('entry_time')} @ {trade.get('entry_price')} → "
             f"Exit {trade.get('exit_time')} @ {trade.get('exit_price')}<br>"
-            f"P/L <strong>${float(trade.get('pnl_usd') or 0):,.2f}</strong> "
-            f"({float(trade.get('pnl_pct') or 0):+.2f}%)<br>"
-            f"<span class='{verdict_class}'>System: {verdict}</span> — "
-            f"{escape(note or str(trade.get('system_reason') or ''))}"
+            f"P/L <strong>{_fmt_pl_usd(pnl)}</strong> "
+            f"({float(trade.get('pnl_pct') or 0):+.2f}%)"
+            f"{verdict_html}"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -3710,6 +3788,8 @@ def _render_operator_review_panel() -> None:
                 if tid:
                     _record_operator_review(tid, "bad")
                 st.rerun()
+    if shown == 0:
+        st.caption("No closed trades waiting for your vote.")
 
 
 def _broker_is_connected() -> bool:
