@@ -38,6 +38,7 @@ ROOM3_RECOVERY_EMAIL = "earmaobusiness@gmail.com"
 ROOM3_LIVE_SECURITY_ENABLED = False
 ROOM3_DEFAULT_EQUITY = 0.0
 ROOM3_SESSION_ROLL_HOUR_ET = 4  # next trading day starts 4:00 AM Eastern
+_TRADE_HISTORY_CAP = 500
 ET = ZoneInfo("America/New_York")
 _PROCESS_GAP_FLATTEN_DONE = False
 _GAP_EXIT_NOTE = "reboot — closed so the hold was not left hanging"
@@ -291,24 +292,31 @@ def init_room3_session_state() -> None:
         st.session_state.room3_filed_session_dates = []
     if "room3_lots" not in st.session_state:
         st.session_state.room3_lots = []
-    _hydrate_screener_from_disk()
-    if "room3_broker_day_pl" not in st.session_state:
-        st.session_state.room3_broker_day_pl = None
-    if "room3_broker_day_pl_pct" not in st.session_state:
-        st.session_state.room3_broker_day_pl_pct = None
-    # Drop legacy local-only clear flag if an old session still carries it
-    st.session_state.pop("room3_positions_pinned_empty", None)
-    if not st.session_state.get("room3_layout_hydrated_once"):
-        import room3_bridge
+    if st.session_state.get("_room3_init_inflight"):
+        return
+    st.session_state._room3_init_inflight = True
+    try:
+        _hydrate_screener_from_disk()
+        if "room3_broker_day_pl" not in st.session_state:
+            st.session_state.room3_broker_day_pl = None
+        if "room3_broker_day_pl_pct" not in st.session_state:
+            st.session_state.room3_broker_day_pl_pct = None
+        # Drop legacy local-only clear flag if an old session still carries it
+        st.session_state.pop("room3_positions_pinned_empty", None)
+        if not st.session_state.get("room3_layout_hydrated_once"):
+            import room3_bridge
 
-        room3_bridge.ensure_layout_library(st.session_state)
-        st.session_state.pop("room3_repertoire_cache", None)
-        st.session_state.room3_layout_hydrated_once = True
-    _maybe_reconnect_alpaca()
-    _maybe_flatten_on_cloud_process_boot()
-    _void_session_reviews_no_learn()
-    for day_key in _FILE_SESSION_DATES:
-        _file_session_day(day_key)
+            room3_bridge.ensure_layout_library(st.session_state)
+            st.session_state.pop("room3_repertoire_cache", None)
+            st.session_state.room3_layout_hydrated_once = True
+        _maybe_reconnect_alpaca()
+        _maybe_flatten_on_cloud_process_boot()
+        _maybe_overnight_belt_clear()
+        _void_session_reviews_no_learn()
+        for day_key in _FILE_SESSION_DATES:
+            _file_session_day(day_key)
+    finally:
+        st.session_state._room3_init_inflight = False
 
 
 def _inject_room3_css() -> None:
@@ -1109,8 +1117,7 @@ def _session_pl_stats() -> dict:
     equity = float(st.session_state.room3_account_equity or ROOM3_DEFAULT_EQUITY)
     open_rows = st.session_state.room3_open_positions or []
     # Always count unique closed rows after dedupe.
-    history = _dedupe_trade_history()
-    st.session_state.room3_trade_history = history[:200]
+    history = _store_trade_history()
     _sync_pending_from_closed_history()
     pending = st.session_state.room3_pending_reviews or []
     today_key = _trading_day_key()
@@ -1175,16 +1182,18 @@ def _lock_tradable_from_operator() -> None:
 
 
 def _maybe_default_tradable_half(equity: float) -> None:
-    """50% is the first-paint fallback only — never clobber a $ or % the operator set."""
+    """50% is the first-paint fallback only — never clobber a $ already on the book."""
     if st.session_state.get("room3_tradable_operator_set"):
+        return
+    raw = float(st.session_state.get("room3_tradable_today") or 0)
+    if raw > 0:
         return
     eq = float(equity or 0)
     if eq <= 0:
         return
-    raw = float(st.session_state.get("room3_tradable_today") or 0)
-    if raw <= 0 or abs(raw - eq) < 0.01:
-        st.session_state.room3_tradable_today = round(eq * 0.5, 2)
-        _refresh_book_ticket_sizes()
+    st.session_state.room3_tradable_today = round(eq * 0.5, 2)
+    _refresh_book_ticket_sizes()
+    _persist_screener_to_disk()
 
 
 def _set_tradable_pct(pct: float, equity: float) -> None:
@@ -1265,11 +1274,13 @@ def _stamp_position_timeframes() -> None:
         tf = str(line.get("timeframe") or "")
         if not ticker:
             continue
+        if str(line.get("state") or "") not in ("in", "committed"):
+            continue
         if tf in ("1m", "5m", "15m") and ticker not in by_ticker_tf:
             by_ticker_tf[ticker] = tf
         strat = _usable_strat(
-            str(line.get("entry_layout") or line.get("nearest_layout") or ""),
-            str(line.get("entry_strategy") or line.get("nearest_strategy") or ""),
+            str(line.get("entry_layout") or ""),
+            str(line.get("entry_strategy") or ""),
         )
         if strat and ticker not in by_ticker_strat:
             by_ticker_strat[ticker] = strat
@@ -1418,11 +1429,14 @@ def _nums_near(a: float, b: float, *, abs_tol: float = 0.05, rel_tol: float = 0.
 
 def _trade_is_closed_row(row: dict) -> bool:
     """True when this is a finished round-trip (not a submit stub)."""
-    if row.get("broker_source"):
-        return True
     status = str(row.get("status") or "").lower()
+    # PENDING_NEW / "closing · …" is an order still working — not a tape close.
+    if "pending" in status or status.startswith("closing"):
+        return False
     if "submitted" in status:
         return False
+    if row.get("broker_source"):
+        return True
     exit_t = str(row.get("exit_time") or "").strip()
     if exit_t and exit_t not in ("—", "-"):
         return True
@@ -1761,7 +1775,7 @@ def _upsert_trade_history_row(row: dict) -> None:
         hist[idx] = _merge_trade_rows(hist[idx], enriched)
     else:
         hist.insert(0, enriched)
-    st.session_state.room3_trade_history = _dedupe_trade_history(hist)[:200]
+    _store_trade_history(hist)
     _sync_pending_from_closed_history()
 
 
@@ -1962,6 +1976,60 @@ def _dedupe_trade_history(hist: list | None = None) -> list:
         if not matched:
             canon.append(dict(row))
     return canon
+
+
+def _store_trade_history(hist: list | None = None) -> list:
+    """Keep closed tape; if over cap, drop the oldest (sort is session/date)."""
+    rows = _dedupe_trade_history(hist)
+    rows.sort(
+        key=lambda r: (
+            str(r.get("session_date") or ""),
+            str(r.get("exit_time") or ""),
+            str(r.get("ticker") or ""),
+        )
+    )
+    if len(rows) > _TRADE_HISTORY_CAP:
+        rows = rows[-_TRADE_HISTORY_CAP:]
+    st.session_state.room3_trade_history = rows
+    return rows
+
+
+def _file_past_closed_sessions() -> None:
+    """Any closed session before today belongs in Session history, not Today's log."""
+    today = _trading_day_key()
+    filed = _filed_session_dates()
+    extra = list(st.session_state.get("room3_filed_session_dates") or [])
+    added = False
+    for row in _dedupe_trade_history():
+        if not isinstance(row, dict) or not _trade_is_closed_row(row):
+            continue
+        dk = _trade_session_date(row)
+        if dk and len(dk) == 10 and dk < today and dk not in filed:
+            extra.append(dk)
+            filed.add(dk)
+            added = True
+    if not added:
+        return
+    st.session_state.room3_filed_session_dates = list(dict.fromkeys(extra))[-30:]
+    _rebuild_archive_from_history()
+
+
+def _infer_starting_equity_from_archive() -> float:
+    archive = sorted(
+        list(st.session_state.get("room3_archive_days") or []),
+        key=lambda d: str(d.get("date") or ""),
+    )
+    if not archive:
+        return 0.0
+    first = archive[0]
+    try:
+        end = float(first.get("end_equity") or 0)
+        pl = float(first.get("pl_usd") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if end > 0:
+        return round(end - pl, 2)
+    return 0.0
 
 
 def _remember_matrix_fill_meta(result: dict) -> None:
@@ -2245,8 +2313,9 @@ def _merge_broker_closed_trades(closed: list) -> None:
             if old.get("session_date") and not enriched.get("session_date"):
                 enriched["session_date"] = old.get("session_date")
         _upsert_trade_history_row(enriched)
-    st.session_state.room3_trade_history = _dedupe_trade_history()[:200]
+    _store_trade_history()
     _sync_pending_from_closed_history()
+    _file_past_closed_sessions()
     _rebuild_archive_from_history()
     _persist_screener_to_disk()
 
@@ -2332,6 +2401,33 @@ def _reconcile_watch_book_with_broker() -> int:
         if ticker:
             room3_lots.close_lots_for_ticker(st.session_state, ticker)
         n += 1
+    for line in lines.values():
+        if not isinstance(line, dict):
+            continue
+        ticker = str(line.get("ticker") or "").upper()
+        if str(line.get("state") or "") != "committed" and not line.get("order_pending"):
+            continue
+        if not ticker or ticker not in open_syms:
+            continue
+        line["state"] = "in"
+        line.pop("order_pending", None)
+        tf = str(line.get("timeframe") or "")
+        letter = str(line.get("entry_strategy") or "")
+        if not room3_lots.open_lots(st.session_state, ticker, tf=tf, letter=letter):
+            room3_lots.append_lot(
+                st.session_state,
+                {
+                    "ticker": ticker,
+                    "tf": tf,
+                    "strategy": letter,
+                    "layout_id": str(line.get("entry_layout") or ""),
+                    "qty": float(line.get("entry_qty") or 0),
+                    "entry_px": line.get("entry_price"),
+                    "entry_match_pct": line.get("entry_match_pct"),
+                    "structural_move_pct": line.get("entry_structural_move_pct"),
+                },
+            )
+        n += 1
     for sym in open_syms:
         room3_watcher.ensure_ticker_maps(book, sym)
         owned = [
@@ -2381,23 +2477,16 @@ def _reconcile_watch_book_with_broker() -> int:
             pick["state"] = "in"
             pick["sticky"] = False
             pick.pop("sticky_until", None)
-            layout = str(pick.get("nearest_layout") or "").strip()
-            strat = str(pick.get("nearest_strategy") or "").strip()
+            cache = dict(st.session_state.get("room3_fill_meta_by_ticker") or {})
+            meta = dict(cache.get(sym) or {})
+            layout = str(meta.get("layout_id") or pick.get("entry_layout") or "").strip()
+            strat = str(meta.get("strategy") or pick.get("entry_strategy") or "").strip()
+            tf = str(meta.get("timeframe") or pick.get("timeframe") or "").strip()
             if strat and strat not in ("—", "-", "Alpaca", "matrix"):
                 if not room3_recipes.is_purgatory_letter(layout, strat):
                     pick["entry_strategy"] = strat
                     if layout and layout not in ("—", "-"):
                         pick["entry_layout"] = layout
-                    cache = dict(st.session_state.get("room3_fill_meta_by_ticker") or {})
-                    meta = dict(cache.get(sym) or {})
-                    meta["strategy"] = strat
-                    tf = str(pick.get("timeframe") or "").strip()
-                    if tf in ("1m", "5m", "15m"):
-                        meta["timeframe"] = tf
-                    if layout and layout not in ("—", "-"):
-                        meta["layout_id"] = layout
-                    cache[sym] = meta
-                    st.session_state.room3_fill_meta_by_ticker = cache
             n += 1
     st.session_state.room3_watch_book = book
     return n
@@ -3024,8 +3113,7 @@ def _render_trade_history() -> None:
     # One list only — pending is a status, not a second copy of the trade.
     today_key = _trading_day_key()
     filed = _filed_session_dates()
-    history = _dedupe_trade_history()
-    st.session_state.room3_trade_history = history[:200]
+    history = _store_trade_history()
     rows = []
     for r in history:
         if _trade_session_date(r) != today_key:
@@ -3491,7 +3579,7 @@ def _render_all_time_panel() -> None:
     )
     st.caption(
         f"Live tiles (not props) · Collective P/L = current account − starting bankroll "
-        f"(${start:,.2f}). Trades come from Alpaca lookback + Session history."
+        f"(${start:,.2f}). Round-trips come from Alpaca fill lookback + Session history."
     )
     if closed:
         table_rows = [
@@ -3506,12 +3594,12 @@ def _render_all_time_panel() -> None:
             }
             for r in closed
         ]
-        st.markdown("**Closed trades (all sessions)**")
+        st.markdown("**Closed round-trips in lookback**")
         _render_dark_table(table_rows)
     else:
         st.caption(
-            "No closed trades restored yet — Refresh from Alpaca should pull Friday+ "
-            "fills from the lookback window."
+            "No closed round-trips in the Alpaca lookback yet. "
+            "Session history fills from paired buy/sell fills, not from belt names."
         )
     _render_equity_trajectory_chart(at, height=360)
 
@@ -4511,70 +4599,7 @@ def _log_alpaca_order_fill(result: dict) -> None:
     (buy submit + sell submit + alpaca closed) for one economic trade.
     """
     _remember_matrix_fill_meta(result)
-    side = str(result.get("side") or "").lower()
-    # Closed truth comes from Alpaca sync; on sell, seed one canonical closed row
-    # so the log shows matrix labels immediately even before FIFO rebuild.
-    if side != "sell":
-        return
-    ticker = str(result.get("symbol") or "").upper()
-    if not ticker:
-        return
-    px = result.get("filled_avg_price")
-    exit_px = float(px) if px not in (None, "") else 0.0
-    qty = abs(float(result.get("qty") or 0))
-    strat = str(result.get("strategy") or "").strip()
-    tf = str(result.get("timeframe") or "").strip()
-    letter = str(result.get("letter") or "").strip()
-    lot_id = str(result.get("lot_id") or "").strip()
-    if _is_placeholder_strat(strat) or _is_placeholder_tf(tf):
-        label = room3_lots.take_close_label(
-            st.session_state,
-            ticker,
-            qty=qty,
-            lot_id=lot_id,
-            letter=letter or strat,
-            tf=tf,
-        )
-        if label:
-            if _is_placeholder_strat(strat) and label.get("letter"):
-                strat = str(label.get("letter") or label.get("strategy") or "")
-            if _is_placeholder_tf(tf) and label.get("tf"):
-                tf = str(label.get("tf") or "")
-            if not lot_id:
-                lot_id = str(label.get("lot_id") or "")
-            if not letter:
-                letter = str(label.get("letter") or "")
-            if not result.get("layout_id") and label.get("layout_id"):
-                result["layout_id"] = label.get("layout_id")
-    now = datetime.now(ET).strftime("%H:%M:%S")
-    oid = str(result.get("order_id") or "").strip()
-    cache = (st.session_state.get("room3_fill_meta_by_ticker") or {}).get(ticker) or {}
-    row = {
-        "id": f"alpaca-exit-{oid or now}",
-        "ticker": ticker,
-        "strategy": strat or "matrix",
-        "timeframe": tf if not _is_placeholder_tf(tf) else "—",
-        "matrix_strategy": strat if strat and not _is_placeholder_strat(strat) else "",
-        "matrix_timeframe": tf if tf and not _is_placeholder_tf(tf) else "",
-        "entry_time": now,
-        "exit_time": now,
-        "entry_price": exit_px,
-        "exit_price": exit_px,
-        "pnl_usd": 0.0,
-        "pnl_pct": 0.0,
-        "qty": qty,
-        "broker_order_id": oid,
-        "exit_order_id": oid,
-        "broker_status": result.get("status"),
-        "status": f"closing · {result.get('status')}",
-        "reviewed": False,
-        "layout_id": str(result.get("layout_id") or cache.get("layout_id") or ""),
-        "letter": letter,
-        "lot_id": lot_id,
-    }
-    if cache.get("entry_order_id"):
-        row["entry_order_id"] = cache["entry_order_id"]
-    _upsert_trade_history_row(row)
+    # Tape rows come from Alpaca FIFO / lot closes — not from a PENDING_NEW stub.
 
 
 def _render_execution_posture(mode: str) -> None:
@@ -4820,8 +4845,19 @@ def _hydrate_screener_from_disk() -> None:
         st.session_state.room3_archive_days = arch
     th = (snap.get("trade_history") or []) if snap else []
     if isinstance(th, list) and th and not (st.session_state.get("room3_trade_history") or []):
-        st.session_state.room3_trade_history = _dedupe_trade_history(th)[:200]
+        _store_trade_history(th)
     _rebuild_archive_from_history()
+    if float(st.session_state.get("room3_starting_equity") or 0) <= 0:
+        try:
+            snap_start = float((snap or {}).get("starting_equity") or 0)
+        except (TypeError, ValueError):
+            snap_start = 0.0
+        if snap_start > 0:
+            st.session_state.room3_starting_equity = snap_start
+        else:
+            inferred = _infer_starting_equity_from_archive()
+            if inferred > 0:
+                st.session_state.room3_starting_equity = inferred
     meta = (snap.get("fill_meta_by_ticker") or {}) if snap else {}
     if isinstance(meta, dict) and meta and not (st.session_state.get("room3_fill_meta_by_ticker") or {}):
         st.session_state.room3_fill_meta_by_ticker = meta
@@ -4859,18 +4895,18 @@ def _hydrate_screener_from_disk() -> None:
     if isinstance(label_snap, list) and label_snap and not (st.session_state.get("room3_lot_close_labels") or []):
         st.session_state.room3_lot_close_labels = label_snap
     if snap.get("tradable_operator_set") and not st.session_state.get("room3_tradable_operator_set"):
+        st.session_state.room3_tradable_operator_set = True
+    try:
+        restored = float((snap or {}).get("tradable_today") or 0)
+    except (TypeError, ValueError):
+        restored = 0.0
+    if restored > 0 and float(st.session_state.get("room3_tradable_today") or 0) <= 0:
+        st.session_state.room3_tradable_today = restored
+        st.session_state.room3_tradable_custom_input = restored
         try:
-            restored = float(snap.get("tradable_today") or 0)
-        except (TypeError, ValueError):
-            restored = 0.0
-        if restored > 0:
-            st.session_state.room3_tradable_today = restored
-            st.session_state.room3_tradable_custom_input = restored
-        try:
-            st.session_state.room3_tradable_pct_ui = float(snap.get("tradable_pct") or 0)
+            st.session_state.room3_tradable_pct_ui = float((snap or {}).get("tradable_pct") or 0)
         except (TypeError, ValueError):
             pass
-        st.session_state.room3_tradable_operator_set = True
         _refresh_book_ticket_sizes()
     rl = (snap.get("review_learn") or {}) if snap else {}
     if isinstance(rl, dict) and (rl.get("observations") or rl.get("versions")) and not (
@@ -4902,6 +4938,14 @@ def _hydrate_screener_from_disk() -> None:
         from_url = list(room3_filters.parse_screener_paste(q_belt).get("tickers") or [])
         if from_url:
             uni = from_url
+    session_flat = False
+    try:
+        session_flat = _session_must_be_flat()
+    except Exception:
+        session_flat = False
+    if session_flat:
+        # Post-off / overnight: do not resurrect Friday's belt without maps.
+        return
     if uni and not (st.session_state.get("room3_filter_universe") or []):
         st.session_state.room3_filter_universe = uni
         st.session_state.room3_screener_last = {
@@ -4934,7 +4978,7 @@ def _persist_screener_to_disk() -> None:
             "filter_universe": st.session_state.get("room3_filter_universe") or [],
             "watch_book": st.session_state.get("room3_watch_book") or {},
             "archive_days": st.session_state.get("room3_archive_days") or [],
-            "trade_history": _dedupe_trade_history()[:200],
+            "trade_history": _store_trade_history(),
             "fill_meta_by_ticker": st.session_state.get("room3_fill_meta_by_ticker") or {},
             "strategy_feedback": st.session_state.get("room3_strategy_feedback") or {},
             "operator_reviews": st.session_state.get("room3_operator_reviews") or [],
@@ -4943,6 +4987,7 @@ def _persist_screener_to_disk() -> None:
             "filed_session_dates": st.session_state.get("room3_filed_session_dates") or [],
             "lots": st.session_state.get("room3_lots") or [],
             "lot_close_labels": st.session_state.get("room3_lot_close_labels") or [],
+            "starting_equity": float(st.session_state.get("room3_starting_equity") or 0),
             "tradable_today": float(st.session_state.get("room3_tradable_today") or 0),
             "tradable_pct": float(st.session_state.get("room3_tradable_pct_ui") or 0),
             "tradable_operator_set": bool(st.session_state.get("room3_tradable_operator_set")),
@@ -5187,6 +5232,20 @@ def _has_intraday_risk() -> bool:
     return False
 
 
+def _maybe_overnight_belt_clear() -> None:
+    """Closed clock / Post-off: first paint must not show leftover belt chips with no maps."""
+    if not _session_must_be_flat():
+        return
+    belt = list(st.session_state.get("room3_filter_universe") or [])
+    book = st.session_state.get("room3_watch_book") or {}
+    lines = book.get("lines") or {}
+    uni = book.get("universe") or []
+    if not belt and not lines and not uni:
+        _sync_belt_query([])
+        return
+    _wipe_maps_and_belt()
+
+
 def _wipe_maps_and_belt() -> str:
     """Post-off / kill clean slate — belt + TF maps gone; broker positions handled separately."""
     _ensure_day_archived(_trading_day_key())
@@ -5394,6 +5453,7 @@ def _room3_heartbeat_fragment() -> None:
                 filled = float(result.get("filled_qty") or 0)
                 if filled > 0 or sym in _broker_open_symbols():
                     line["state"] = "in"
+                    line.pop("order_pending", None)
                     fill_qty = filled if filled > 0 else abs(float(sig.get("qty") or 0))
                     room3_lots.append_lot(
                         st.session_state,
@@ -5410,6 +5470,7 @@ def _room3_heartbeat_fragment() -> None:
                             "structural_move_pct": line.get("entry_structural_move_pct"),
                         },
                     )
+                    _persist_screener_to_disk()
                     if not sig.get("scale_in"):
                         line["trades_today"] = int(line.get("trades_today") or 0) + 1
                     else:
@@ -5419,8 +5480,11 @@ def _room3_heartbeat_fragment() -> None:
                         )
                 else:
                     line["state"] = "committed"
+                    line["order_pending"] = True
+                    line["pending_order_id"] = str(result.get("order_id") or "")
             else:
                 line["entry_signal"] = None
+                line.pop("order_pending", None)
                 _clear_line_entry_stamps(line)
         elif str(sig.get("intent")) == "exit" and result.get("ok"):
             lot_id = str(sig.get("lot_id") or "")

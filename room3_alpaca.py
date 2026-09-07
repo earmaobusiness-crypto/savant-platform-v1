@@ -20,6 +20,13 @@ from zoneinfo import ZoneInfo
 
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 LIVE_BASE_URL = "https://api.alpaca.markets"
+# Closed-order FIFO for Session history / all-time. One page of 100 oldest-first
+# stopped at Sep 1 once Wed–Fri lot volume filled the cap.
+FILL_LOOKBACK_DAYS = 14
+_ORDER_PAGE_LIMIT = 500
+_ORDER_PAGE_CAP = 20
+_ACTIVITY_PAGE_SIZE = 100
+_ACTIVITY_PAGE_CAP = 30
 
 
 def _parse_alpaca_kv_from_text(text: str) -> dict[str, str]:
@@ -373,6 +380,92 @@ def _parse_alpaca_ts(raw: Any) -> datetime | None:
         return None
 
 
+def _lookback_start_et(session_day=None):
+    from datetime import timedelta
+
+    et = ZoneInfo("America/New_York")
+    day = session_day or _et_trading_day()
+    return datetime.combine(day - timedelta(days=FILL_LOOKBACK_DAYS), datetime.min.time(), tzinfo=et)
+
+
+def _order_to_fill_event(order: Any) -> dict[str, Any] | None:
+    filled_qty = float(getattr(order, "filled_qty", 0) or 0)
+    avg = getattr(order, "filled_avg_price", None)
+    px = float(avg) if avg not in (None, "") else 0.0
+    if filled_qty <= 0 or px <= 0:
+        return None
+    ts = _parse_alpaca_ts(
+        getattr(order, "filled_at", None) or getattr(order, "submitted_at", None)
+    )
+    if ts is None:
+        return None
+    side_raw = getattr(order, "side", "") or ""
+    side = str(getattr(side_raw, "value", side_raw) or "").lower()
+    sym = str(getattr(order, "symbol", "") or "").upper()
+    oid = str(getattr(order, "id", "") or "")
+    if not sym or side not in ("buy", "sell"):
+        return None
+    return {
+        "symbol": sym,
+        "side": side,
+        "qty": filled_qty,
+        "price": px,
+        "ts": ts,
+        "id": oid or f"{sym}-{ts.isoformat()}",
+        "source": "order",
+    }
+
+
+def _paginate_closed_orders(client: Any, lookback_start: datetime) -> list[Any]:
+    """Walk CLOSED orders oldest-first. Alpaca caps one call; stacked lots need pages."""
+    from datetime import timedelta
+
+    from alpaca.trading.enums import QueryOrderStatus
+    from alpaca.trading.requests import GetOrdersRequest
+
+    after = lookback_start
+    seen: set[str] = set()
+    out: list[Any] = []
+    for _ in range(_ORDER_PAGE_CAP):
+        batch = list(
+            client.get_orders(
+                GetOrdersRequest(
+                    status=QueryOrderStatus.CLOSED,
+                    after=after,
+                    direction="asc",
+                    limit=_ORDER_PAGE_LIMIT,
+                )
+            )
+            or []
+        )
+        if not batch:
+            break
+        newest = after
+        new_n = 0
+        for order in batch:
+            oid = str(getattr(order, "id", "") or "")
+            if oid and oid in seen:
+                continue
+            if oid:
+                seen.add(oid)
+            ts = _parse_alpaca_ts(
+                getattr(order, "filled_at", None) or getattr(order, "submitted_at", None)
+            )
+            if ts is not None and ts > newest:
+                newest = ts
+            out.append(order)
+            new_n += 1
+        if len(batch) < _ORDER_PAGE_LIMIT:
+            break
+        if new_n == 0:
+            break
+        nxt = newest + timedelta(microseconds=1)
+        if nxt <= after:
+            break
+        after = nxt
+    return out
+
+
 def _closed_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     lots: dict[str, list[dict[str, Any]]] = {}
     closed: list[dict[str, Any]] = []
@@ -437,66 +530,104 @@ def _closed_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return closed
 
 
+def _activity_to_fill_event(row: dict[str, Any]) -> dict[str, Any] | None:
+    ts = _parse_alpaca_ts(row.get("transaction_time") or row.get("timestamp"))
+    if ts is None:
+        return None
+    sym = str(row.get("symbol") or "").upper()
+    side = str(row.get("side") or "").lower()
+    qty = abs(float(row.get("qty") or 0))
+    px = float(row.get("price") or 0)
+    oid = str(row.get("order_id") or row.get("id") or "")
+    if side in ("b",):
+        side = "buy"
+    if side in ("s",):
+        side = "sell"
+    if not sym or side not in ("buy", "sell") or qty <= 0 or px <= 0:
+        return None
+    return {
+        "symbol": sym,
+        "side": side,
+        "qty": qty,
+        "price": px,
+        "ts": ts,
+        "id": oid or f"{sym}-{ts.isoformat()}",
+        "source": "activity",
+    }
+
+
+def _fetch_fill_activities(
+    creds: dict[str, str], lookback_start: datetime
+) -> tuple[list[dict[str, Any]], str]:
+    from datetime import timedelta
+
+    et = ZoneInfo("America/New_York")
+    base = (creds.get("endpoint") or PAPER_BASE_URL).rstrip("/")
+    until = (datetime.now(et) + timedelta(minutes=5)).astimezone(ZoneInfo("UTC")).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    after = lookback_start.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+    events: list[dict[str, Any]] = []
+    page_token = ""
+    for _ in range(_ACTIVITY_PAGE_CAP):
+        params: dict[str, str] = {
+            "activity_types": "FILL",
+            "after": after,
+            "until": until,
+            "direction": "asc",
+            "page_size": str(_ACTIVITY_PAGE_SIZE),
+        }
+        if page_token:
+            params["page_token"] = page_token
+        url = f"{base}/v2/account/activities?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "APCA-API-KEY-ID": creds["key"],
+                "APCA-API-SECRET-KEY": creds["secret"],
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+            next_token = ""
+            try:
+                next_token = str(resp.headers.get("alpaca-pagination-next-page-token") or "")
+            except Exception:
+                next_token = ""
+        rows = payload if isinstance(payload, list) else []
+        if not rows:
+            break
+        for row in rows:
+            ev = _activity_to_fill_event(row if isinstance(row, dict) else {})
+            if ev:
+                events.append(ev)
+        if len(rows) < _ACTIVITY_PAGE_SIZE:
+            break
+        last = rows[-1] if isinstance(rows[-1], dict) else {}
+        page_token = next_token or str(last.get("id") or "")
+        if not page_token:
+            break
+    return events, ""
+
+
 def _fetch_fill_events(paper: bool = True) -> tuple[list[dict[str, Any]], str]:
     """
     Filled buy/sell legs for FIFO. Prefer closed orders (Trading API).
     Activities `date=` is UTC and misses evening ET fills — avoid that.
+    Paginate: a single oldest-first page of 100 never reaches later sessions.
     """
-    from datetime import timedelta
-
-    et = ZoneInfo("America/New_York")
-    session_day = _et_trading_day()
-    lookback_start = datetime.combine(
-        session_day - timedelta(days=5), datetime.min.time(), tzinfo=et
-    )
-
+    lookback_start = _lookback_start_et()
     events: list[dict[str, Any]] = []
     err = ""
 
     try:
-        from alpaca.trading.enums import QueryOrderStatus
-        from alpaca.trading.requests import GetOrdersRequest
-
         client = _trading_client(paper=paper)
-        orders = (
-            client.get_orders(
-                GetOrdersRequest(
-                    status=QueryOrderStatus.CLOSED,
-                    after=lookback_start,
-                    direction="asc",
-                    limit=100,
-                )
-            )
-            or []
-        )
-        for o in orders:
-            filled_qty = float(getattr(o, "filled_qty", 0) or 0)
-            avg = getattr(o, "filled_avg_price", None)
-            px = float(avg) if avg not in (None, "") else 0.0
-            if filled_qty <= 0 or px <= 0:
-                continue
-            ts = _parse_alpaca_ts(
-                getattr(o, "filled_at", None) or getattr(o, "submitted_at", None)
-            )
-            if ts is None:
-                continue
-            side_raw = getattr(o, "side", "") or ""
-            side = str(getattr(side_raw, "value", side_raw) or "").lower()
-            sym = str(getattr(o, "symbol", "") or "").upper()
-            oid = str(getattr(o, "id", "") or "")
-            if not sym or side not in ("buy", "sell"):
-                continue
-            events.append(
-                {
-                    "symbol": sym,
-                    "side": side,
-                    "qty": filled_qty,
-                    "price": px,
-                    "ts": ts,
-                    "id": oid or f"{sym}-{ts.isoformat()}",
-                    "source": "order",
-                }
-            )
+        for order in _paginate_closed_orders(client, lookback_start):
+            ev = _order_to_fill_event(order)
+            if ev:
+                events.append(ev)
     except Exception as exc:
         err = str(exc).strip() or type(exc).__name__
 
@@ -508,62 +639,14 @@ def _fetch_fill_events(paper: bool = True) -> tuple[list[dict[str, Any]], str]:
             if not events:
                 return [], err or "Alpaca keys missing"
         else:
-            base = (creds["endpoint"] or PAPER_BASE_URL).rstrip("/")
-            after = lookback_start.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
-            until = (datetime.now(et) + timedelta(minutes=5)).astimezone(ZoneInfo("UTC")).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            )
-            qs = urllib.parse.urlencode(
-                {
-                    "activity_types": "FILL",
-                    "after": after,
-                    "until": until,
-                    "direction": "asc",
-                    "page_size": 100,
-                }
-            )
-            url = f"{base}/v2/account/activities?{qs}"
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "APCA-API-KEY-ID": creds["key"],
-                    "APCA-API-SECRET-KEY": creds["secret"],
-                    "Accept": "application/json",
-                },
-                method="GET",
-            )
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            for a in payload if isinstance(payload, list) else []:
-                ts = _parse_alpaca_ts(a.get("transaction_time") or a.get("timestamp"))
-                if ts is None:
+            extra, _act_err = _fetch_fill_activities(creds, lookback_start)
+            for ev in extra:
+                eid = str(ev.get("id") or "")
+                if eid and eid in seen:
                     continue
-                sym = str(a.get("symbol") or "").upper()
-                side = str(a.get("side") or "").lower()
-                qty = abs(float(a.get("qty") or 0))
-                px = float(a.get("price") or 0)
-                oid = str(a.get("order_id") or a.get("id") or "")
-                if side in ("b",):
-                    side = "buy"
-                if side in ("s",):
-                    side = "sell"
-                if not sym or side not in ("buy", "sell") or qty <= 0 or px <= 0:
-                    continue
-                eid = oid or f"{sym}-{ts.isoformat()}"
-                if eid in seen:
-                    continue
-                seen.add(eid)
-                events.append(
-                    {
-                        "symbol": sym,
-                        "side": side,
-                        "qty": qty,
-                        "price": px,
-                        "ts": ts,
-                        "id": eid,
-                        "source": "activity",
-                    }
-                )
+                if eid:
+                    seen.add(eid)
+                events.append(ev)
     except Exception as exc:
         msg = str(exc).strip() or type(exc).__name__
         # 404 on activities is common on some paper hosts — keep order events.

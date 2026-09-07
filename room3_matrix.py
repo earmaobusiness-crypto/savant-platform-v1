@@ -499,6 +499,14 @@ def _try_queue_child_entry(
 
     if line.get("entry_signal"):
         return False
+    ticker_u = str(ticker or "").upper()
+    for other in (book.get("lines") or {}).values():
+        if not isinstance(other, dict):
+            continue
+        if str(other.get("ticker") or "").upper() != ticker_u:
+            continue
+        if other.get("order_pending") or str(other.get("state") or "") == "committed":
+            return False
     children = list(line.get("children") or [])
     for child in children:
         if not isinstance(child, dict):
@@ -657,10 +665,15 @@ def _15m_can_open_lot(
 ) -> bool:
     """A live 15m can add once: initial lot + one add (scale-in or a second 15m letter)."""
     n15 = len(room3_lots.open_lots(session_state, ticker, tf="15m"))
-    if n15 <= 0:
-        return True
+    all_lots = room3_lots.open_lots(session_state, ticker)
+    broker_qty = _open_qty(session_state, ticker)
     if n15 >= 2:
         return False
+    # Lot book vanished while Alpaca still holds the name — do not mint another 15m.
+    if n15 <= 0 and broker_qty > 0 and not all_lots:
+        return False
+    if n15 <= 0:
+        return True
     if scale_in:
         return not _15m_scale_in_used(session_state, ticker)
     if _15m_scale_in_used(session_state, ticker):
@@ -1450,6 +1463,7 @@ def maybe_queue_matrix_signals(
             and not _approaching_day_close()
             and not line.get("entry_signal")
             and not line.get("exit_signal")
+            and not line.get("order_pending")
         ):
             _try_queue_child_entry(
                 book,
@@ -1472,6 +1486,10 @@ def maybe_queue_matrix_signals(
         line["children"] = []
         return
     if line.get("entry_signal"):
+        return
+    if line.get("order_pending") or line.get("state") == "committed":
+        line["patience"] = True
+        line["patience_note"] = "order working · wait fill"
         return
     if line.get("state") not in ("watching", "committed"):
         return
