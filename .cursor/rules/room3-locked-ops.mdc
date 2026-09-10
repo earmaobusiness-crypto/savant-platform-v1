@@ -7,9 +7,9 @@ alwaysApply: true
 
 **Leftovers (open at Alpaca, not on the belt):** Keep maps so a **strategy exit** can still fire. No new entry. No add. No hunting a second ticket on that name.
 
-**Arm after Cloud reboot:** Streamlit comes back DISARMED. That is correct. Operator flips Arm when they want tickets. Visitor scrape DISARMED is not the operator’s Arm. Never say “Arm was off” from a tab that is not theirs.
+**Arm after Cloud reboot:** Streamlit UI still comes back DISARMED **unless** the operator left **Arm + belt** to keep trading with the laptop shut (`unattended_armed` on disk). That Cloud pulse keeps detect/fire/hold/exit without their tab. Disarm or Kill stops it. Visitor scrape is still not the operator’s Arm.
 
-**Reboot / push / new Cloud process (simple path):** Do not snapshot warmups. RAM can die. Any open paper pile → flatten **as soon as the new process is up** (do not wait for Arm). Today’s log: normal entry/exit/P/L. Operator review: **note only** (“reboot — closed so the hold was not left hanging”). No ✓/✗. Does not feed Room 2. Warmups/pending that were on screen are gone with RAM — skip them; do not hunt that shot. Reboot will not be a normal day once the app is stable.
+**Reboot / push / new Cloud process:** If unattended is on, **resume** — do not flatten hanging paper. If unattended is off: any open paper pile → flatten as soon as the new process is up (do not wait for Arm). Today’s log: normal entry/exit/P/L. Operator review: **note only** (“reboot — closed so the hold was not left hanging”). No ✓/✗. Does not feed Room 2.
 
 **≥85%:** Family is identified. Fill waits for the letter’s style, else TF fallback (1m pop = now; 5m/15m = first pullback/hold). If half the expected move is already in, skip this shot. Post off at RTH close still flattens (scratch).
 

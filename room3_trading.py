@@ -28,6 +28,7 @@ import room3_recipes
 import room3_screener
 import room3_watcher
 import room3_review_learn
+import room3_pulse
 
 room3_lots = room3_engine.lots
 
@@ -257,6 +258,8 @@ def init_room3_session_state() -> None:
         st.session_state.room3_lot_close_labels = []
     if "room3_engine_armed" not in st.session_state:
         st.session_state.room3_engine_armed = False
+    if "room3_unattended_armed" not in st.session_state:
+        st.session_state.room3_unattended_armed = False
     if "room3_kill_flat" not in st.session_state:
         st.session_state.room3_kill_flat = False
     if "room3_pause_entries" not in st.session_state:
@@ -311,6 +314,8 @@ def init_room3_session_state() -> None:
             st.session_state.room3_layout_hydrated_once = True
         _maybe_reconnect_alpaca()
         _maybe_flatten_on_cloud_process_boot()
+        room3_pulse.ensure_worker()
+        room3_pulse.sync_operator_into_worker(st.session_state)
         _maybe_overnight_belt_clear()
         _void_session_reviews_no_learn()
         for day_key in _FILE_SESSION_DATES:
@@ -1000,6 +1005,10 @@ def _maybe_roll_trading_session() -> None:
         st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
     )
     st.session_state.pop("room3_tf_projection", None)
+    st.session_state.room3_tradable_today = 0.0
+    st.session_state.room3_tradable_pct_ui = 0.0
+    st.session_state.room3_tradable_operator_set = False
+    st.session_state.room3_tradable_custom_input = 0.0
     log = list(st.session_state.room3_matrix_sync_log or [])
     log.append(f"Session rolled · new trading day {key} (4 AM ET) · closed trades kept")
     st.session_state.room3_matrix_sync_log = log[-12:]
@@ -1182,18 +1191,9 @@ def _lock_tradable_from_operator() -> None:
 
 
 def _maybe_default_tradable_half(equity: float) -> None:
-    """50% is the first-paint fallback only — never clobber a $ already on the book."""
-    if st.session_state.get("room3_tradable_operator_set"):
-        return
-    raw = float(st.session_state.get("room3_tradable_today") or 0)
-    if raw > 0:
-        return
-    eq = float(equity or 0)
-    if eq <= 0:
-        return
-    st.session_state.room3_tradable_today = round(eq * 0.5, 2)
-    _refresh_book_ticket_sizes()
-    _persist_screener_to_disk()
+    """Operator sets Trading today each session. Do not auto-fill 50%."""
+    _ = equity
+    return
 
 
 def _set_tradable_pct(pct: float, equity: float) -> None:
@@ -2376,6 +2376,32 @@ def _broker_open_symbols() -> set[str]:
     return out
 
 
+def _clear_dead_entry_locks() -> None:
+    """Stuck 'order working' with no shares and $0 size is not a live ticket."""
+    book = st.session_state.get("room3_watch_book") or {}
+    open_syms = _broker_open_symbols()
+    tradable = float(st.session_state.get("room3_tradable_today") or 0)
+    for line in (book.get("lines") or {}).values():
+        if not isinstance(line, dict):
+            continue
+        pending = bool(
+            line.get("order_pending") or str(line.get("state") or "") == "committed"
+        )
+        if not pending:
+            continue
+        ticker = str(line.get("ticker") or "").upper()
+        if ticker and ticker in open_syms:
+            continue
+        if tradable > 0 and str(line.get("pending_order_id") or "").strip():
+            continue
+        line["state"] = "watching"
+        line.pop("order_pending", None)
+        line.pop("pending_order_id", None)
+        line["entry_signal"] = None
+        line["patience"] = False
+        line.pop("patience_note", None)
+
+
 def _reconcile_watch_book_with_broker() -> int:
     """Broker truth: drop phantom ins; mark real leftover shares as in (not ready-to-fire)."""
     if _session_must_be_flat():
@@ -3229,18 +3255,7 @@ def _render_live_dashboard(mode: str) -> None:
         _sync_equity_curve_with_today()
     stats = _session_pl_stats()
     equity = float(stats["equity"])
-    # First paint: if tradable still equals full account and the operator has not set a cap, nudge to 50%
-    if (
-        "room3_tradable_seen" not in st.session_state
-        and equity > 0
-        and not st.session_state.get("room3_tradable_operator_set")
-        and abs(float(stats["tradable"]) - equity) < 0.01
-    ):
-        _maybe_default_tradable_half(equity)
-        st.session_state.room3_tradable_seen = True
-        stats = _session_pl_stats()
-    else:
-        st.session_state.room3_tradable_seen = True
+    st.session_state.room3_tradable_seen = True
     tradable = float(stats["tradable"])
     pct = float(stats["tradable_pct"])
     day_label = _trading_day_display(_trading_day_key())
@@ -3286,7 +3301,6 @@ def _render_live_dashboard(mode: str) -> None:
                     max_value=float(max(equity, 0.0)),
                     step=100.0,
                     key="room3_tradable_custom_input",
-                    on_change=_apply_custom_tradable,
                     label_visibility="collapsed",
                 )
             with c_btn:
@@ -4147,6 +4161,16 @@ def _maybe_flatten_on_cloud_process_boot() -> None:
         return
     if not _broker_is_connected():
         return
+    if room3_pulse.unattended_armed_from_disk():
+        # Operator left Arm+belt to keep trading with the laptop shut.
+        # A new Cloud process must resume, not flatten the pile.
+        pid = os.getpid()
+        room3_screener.save_process_boot(
+            {"pid": pid, "gap_flatten_done": True, "unattended_resume": True}
+        )
+        _PROCESS_GAP_FLATTEN_DONE = True
+        room3_pulse.ensure_worker()
+        return
     pid = os.getpid()
     marker = room3_screener.load_process_boot()
     if int(marker.get("pid") or 0) == pid and marker.get("gap_flatten_done"):
@@ -4520,6 +4544,7 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     st.session_state.room3_last_broker_sync = datetime.now(ET).strftime("%H:%M:%S ET")
     st.session_state.pop("room3_positions_pinned_empty", None)
     _reconcile_watch_book_with_broker()
+    _clear_dead_entry_locks()
     # After adopt: leftover rows have a letter/TF to copy. Alpaca itself has neither.
     _stamp_position_timeframes()
     _relabel_unlabeled_closes_from_lots()
@@ -4638,8 +4663,11 @@ def _render_execution_posture(mode: str) -> None:
             "Arm auto engine",
             value=armed,
             key="room3_toggle_engine_armed",
-            help="Off = no auto orders. On = matrix signals may hit Alpaca when gates pass.",
+            help="On Cloud: Arm + belt keeps trading if you close the laptop. Disarm or Kill stops that.",
         )
+        room3_pulse.mark_unattended(st.session_state)
+        if bool(st.session_state.room3_engine_armed) != bool(armed):
+            _persist_screener_to_disk()
     with c2:
         st.session_state.room3_pause_entries = st.toggle(
             "Pause new entries",
@@ -4652,8 +4680,11 @@ def _render_execution_posture(mode: str) -> None:
             "Kill switch FLAT",
             value=flat,
             key="room3_toggle_kill_flat",
-            help="Wipes the belt and stuck committed rows, disarms, and tries to close open paper positions (extended-hours if the market is shut).",
+            help="Wipes the belt, disarms, flattens open paper, and stops laptop-closed trading.",
         )
+        room3_pulse.mark_unattended(st.session_state)
+        if bool(st.session_state.room3_kill_flat) != bool(flat):
+            _persist_screener_to_disk()
     if st.session_state.room3_kill_flat and not st.session_state.get("room3_kill_did_flat"):
         st.session_state.room3_kill_did_flat = True
         st.session_state.room3_kill_disarm_arm = True
@@ -4796,6 +4827,8 @@ def ingest_filter_universe(tickers: list[str] | None) -> None:
         st.session_state.get("room3_watch_book") or room3_watcher.empty_book(),
         st.session_state.room3_filter_universe,
     )
+    room3_pulse.mark_unattended(st.session_state)
+    _persist_screener_to_disk()
 
 
 def ingest_filter_slot(slot: str, tickers: list[str] | None) -> None:
@@ -4900,7 +4933,15 @@ def _hydrate_screener_from_disk() -> None:
         restored = float((snap or {}).get("tradable_today") or 0)
     except (TypeError, ValueError):
         restored = 0.0
-    if restored > 0 and float(st.session_state.get("room3_tradable_today") or 0) <= 0:
+    snap_day = str((snap or {}).get("tradable_day_key") or "")
+    today_key = _trading_day_key()
+    if snap_day and snap_day != today_key:
+        restored = 0.0
+        st.session_state.room3_tradable_today = 0.0
+        st.session_state.room3_tradable_operator_set = False
+        st.session_state.room3_tradable_pct_ui = 0.0
+        st.session_state.room3_tradable_custom_input = 0.0
+    elif restored > 0 and float(st.session_state.get("room3_tradable_today") or 0) <= 0:
         st.session_state.room3_tradable_today = restored
         st.session_state.room3_tradable_custom_input = restored
         try:
@@ -4908,6 +4949,16 @@ def _hydrate_screener_from_disk() -> None:
         except (TypeError, ValueError):
             pass
         _refresh_book_ticket_sizes()
+    if (snap or {}).get("unattended_armed") and room3_engine.is_cloud_host():
+        st.session_state.room3_engine_armed = True
+        st.session_state.room3_unattended_armed = True
+        if "room3_toggle_engine_armed" not in st.session_state:
+            st.session_state.room3_toggle_engine_armed = True
+    allowed_snap = (snap or {}).get("allowed_sessions") if snap else None
+    if isinstance(allowed_snap, list) and allowed_snap:
+        st.session_state.room3_allowed_sessions = [
+            str(x) for x in allowed_snap if str(x).strip()
+        ]
     rl = (snap.get("review_learn") or {}) if snap else {}
     if isinstance(rl, dict) and (rl.get("observations") or rl.get("versions")) and not (
         (st.session_state.get("room3_review_learn") or {}).get("observations")
@@ -4970,31 +5021,44 @@ def _hydrate_screener_from_disk() -> None:
 
 
 def _persist_screener_to_disk() -> None:
-    room3_screener.save_screener_snapshot(
+    operator = {
+        "last": st.session_state.get("room3_screener_last") or {},
+        "day_cache": st.session_state.get("room3_screener_day_cache") or {},
+        "filter_slots": st.session_state.get("room3_filter_slots") or {},
+        "filter_universe": st.session_state.get("room3_filter_universe") or [],
+        "archive_days": st.session_state.get("room3_archive_days") or [],
+        "strategy_feedback": st.session_state.get("room3_strategy_feedback") or {},
+        "operator_reviews": st.session_state.get("room3_operator_reviews") or [],
+        "pending_reviews": st.session_state.get("room3_pending_reviews") or [],
+        "review_void_ids": st.session_state.get("room3_review_void_ids") or [],
+        "filed_session_dates": st.session_state.get("room3_filed_session_dates") or [],
+        "starting_equity": float(st.session_state.get("room3_starting_equity") or 0),
+        "tradable_today": float(st.session_state.get("room3_tradable_today") or 0),
+        "tradable_pct": float(st.session_state.get("room3_tradable_pct_ui") or 0),
+        "tradable_operator_set": bool(st.session_state.get("room3_tradable_operator_set")),
+        "tradable_day_key": _trading_day_key(),
+        "allowed_sessions": list(st.session_state.get("room3_allowed_sessions") or []),
+        "unattended_armed": bool(st.session_state.get("room3_unattended_armed")),
+        "engine_armed": bool(st.session_state.get("room3_engine_armed")),
+        "review_learn": st.session_state.get("room3_review_learn")
+        or room3_review_learn.state_from_session(st.session_state),
+        "last_hub": str(st.session_state.get("terminal_hub") or ""),
+    }
+    # Cloud pulse owns maps / lots / tape. A tab persist must not overwrite them
+    # with a stale session copy while the laptop is shut.
+    if room3_pulse.worker_owns_execution():
+        room3_screener.merge_screener_snapshot(operator)
+        return
+    operator.update(
         {
-            "last": st.session_state.get("room3_screener_last") or {},
-            "day_cache": st.session_state.get("room3_screener_day_cache") or {},
-            "filter_slots": st.session_state.get("room3_filter_slots") or {},
-            "filter_universe": st.session_state.get("room3_filter_universe") or [],
             "watch_book": st.session_state.get("room3_watch_book") or {},
-            "archive_days": st.session_state.get("room3_archive_days") or [],
             "trade_history": _store_trade_history(),
             "fill_meta_by_ticker": st.session_state.get("room3_fill_meta_by_ticker") or {},
-            "strategy_feedback": st.session_state.get("room3_strategy_feedback") or {},
-            "operator_reviews": st.session_state.get("room3_operator_reviews") or [],
-            "pending_reviews": st.session_state.get("room3_pending_reviews") or [],
-            "review_void_ids": st.session_state.get("room3_review_void_ids") or [],
-            "filed_session_dates": st.session_state.get("room3_filed_session_dates") or [],
             "lots": st.session_state.get("room3_lots") or [],
             "lot_close_labels": st.session_state.get("room3_lot_close_labels") or [],
-            "starting_equity": float(st.session_state.get("room3_starting_equity") or 0),
-            "tradable_today": float(st.session_state.get("room3_tradable_today") or 0),
-            "tradable_pct": float(st.session_state.get("room3_tradable_pct_ui") or 0),
-            "tradable_operator_set": bool(st.session_state.get("room3_tradable_operator_set")),
-            "review_learn": st.session_state.get("room3_review_learn") or room3_review_learn.state_from_session(st.session_state),
-            "last_hub": str(st.session_state.get("terminal_hub") or ""),
         }
     )
+    room3_screener.save_screener_snapshot(operator)
 
 
 def _sync_belt_query(names: list[str] | None) -> None:
@@ -5393,6 +5457,37 @@ def _room3_heartbeat_fragment() -> None:
     if not _broker_is_connected():
         st.caption("Heartbeat idle · broker disconnected")
         return
+    room3_pulse.sync_operator_into_worker(st.session_state)
+    _clear_dead_entry_locks()
+    if room3_pulse.worker_owns_execution():
+        paper = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER) != ROOM3_MODE_LIVE
+        _maybe_sync_alpaca(paper=paper, min_interval=30.0)
+        book = st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
+        window = room3_engine.detect_session_window()
+        new_ok = _session_trading_allowed()
+        note = str(st.session_state.get("room3_worker_note") or book.get("last_note") or "")
+        err = str(st.session_state.get("room3_worker_error") or "")
+        armed = bool(st.session_state.get("room3_engine_armed"))
+        posture = "ARMED · Cloud pulse (laptop can close)" if armed else "DISARMED · Cloud pulse idle"
+        st.caption(
+            f"Live · {posture} · "
+            f"Heartbeat {datetime.now(ET).strftime('%H:%M:%S ET')} · "
+            f"{room3_engine.session_label(window)} · "
+            f"trade_session={'YES' if new_ok else 'NO'} · "
+            f"{note}"
+            + (f" · {err}" if err else "")
+        )
+        uni = ", ".join(book.get("universe") or []) or "—"
+        st.caption(
+            f"Universe: {uni} · last tick {book.get('last_tick') or '—'} · "
+            f"ticks {book.get('ticks') or 0}"
+        )
+        rows = room3_watcher.book_status_rows(book)
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+        else:
+            st.caption("No TF maps open yet.")
+        return
     mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
     if str(st.session_state.get("room3_broker") or "") == "alpaca":
         last = float(st.session_state.get("room3_alpaca_sync_mono") or 0)
@@ -5479,12 +5574,21 @@ def _room3_heartbeat_fragment() -> None:
                             1,
                         )
                 else:
-                    line["state"] = "committed"
-                    line["order_pending"] = True
-                    line["pending_order_id"] = str(result.get("order_id") or "")
+                    oid = str(result.get("order_id") or "").strip()
+                    if oid:
+                        line["state"] = "committed"
+                        line["order_pending"] = True
+                        line["pending_order_id"] = oid
+                    else:
+                        line["state"] = "watching"
+                        line.pop("order_pending", None)
+                        line.pop("pending_order_id", None)
+                        line["entry_signal"] = None
+                        _clear_line_entry_stamps(line)
             else:
                 line["entry_signal"] = None
                 line.pop("order_pending", None)
+                line.pop("pending_order_id", None)
                 _clear_line_entry_stamps(line)
         elif str(sig.get("intent")) == "exit" and result.get("ok"):
             lot_id = str(sig.get("lot_id") or "")
@@ -5601,7 +5705,10 @@ def _render_rth_filter_attach() -> None:
             f"({room3_engine.session_label(window)} — enable that window or wait until it opens)."
         )
     elif belt and trading_now:
-        st.caption("Belt live — maps running; trades when armed.")
+        st.caption(
+            "Belt live — maps running; trades when armed. "
+            "On Cloud, Arm + belt keeps going if you close the laptop. Disarm or Kill stops that."
+        )
 
     st.caption(
         "Drop **adds** names — they stay all day and keep mapping after a trade exits. "
