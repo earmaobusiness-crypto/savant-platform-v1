@@ -1229,100 +1229,18 @@ def _refresh_book_ticket_sizes() -> None:
             room3_matrix.stamp_line_size(line, st.session_state)
 
 
-def _lot_pile_labels(ticker: str) -> tuple[str, str]:
-    """Open Alpaca pile may hold several lots — show every TF and letter, not the live stamp."""
-    open_rows = room3_lots.open_lots(st.session_state, ticker)
-    if not open_rows:
-        return "", ""
-    tfs: list[str] = []
-    letters: list[str] = []
-    for lot in open_rows:
-        tf = str(lot.get("tf") or "").strip()
-        letter = str(lot.get("letter") or lot.get("strategy") or "").strip()
-        if tf and tf not in tfs:
-            tfs.append(tf)
-        if letter and letter not in letters and not _is_placeholder_strat(letter):
-            letters.append(letter)
-    return " · ".join(tfs), " · ".join(letters)
-
-
 def _stamp_position_timeframes() -> None:
-    """Alpaca has no TF/letter — copy from open lots (not the live watch-book stamp)."""
+    """Alpaca pile rows stay unlabeled. Lots table carries TF and letter."""
     rows = list(st.session_state.get("room3_open_positions") or [])
     if not rows:
         return
-    by_ticker_tf: dict[str, str] = {}
-    by_ticker_strat: dict[str, str] = {}
-    book = st.session_state.get("room3_watch_book") or {}
-
-    def _usable_strat(layout: str, strat: str) -> str:
-        s = str(strat or "").strip()
-        if not s or s in ("—", "-", "Alpaca", "matrix"):
-            return ""
-        if room3_recipes.is_purgatory_letter(str(layout or ""), s):
-            return ""
-        return s
-
-    ranked: list[tuple[int, dict]] = []
-    for line in (book.get("lines") or {}).values():
-        state = str(line.get("state") or "")
-        rank = 0 if state == "in" else 1 if state == "committed" else 2
-        ranked.append((rank, line))
-    ranked.sort(key=lambda x: x[0])
-    for rank, line in ranked:
-        ticker = str(line.get("ticker") or "").upper()
-        tf = str(line.get("timeframe") or "")
-        if not ticker:
-            continue
-        if str(line.get("state") or "") not in ("in", "committed"):
-            continue
-        if tf in ("1m", "5m", "15m") and ticker not in by_ticker_tf:
-            by_ticker_tf[ticker] = tf
-        strat = _usable_strat(
-            str(line.get("entry_layout") or ""),
-            str(line.get("entry_strategy") or ""),
-        )
-        if strat and ticker not in by_ticker_strat:
-            by_ticker_strat[ticker] = strat
-    fill_meta = st.session_state.get("room3_fill_meta_by_ticker") or {}
-    for ticker, meta in fill_meta.items():
-        sym = str(ticker or "").upper()
-        if not sym:
-            continue
-        strat = _usable_strat(str(meta.get("layout_id") or ""), str(meta.get("strategy") or ""))
-        tf = str(meta.get("timeframe") or "").strip()
-        if strat and sym not in by_ticker_strat:
-            by_ticker_strat[sym] = strat
-        if tf in ("1m", "5m", "15m") and sym not in by_ticker_tf:
-            by_ticker_tf[sym] = tf
-    for row in list(st.session_state.get("room3_trade_history") or []):
-        ticker = str(row.get("ticker") or "").upper()
-        tf = str(row.get("timeframe") or "")
-        strat = _usable_strat(str(row.get("layout_id") or ""), str(row.get("strategy") or ""))
-        if ticker and tf in ("1m", "5m", "15m") and ticker not in by_ticker_tf:
-            by_ticker_tf[ticker] = tf
-        if ticker and strat and ticker not in by_ticker_strat:
-            by_ticker_strat[ticker] = strat
     for row in rows:
-        ticker = str(row.get("ticker") or "").upper()
-        lot_tf, lot_strat = _lot_pile_labels(ticker)
-        if lot_tf:
-            row["timeframe"] = lot_tf
-        elif str(row.get("timeframe") or "") not in ("1m", "5m", "15m") and ticker in by_ticker_tf:
-            row["timeframe"] = by_ticker_tf[ticker]
-        if lot_strat:
-            row["strategy"] = lot_strat
-        else:
-            cur_s = str(row.get("strategy") or "").strip()
-            if room3_recipes.is_purgatory_letter(str(row.get("layout_id") or ""), cur_s):
-                row["strategy"] = "—"
-                cur_s = "—"
-            if (
-                (not cur_s or cur_s in ("—", "-", "Alpaca", "matrix"))
-                and ticker in by_ticker_strat
-            ):
-                row["strategy"] = by_ticker_strat[ticker]
-    # Do not copy the live watch-book letter back onto ticker cache — that restamps closed rows.
+        cur_tf = str(row.get("timeframe") or "").strip()
+        if " · " in cur_tf or cur_tf not in ("1m", "5m", "15m"):
+            row["timeframe"] = "—"
+        cur_s = str(row.get("strategy") or "").strip()
+        if " · " in cur_s or _is_placeholder_strat(cur_s):
+            row["strategy"] = "Alpaca"
     st.session_state.room3_open_positions = rows
 
 
@@ -1935,6 +1853,8 @@ def _sync_pending_from_closed_history() -> None:
                     break
             continue
         item = _enrich_trade_row_meta(dict(row))
+        if _row_has_frozen_identity(item):
+            _copy_frozen_identity(item, row)
         if not item.get("review_queued_at"):
             item["review_queued_at"] = now_iso
             row["review_queued_at"] = now_iso
@@ -2096,12 +2016,41 @@ def _apply_cached_fill_meta(row: dict) -> dict:
     closed = _trade_is_closed_row(out) or "closing" in str(out.get("status") or "").lower()
     if closed:
         oid = str(out.get("entry_order_id") or "").strip()
+        fills = list(cache.get("fills") or [])
+        pick = None
         if oid:
-            for fill in reversed(list(cache.get("fills") or [])):
+            for fill in reversed(fills):
                 if not isinstance(fill, dict):
                     continue
                 if str(fill.get("entry_order_id") or "").strip() == oid:
-                    return _apply_identity_label(out, fill)
+                    pick = fill
+                    break
+        if pick is None:
+            try:
+                want_qty = abs(float(out.get("qty") or 0))
+            except (TypeError, ValueError):
+                want_qty = 0.0
+            for fill in reversed(fills):
+                if not isinstance(fill, dict) or fill.get("applied_close_id"):
+                    continue
+                try:
+                    fq = abs(float(fill.get("qty") or 0))
+                except (TypeError, ValueError):
+                    fq = 0.0
+                letter = str(fill.get("letter") or fill.get("strategy") or "").strip()
+                tf = str(fill.get("timeframe") or fill.get("tf") or "").strip()
+                if want_qty > 0 and fq > 0 and abs(fq - want_qty) <= max(1.0, 0.05 * want_qty):
+                    if letter and not _is_placeholder_strat(letter) and tf and not _is_placeholder_tf(tf):
+                        pick = fill
+                        break
+        if pick is not None:
+            labeled = _apply_identity_label(out, pick)
+            pick["applied_close_id"] = str(out.get("id") or "")
+            cache["fills"] = fills
+            full = dict(st.session_state.get("room3_fill_meta_by_ticker") or {})
+            full[ticker] = cache
+            st.session_state.room3_fill_meta_by_ticker = full
+            return labeled
         return out
     if _is_placeholder_strat(str(out.get("strategy") or "")) and cache.get("strategy"):
         out["strategy"] = cache["strategy"]
@@ -2196,13 +2145,19 @@ def _enrich_trade_row_meta(row: dict) -> dict:
         if _row_has_frozen_identity(out):
             return _stamp_matrix_labels_on_row(out)
         ticker = str(out.get("ticker") or "").upper()
+        letter = str(out.get("letter") or "").strip()
+        if not letter or _is_placeholder_strat(letter):
+            letter = ""
+        tf = str(out.get("timeframe") or "").strip()
+        if _is_placeholder_tf(tf):
+            tf = ""
         label = room3_lots.take_close_label(
             st.session_state,
             ticker,
             qty=abs(float(out.get("qty") or 0)),
             lot_id=str(out.get("lot_id") or ""),
-            letter=str(out.get("letter") or out.get("strategy") or ""),
-            tf=str(out.get("timeframe") or ""),
+            letter=letter,
+            tf=tf,
         )
         if label:
             out = _apply_identity_label(out, label)
@@ -2240,9 +2195,8 @@ def _stamp_matrix_labels_on_row(row: dict) -> dict:
 
 
 def _display_trade_strategy(row: dict) -> str:
-    raw = dict(row or {})
-    closed = _trade_is_closed_row(raw) or "closing" in str(raw.get("status") or "").lower()
-    stamped = _stamp_matrix_labels_on_row(raw if closed else _enrich_trade_row_meta(raw))
+    # Read only — taking a close-label here ate the stamp and left review as dashes.
+    stamped = _stamp_matrix_labels_on_row(dict(row or {}))
     strat = str(stamped.get("matrix_strategy") or stamped.get("strategy") or "").strip()
     layout = str(stamped.get("layout_id") or stamped.get("matrix_layout") or "")
     if room3_recipes.is_purgatory_letter(layout, strat):
@@ -2253,9 +2207,7 @@ def _display_trade_strategy(row: dict) -> str:
 
 
 def _display_trade_timeframe(row: dict) -> str:
-    raw = dict(row or {})
-    closed = _trade_is_closed_row(raw) or "closing" in str(raw.get("status") or "").lower()
-    stamped = _stamp_matrix_labels_on_row(raw if closed else _enrich_trade_row_meta(raw))
+    stamped = _stamp_matrix_labels_on_row(dict(row or {}))
     tf = str(stamped.get("matrix_timeframe") or stamped.get("timeframe") or "").strip()
     if tf and not _is_placeholder_tf(tf):
         return tf
@@ -2263,23 +2215,32 @@ def _display_trade_timeframe(row: dict) -> str:
 
 
 def _relabel_unlabeled_closes_from_lots() -> None:
-    """After lots peel, stamp leftover TF/letter onto unlabeled closes from this tick."""
+    """Stamp TF/letter onto unlabeled closes once, then persist. Display must not consume labels."""
+    def _stamp_list(rows: list) -> bool:
+        changed = False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if not _trade_is_closed_row(row) and "closing" not in str(row.get("status") or "").lower():
+                continue
+            if _row_has_frozen_identity(row):
+                continue
+            stamped = _enrich_trade_row_meta(dict(row))
+            if _row_has_frozen_identity(stamped):
+                row.update(stamped)
+                changed = True
+        return changed
+
     hist = list(st.session_state.get("room3_trade_history") or [])
-    changed = False
-    for row in hist:
-        if not isinstance(row, dict):
-            continue
-        if not _trade_is_closed_row(row) and "closing" not in str(row.get("status") or "").lower():
-            continue
-        if _row_has_frozen_identity(row):
-            continue
-        stamped = _enrich_trade_row_meta(dict(row))
-        if _row_has_frozen_identity(stamped):
-            row.update(stamped)
-            changed = True
-    if changed:
+    pending = list(st.session_state.get("room3_pending_reviews") or [])
+    hist_changed = _stamp_list(hist)
+    pending_changed = _stamp_list(pending)
+    if hist_changed:
         st.session_state.room3_trade_history = hist
+        _store_trade_history(hist)
         _sync_pending_from_closed_history()
+    elif pending_changed:
+        st.session_state.room3_pending_reviews = pending
 
 
 def _merge_broker_closed_trades(closed: list) -> None:
@@ -3067,43 +3028,76 @@ def _render_open_positions() -> None:
         name = _active_broker_name()
         st.caption(f"Flat — no open positions at {name}. Closed trades stay in Today's trade log.")
         return
-    display = []
+    pos_by = {}
     for r in rows:
         ticker = str(r.get("ticker") or "").upper()
-        lot_tf, lot_strat = _lot_pile_labels(ticker)
-        display.append(
-            {
-                "Ticker": r.get("ticker"),
-                "TF": lot_tf or _display_trade_timeframe(r),
-                "Strategy": lot_strat or _display_trade_strategy(r),
-                "Entry": r.get("entry_time"),
-                "Entry $": f"{float(r.get('entry_price') or 0):.2f}",
-                "Exit $": f"{float(r.get('last_price') or 0):.2f}",
-                "Position $": f"{_position_dollar_value(r):,.2f}",
-                "P/L $": _fmt_pl_usd(r.get("pnl_usd")),
-                "P/L %": _fmt_pl_pct(r.get("pnl_pct")),
-            }
-        )
-    _render_dark_table(display)
-    lots = room3_lots.open_lots(st.session_state)
+        if ticker:
+            pos_by[ticker] = r
+            try:
+                broker_qty = abs(float(r.get("qty") or 0))
+            except (TypeError, ValueError):
+                broker_qty = 0.0
+            st.caption(
+                f"Alpaca pile · **{ticker}** · {broker_qty:.0f} shares · "
+                f"${_position_dollar_value(r):,.2f} · P/L {_fmt_pl_usd(r.get('pnl_usd'))}. "
+                f"One share stack at the broker — lots below are the trades."
+            )
+    lots = [
+        lot
+        for lot in room3_lots.open_lots(st.session_state)
+        if abs(float(lot.get("qty") or 0)) >= 1
+    ]
     if lots:
-        st.caption(
-            "Lots on this pile — each row is one letter/TF. Alpaca is one share stack; "
-            "review and exits are per lot."
-        )
         lot_rows = []
         for lot in lots:
+            ticker = str(lot.get("ticker") or "").upper()
+            pos = pos_by.get(ticker) or {}
+            try:
+                last = float(pos.get("last_price") or 0)
+            except (TypeError, ValueError):
+                last = 0.0
+            try:
+                entry = float(lot.get("entry_px") or 0)
+            except (TypeError, ValueError):
+                entry = 0.0
+            try:
+                qty = float(lot.get("qty") or 0)
+            except (TypeError, ValueError):
+                qty = 0.0
+            pnl = (last - entry) * qty if last > 0 and entry > 0 else None
+            letter = str(lot.get("letter") or lot.get("strategy") or "").strip() or "—"
             lot_rows.append(
                 {
-                    "Ticker": lot.get("ticker"),
-                    "TF": lot.get("tf"),
-                    "Strategy": lot.get("letter") or lot.get("strategy"),
-                    "Qty": f"{float(lot.get('qty') or 0):.0f}",
-                    "Entry $": f"{float(lot.get('entry_px') or 0):.2f}",
-                    "Exits on": f"{lot.get('letter') or lot.get('strategy')} trigger",
+                    "Ticker": ticker,
+                    "TF": str(lot.get("tf") or "—"),
+                    "Strategy": letter,
+                    "Qty": f"{qty:.0f}",
+                    "Entry $": f"{entry:.2f}" if entry else "—",
+                    "Now $": f"{last:.2f}" if last else "—",
+                    "P/L $": _fmt_pl_usd(pnl) if pnl is not None else "—",
                 }
             )
         _render_dark_table(lot_rows)
+        st.caption(
+            "Alpaca is one pile of shares. Each row is one letter on one timeframe — "
+            "that is the trade you review, and that is the exit that sells those shares."
+        )
+    else:
+        display = []
+        for r in rows:
+            display.append(
+                {
+                    "Ticker": r.get("ticker"),
+                    "TF": "—",
+                    "Strategy": "—",
+                    "Qty": r.get("qty"),
+                    "Entry $": f"{float(r.get('entry_price') or 0):.2f}",
+                    "Now $": f"{float(r.get('last_price') or 0):.2f}",
+                    "P/L $": _fmt_pl_usd(r.get("pnl_usd")),
+                }
+            )
+        _render_dark_table(display)
+        st.caption("No lot stamps yet — waiting for the letter/TF from the fill.")
     window = room3_engine.detect_session_window()
     st.caption(
         f"Session now: {room3_engine.session_label(window)}. "
@@ -3123,6 +3117,7 @@ def _trade_widget_key(prefix: str, trade: dict, index: int = 0) -> str:
 
 def _render_trade_history() -> None:
     st.markdown("### Today's trade log")
+    _relabel_unlabeled_closes_from_lots()
     st.caption(
         "Closes land here and in Operator review with the TF and strategy frozen at that fill — "
         "not whatever letter the watch book is showing now. After you vote ✓/✗ the row leaves this tape "
@@ -3810,6 +3805,7 @@ def _render_strategy_health_strip() -> None:
 
 def _render_operator_review_panel() -> None:
     st.markdown("### Operator review")
+    _relabel_unlabeled_closes_from_lots()
     st.caption(
         "You vote ✓ good or ✗ bad · votes bank first · "
         "DNA hardens only after TF bars (15m≥2 · 5m≥3 · 1m≥4) · prior DNA snapshotted for revert. "
@@ -5459,6 +5455,7 @@ def _room3_heartbeat_fragment() -> None:
         return
     room3_pulse.sync_operator_into_worker(st.session_state)
     _clear_dead_entry_locks()
+    _relabel_unlabeled_closes_from_lots()
     if room3_pulse.worker_owns_execution():
         paper = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER) != ROOM3_MODE_LIVE
         _maybe_sync_alpaca(paper=paper, min_interval=30.0)

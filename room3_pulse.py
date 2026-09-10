@@ -291,13 +291,35 @@ def _sync_alpaca(ss: PulseState, *, paper: bool) -> dict[str, Any]:
     dbg = room3_alpaca.fetch_closed_trades_today_debug(paper=paper)
     hist = list(ss.get("room3_trade_history") or [])
     seen = {str(r.get("id") or "") for r in hist if isinstance(r, dict)}
+    lots = room3_engine.lots
     for row in dbg.get("closed") or []:
         if not isinstance(row, dict):
             continue
         rid = str(row.get("id") or "")
         if rid and rid in seen:
             continue
-        hist.append(row)
+        stamped = dict(row)
+        letter = str(stamped.get("strategy") or "").strip()
+        tf = str(stamped.get("timeframe") or "").strip()
+        if letter.lower() in ("", "—", "-", "alpaca", "none") or tf in ("", "—", "-"):
+            try:
+                qty = abs(float(stamped.get("qty") or 0))
+            except (TypeError, ValueError):
+                qty = 0.0
+            label = lots.take_close_label(
+                ss,
+                str(stamped.get("ticker") or "").upper(),
+                qty=qty,
+                letter="",
+                tf="",
+            )
+            if label:
+                stamped["timeframe"] = label.get("tf") or tf
+                stamped["strategy"] = label.get("letter") or letter
+                stamped["matrix_timeframe"] = stamped["timeframe"]
+                stamped["matrix_strategy"] = stamped["strategy"]
+                stamped["identity_frozen"] = True
+        hist.append(stamped)
         if rid:
             seen.add(rid)
     ss.room3_trade_history = hist[-500:]

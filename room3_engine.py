@@ -433,6 +433,12 @@ class lots:
         want_id = str(lot_id or "").strip()
         want_letter = str(letter or "").strip()
         want_tf = str(tf or "").strip()
+        if want_letter in ("", "—", "-", "Alpaca", "matrix") or want_letter.upper().startswith(
+            "ALPACA"
+        ):
+            want_letter = ""
+        if want_tf in ("", "—", "-", "MKT") or want_tf.upper().startswith("ALPACA"):
+            want_tf = ""
         want_qty = abs(float(qty or 0))
         q = lots._label_queue(session_state)
         best_i = -1
@@ -452,8 +458,8 @@ class lots:
             row_qty = abs(float(row.get("qty") or 0))
             if want_qty > 0 and row_qty > 0 and abs(row_qty - want_qty) <= max(1.0, 0.05 * want_qty):
                 score += 3
-            elif want_qty <= 0 and not want_id and not want_letter:
-                score += 1
+            # Ticker-only so an Alpaca FIFO close still gets the next unused letter.
+            score += 1
             if score > best_score:
                 best_score = score
                 best_i = i
