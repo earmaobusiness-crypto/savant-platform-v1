@@ -19,3 +19,4 @@ close_lots_for_ticker = _lots.close_lots_for_ticker
 stamp_close_row = _lots.stamp_close_row
 stamp_unlabeled_closes = _lots.stamp_unlabeled_closes
 remember_entry_fill = _lots.remember_entry_fill
+reconcile_to_broker = _lots.reconcile_to_broker

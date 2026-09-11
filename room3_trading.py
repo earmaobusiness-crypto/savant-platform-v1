@@ -4577,7 +4577,14 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
         f"{result.get('account_number') or 'paper'} · ${equity:,.2f}"
     )
     # Open = still open at broker. Flat account ⇒ empty open table.
-    st.session_state.room3_open_positions = room3_alpaca.fetch_open_positions(paper=paper) or []
+    st.session_state.room3_open_positions = [
+        p
+        for p in (room3_alpaca.fetch_open_positions(paper=paper) or [])
+        if isinstance(p, dict) and abs(float(p.get("qty") or 0)) >= 1e-9
+    ]
+    room3_lots.reconcile_to_broker(
+        st.session_state, st.session_state.room3_open_positions
+    )
     # Closed fills across lookback (Friday+) stay in history / Session history.
     dbg = room3_alpaca.fetch_closed_trades_today_debug(paper=paper)
     closed = dbg.get("closed") or []
@@ -4974,6 +4981,14 @@ def _hydrate_screener_from_disk() -> None:
         st.session_state.room3_filed_session_dates = merged_filed[-30:]
     if snap.get("rejected_review_pile_2026_09_10"):
         st.session_state[_REJECT_REVIEW_PILE_FLAG] = True
+    snap_sync = str(snap.get("last_broker_sync") or "").strip()
+    if snap_sync and not str(st.session_state.get("room3_last_broker_sync") or "").strip():
+        st.session_state.room3_last_broker_sync = snap_sync
+    closed_snap = snap.get("broker_closed_sync") if snap else None
+    if isinstance(closed_snap, dict) and closed_snap.get("at"):
+        cur = st.session_state.get("room3_broker_closed_sync") or {}
+        if not (isinstance(cur, dict) and cur.get("at")):
+            st.session_state.room3_broker_closed_sync = closed_snap
     lot_snap = (snap.get("lots") or []) if snap else []
     if isinstance(lot_snap, list) and lot_snap and not (st.session_state.get("room3_lots") or []):
         st.session_state.room3_lots = lot_snap
@@ -5088,6 +5103,8 @@ def _persist_screener_to_disk() -> None:
         "rejected_review_pile_2026_09_10": bool(
             st.session_state.get(_REJECT_REVIEW_PILE_FLAG)
         ),
+        "last_broker_sync": str(st.session_state.get("room3_last_broker_sync") or ""),
+        "broker_closed_sync": st.session_state.get("room3_broker_closed_sync") or {},
         "starting_equity": float(st.session_state.get("room3_starting_equity") or 0),
         "tradable_today": float(st.session_state.get("room3_tradable_today") or 0),
         "tradable_pct": float(st.session_state.get("room3_tradable_pct_ui") or 0),
@@ -5684,7 +5701,12 @@ def _room3_heartbeat_fragment() -> None:
 
     window = room3_engine.detect_session_window()
     gates = _current_gates("entry")
-    sync_t = st.session_state.get("room3_last_broker_sync") or "—"
+    sync_t = str(st.session_state.get("room3_last_broker_sync") or "").strip()
+    closed_at = str((st.session_state.get("room3_broker_closed_sync") or {}).get("at") or "").strip()
+    if closed_at and (not sync_t or closed_at > sync_t):
+        sync_t = closed_at
+    if not sync_t:
+        sync_t = "—"
     note = str(book.get("last_note") or "")
     flat_note = str(st.session_state.get("room3_last_session_flat_note") or "")
     extra = f" · {flat_note}" if flat_note else ""

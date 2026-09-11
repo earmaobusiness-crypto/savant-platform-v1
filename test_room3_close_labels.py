@@ -121,8 +121,69 @@ def test_stamp_close_row_from_entry_fill_cache():
     assert stamped["strategy"] == "1C (15M)"
 
 
+def test_open_lots_skips_qty_zero():
+    ss = _S()
+    lots.append_lot(
+        ss,
+        {
+            "ticker": "TNON",
+            "tf": "5m",
+            "strategy": "8B (5M)",
+            "qty": 0,
+            "entry_px": 4.11,
+            "id": "lot-zero",
+        },
+    )
+    lots.append_lot(
+        ss,
+        {
+            "ticker": "TNON",
+            "tf": "1m",
+            "strategy": "5A (1M)",
+            "qty": 3,
+            "entry_px": 4.32,
+            "id": "lot-live",
+        },
+    )
+    opens = lots.open_lots(ss, "TNON")
+    assert [r["id"] for r in opens] == ["lot-live"]
+
+
+def test_reconcile_ghost_lots_to_broker_pile():
+    ss = _S()
+    lots.append_lot(
+        ss,
+        {
+            "ticker": "TNON",
+            "tf": "5m",
+            "strategy": "8B (5M)",
+            "qty": 5,
+            "entry_px": 4.11,
+            "id": "lot-old",
+        },
+    )
+    lots.append_lot(
+        ss,
+        {
+            "ticker": "TNON",
+            "tf": "1m",
+            "strategy": "2D (1M)",
+            "qty": 3,
+            "entry_px": 5.29,
+            "id": "lot-new",
+        },
+    )
+    n = lots.reconcile_to_broker(ss, [{"ticker": "TNON", "qty": 3}])
+    assert n >= 1
+    opens = lots.open_lots(ss, "TNON")
+    assert sum(float(r["qty"]) for r in opens) == 3
+    assert opens[0]["id"] == "lot-new"
+
+
 if __name__ == "__main__":
     test_take_close_label_ignores_alpaca_placeholder()
     test_stamp_unlabeled_history_after_lot_close()
     test_stamp_close_row_from_entry_fill_cache()
+    test_open_lots_skips_qty_zero()
+    test_reconcile_ghost_lots_to_broker_pile()
     print("ok")

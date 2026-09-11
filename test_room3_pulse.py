@@ -104,6 +104,66 @@ def test_session_must_be_flat_when_closed():
         assert room3_pulse._session_must_be_flat(ss) is True
 
 
+def test_flatten_leftover_keeps_pulse_alive(monkeypatch=None):
+    """flattened 0 with shares still open must not disarm and go idle."""
+    import room3_alpaca
+
+    _reset_bag(
+        {
+            "room3_execution_mode": "paper",
+            "room3_engine_armed": True,
+            "room3_unattended_armed": True,
+            "room3_filter_universe": ["TNON"],
+            "room3_open_positions": [{"ticker": "TNON", "qty": 3}],
+            "room3_lots": [
+                {
+                    "id": "lot-x",
+                    "ticker": "TNON",
+                    "tf": "1m",
+                    "letter": "2D (1M)",
+                    "strategy": "2D (1M)",
+                    "qty": 3,
+                    "status": "open",
+                }
+            ],
+            "room3_trade_history": [],
+        }
+    )
+    ss = room3_pulse.bag()
+    orig_close = room3_alpaca.close_position_now
+    orig_fetch = room3_alpaca.fetch_open_positions
+    orig_probe = room3_alpaca.probe_alpaca_connection
+    orig_closed = room3_alpaca.fetch_closed_trades_today_debug
+
+    def _fail_close(*_a, **_k):
+        return {"ok": False, "error": "no fill"}
+
+    def _still_open(*_a, **_k):
+        return [{"ticker": "TNON", "qty": 3}]
+
+    room3_alpaca.close_position_now = _fail_close
+    room3_alpaca.fetch_open_positions = _still_open
+    room3_alpaca.probe_alpaca_connection = lambda paper=True: {"ok": True, "equity": 1}
+    room3_alpaca.fetch_closed_trades_today_debug = lambda paper=True: {
+        "closed": [],
+        "fill_events": 0,
+        "closed_count": 0,
+        "today_closed_count": 0,
+        "error": "",
+        "session_day": "2026-09-10",
+    }
+    try:
+        note = room3_pulse._flatten_open(ss, paper=True)
+    finally:
+        room3_alpaca.close_position_now = orig_close
+        room3_alpaca.fetch_open_positions = orig_fetch
+        room3_alpaca.probe_alpaca_connection = orig_probe
+        room3_alpaca.fetch_closed_trades_today_debug = orig_closed
+    assert "leftover" in note
+    assert ss.get("room3_unattended_armed") is True
+    assert "TNON" in str(ss.get("room3_filter_universe") or [])
+
+
 if __name__ == "__main__":
     test_pulse_state_duck_types_session()
     test_mark_unattended_requires_arm_and_belt()
@@ -111,4 +171,5 @@ if __name__ == "__main__":
     test_operator_disarm_stops_unattended()
     test_kill_stops_unattended()
     test_session_must_be_flat_when_closed()
+    test_flatten_leftover_keeps_pulse_alive()
     print("ok")

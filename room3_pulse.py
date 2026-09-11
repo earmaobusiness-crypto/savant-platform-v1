@@ -239,6 +239,8 @@ def persist_bag(ss: PulseState) -> None:
             "allowed_sessions": list(ss.get("room3_allowed_sessions") or []),
             "unattended_armed": bool(ss.get("room3_unattended_armed")),
             "engine_armed": bool(ss.get("room3_engine_armed")),
+            "last_broker_sync": str(ss.get("room3_last_broker_sync") or ""),
+            "broker_closed_sync": ss.get("room3_broker_closed_sync") or {},
         }
     )
 
@@ -287,7 +289,12 @@ def _sync_alpaca(ss: PulseState, *, paper: bool) -> dict[str, Any]:
     ss.room3_account_equity = equity
     ss.room3_broker_truth = True
     ss.room3_alpaca_status = "connected"
-    ss.room3_open_positions = room3_alpaca.fetch_open_positions(paper=paper) or []
+    ss.room3_open_positions = [
+        p
+        for p in (room3_alpaca.fetch_open_positions(paper=paper) or [])
+        if isinstance(p, dict) and abs(float(p.get("qty") or 0)) >= 1e-9
+    ]
+    room3_engine.lots.reconcile_to_broker(ss, ss.room3_open_positions)
     dbg = room3_alpaca.fetch_closed_trades_today_debug(paper=paper)
     hist = list(ss.get("room3_trade_history") or [])
     seen = {str(r.get("id") or "") for r in hist if isinstance(r, dict)}
@@ -303,27 +310,62 @@ def _sync_alpaca(ss: PulseState, *, paper: bool) -> dict[str, Any]:
         if rid:
             seen.add(rid)
     ss.room3_trade_history = hist[-500:]
-    ss.room3_last_broker_sync = datetime.now(ET).strftime("%H:%M:%S ET")
+    now_s = datetime.now(ET).strftime("%H:%M:%S ET")
+    ss.room3_last_broker_sync = now_s
+    ss.room3_broker_closed_sync = {
+        "fill_events": int(dbg.get("fill_events") or 0),
+        "closed_count": int(dbg.get("closed_count") or 0),
+        "today_closed_count": int(dbg.get("today_closed_count") or 0),
+        "error": str(dbg.get("error") or ""),
+        "session_day": str(dbg.get("session_day") or ""),
+        "at": now_s,
+    }
     return result
 
 
 def _flatten_open(ss: PulseState, *, paper: bool) -> str:
+    """Overnight / Post-off flat. Retry leftover shares. Do not go idle while Alpaca still has a pile."""
     room3_lots = room3_engine.lots
-    ok_n = 0
-    for pos in list(ss.get("room3_open_positions") or []):
-        sym = str(pos.get("ticker") or pos.get("symbol") or "").upper()
-        if not sym:
-            continue
-        try:
-            room3_lots.close_lots_for_ticker(ss, sym)
-            result = room3_alpaca.close_position_now(sym, paper=paper, aggressive=True)
-            if result.get("ok"):
-                ok_n += 1
-        except Exception:
-            continue
     _sync_alpaca(ss, paper=paper)
+    symbols = set(_open_syms(ss))
+    for lot in room3_lots.open_lots(ss):
+        ticker = str(lot.get("ticker") or "").upper()
+        if ticker:
+            symbols.add(ticker)
+    ok_n = 0
+    errs: list[str] = []
+
+    def _close_syms(syms: set[str]) -> None:
+        nonlocal ok_n
+        for sym in sorted(syms):
+            try:
+                room3_lots.close_lots_for_ticker(ss, sym)
+                result = room3_alpaca.close_position_now(sym, paper=paper, aggressive=True)
+                if result.get("ok"):
+                    ok_n += 1
+                else:
+                    errs.append(f"{sym}:{result.get('error') or 'fail'}")
+            except Exception as exc:
+                errs.append(f"{sym}:{exc}")
+
+    _close_syms(symbols)
+    _sync_alpaca(ss, paper=paper)
+    leftover = set(_open_syms(ss))
+    if leftover:
+        _close_syms(leftover)
+        _sync_alpaca(ss, paper=paper)
+        leftover = set(_open_syms(ss))
     room3_lots.stamp_unlabeled_closes(ss, peel_open=False)
     ss.room3_watch_book = room3_watcher.empty_book()
+    leftover = set(_open_syms(ss))
+    if leftover:
+        still = ",".join(sorted(leftover))
+        # Keep pulse alive so the next tick retries flatten. No new hunting.
+        ss.room3_unattended_armed = True
+        note = f"session-flat · flattened {ok_n} · leftover {still}"
+        if errs:
+            note += " · " + "; ".join(errs[:3])
+        return note
     ss.room3_filter_universe = []
     ss.room3_engine_armed = False
     ss.room3_unattended_armed = False

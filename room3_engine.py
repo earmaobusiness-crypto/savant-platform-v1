@@ -310,6 +310,11 @@ class lots:
                 continue
             if str(row.get("status") or "open") != "open":
                 continue
+            try:
+                if abs(float(row.get("qty") or 0)) < 1:
+                    continue
+            except (TypeError, ValueError):
+                continue
             if sym and str(row.get("ticker") or "").upper() != sym:
                 continue
             if want_tf and str(row.get("tf") or "") != want_tf:
@@ -751,6 +756,60 @@ class lots:
             lots.queue_close_label(session_state, row)
             row["status"] = "closed"
             n += 1
+        return n
+
+    @staticmethod
+    def reconcile_to_broker(session_state: Any, positions: list | None) -> int:
+        """Broker pile is truth. Ghost lots (qty 0 or leftover after exits) leave the open book."""
+        broker: dict[str, float] = {}
+        for pos in positions or []:
+            if not isinstance(pos, dict):
+                continue
+            ticker = str(pos.get("ticker") or pos.get("symbol") or "").upper()
+            if not ticker:
+                continue
+            try:
+                qty = abs(float(pos.get("qty") or 0))
+            except (TypeError, ValueError):
+                qty = 0.0
+            broker[ticker] = broker.get(ticker, 0.0) + qty
+        n = 0
+        seen: set[str] = set()
+        for row in list(lots.open_lots(session_state)):
+            ticker = str(row.get("ticker") or "").upper()
+            if ticker:
+                seen.add(ticker)
+        for ticker in seen | set(broker):
+            want = float(broker.get(ticker) or 0)
+            opens = lots.open_lots(session_state, ticker)
+            if want < 1:
+                if opens:
+                    n += lots.close_lots_for_ticker(session_state, ticker)
+                continue
+            lot_sum = sum(abs(float(r.get("qty") or 0)) for r in opens)
+            if lot_sum <= want + 1e-9:
+                continue
+            # Oldest lots first — those should already have exited.
+            for row in opens:
+                lot_sum = sum(
+                    abs(float(r.get("qty") or 0))
+                    for r in lots.open_lots(session_state, ticker)
+                )
+                if lot_sum <= want + 1e-9:
+                    break
+                try:
+                    q = abs(float(row.get("qty") or 0))
+                except (TypeError, ValueError):
+                    q = 0.0
+                extra = lot_sum - want
+                if q <= extra + 1e-9:
+                    lots.close_lot(session_state, str(row.get("id") or ""))
+                    n += 1
+                else:
+                    row["qty"] = max(0.0, q - extra)
+                    n += 1
+                    break
+            lots.save_lots(session_state, lots._rows(session_state))
         return n
 
     @staticmethod

@@ -291,6 +291,8 @@ def fetch_open_positions(paper: bool = True) -> list[dict[str, Any]]:
         rows = []
         for p in client.get_all_positions() or []:
             qty = float(getattr(p, "qty", 0) or 0)
+            if abs(qty) < 1e-9:
+                continue
             entry = float(getattr(p, "avg_entry_price", 0) or 0)
             last = float(getattr(p, "current_price", 0) or 0)
             pnl = float(getattr(p, "unrealized_pl", 0) or 0)
