@@ -1,13 +1,13 @@
 """
-Room 3 operator-review → matrix DNA compile loop.
+Room 3 operator-review → Hunt / Handle / Purgatoria.
 
-Votes bank first. Extra good/bad traits sit in a compile pile.
-A pattern only hardens into DNA after TF thresholds:
-  15m ≥ 2 · 5m ≥ 3 · 1m ≥ 4
-(near-misses that came close count).
+Good: reaffirm the gene (Hunt). Extras sit in Purgatoria until the same
+extra shows three times on that gene, then they may join. Not match-floor.
 
-Before any DNA rewrite we snapshot the prior layout entry so revert
-can put it back. Vault / Supabase stay read-only — session overlays only.
+Bad: Handle can fiddle now (when X, do Y — prefer limit / wait pullback).
+Hunt suspects wait for two Bads. Never delete the letter. Never infer
+alpha-decay bye-bye. Vault / Supabase stay read-only. Snapshot before
+any overlay compile so revert can put it back.
 """
 
 from __future__ import annotations
@@ -25,11 +25,17 @@ LEARN_PATH = DATA_DIR / "review_learn.json"
 LAYOUT_INDEX_KEY = "layout_master_matrix_index"
 
 # Operator-stated harden bars (same pattern / near-misses).
+# Hunt Good / extras: 3. Hunt Bad: 2. Handle: 1 (immediate).
 TF_HARDEN_THRESHOLDS: dict[str, int] = {
     "15m": 2,
     "5m": 3,
     "1m": 4,
 }
+HUNT_GOOD_BAR = 3
+HUNT_BAD_BAR = 2
+EXTRA_BAR = 3
+HANDLE_BAR = 1
+_HANDLE_WHENS = frozenset({"halt", "spread_wide", "late_entry", "execution"})
 
 _PLACEHOLDER_STRAT = frozenset(
     {"", "—", "-", "Alpaca", "matrix", "unknown", "Alpaca BUY", "Alpaca SELL"}
@@ -98,14 +104,29 @@ def save_state(state: dict[str, Any]) -> None:
     LEARN_PATH.write_text(json.dumps(blob, indent=2, default=str), encoding="utf-8")
 
 
-def pattern_key(*, strategy: str, layout_id: str, timeframe: str, trait: str = "") -> str:
+def pattern_key(
+    *,
+    strategy: str,
+    layout_id: str,
+    timeframe: str,
+    trait: str = "",
+    layer: str = "",
+    vote: str = "",
+) -> str:
     strat = str(strategy or "").strip() or "unknown"
     layout = str(layout_id or "").strip() or "—"
     tf = normalize_tf(timeframe) or "—"
+    bits = [strat, layout, tf]
+    layer_s = str(layer or "").strip()
+    vote_s = str(vote or "").strip()
     trait_bit = str(trait or "").strip()
+    if layer_s:
+        bits.append(f"layer:{layer_s}")
+    if layer_s == "hunt" and vote_s:
+        bits.append(f"vote:{vote_s}")
     if trait_bit:
-        return f"{strat}|{layout}|{tf}|trait:{trait_bit}"
-    return f"{strat}|{layout}|{tf}"
+        bits.append(f"trait:{trait_bit}")
+    return "|".join(bits)
 
 
 def bucket_key(*, layout_id: str, strategy: str, timeframe: str) -> str:
@@ -149,17 +170,11 @@ def resolve_trade_context(trade: dict[str, Any], session_state: Any | None = Non
     ).strip()
 
     fill: dict[str, Any] = {}
-    book_lines: list[dict] = []
     if session_state is not None:
         try:
             fill = dict((session_state.get("room3_fill_meta_by_ticker") or {}).get(ticker) or {})
         except Exception:
             fill = {}
-        try:
-            book = session_state.get("room3_watch_book") or {}
-            book_lines = list((book.get("lines") or {}).values())
-        except Exception:
-            book_lines = []
 
     if _is_placeholder_strat(strat) and fill.get("strategy"):
         strat = str(fill.get("strategy") or "").strip()
@@ -168,25 +183,7 @@ def resolve_trade_context(trade: dict[str, Any], session_state: Any | None = Non
     if _is_placeholder_layout(layout) and fill.get("layout_id"):
         layout = str(fill.get("layout_id") or "").strip()
 
-    for line in book_lines:
-        if str(line.get("ticker") or "").upper() != ticker:
-            continue
-        if _is_placeholder_layout(layout):
-            cand = str(line.get("entry_layout") or line.get("nearest_layout") or "").strip()
-            if cand and not _is_placeholder_layout(cand):
-                layout = cand
-        if _is_placeholder_strat(strat):
-            cand = str(
-                line.get("entry_strategy") or line.get("nearest_strategy") or ""
-            ).strip()
-            if cand and not _is_placeholder_strat(cand):
-                strat = cand
-        if not normalize_tf(tf):
-            cand = str(line.get("timeframe") or "").strip()
-            if normalize_tf(cand):
-                tf = cand
-        if layout and strat and normalize_tf(tf):
-            break
+    # Never steal the live watch-book letter. Frozen close identity or fill cache only.
 
     tf_n = normalize_tf(tf)
     if _is_placeholder_strat(strat):
@@ -253,6 +250,70 @@ def _layout_vector_for(
     return []
 
 
+def extract_trade_traits(trade: dict[str, Any] | None) -> list[str]:
+    """Pull extras / circumstances off the close. Missing sensors → empty list."""
+    t = dict(trade or {})
+    out: list[str] = []
+    for key in ("traits", "extras", "sensor_hits", "dna_extras"):
+        raw = t.get(key)
+        if isinstance(raw, (list, tuple)):
+            out.extend(str(x).strip().lower().replace(" ", "_") for x in raw if str(x).strip())
+    if t.get("halt") or t.get("halted"):
+        out.append("halt")
+    try:
+        spread = float(t.get("spread") or t.get("spread_pct") or 0)
+        if spread >= 0.02:
+            out.append("spread_wide")
+    except (TypeError, ValueError):
+        pass
+    try:
+        rvol = float(t.get("rvol") or t.get("relative_volume") or 0)
+        if rvol >= 2.0:
+            out.append("rvol_high")
+    except (TypeError, ValueError):
+        pass
+    blob = " ".join(
+        str(t.get(k) or "")
+        for k in (
+            "trigger",
+            "patience_note",
+            "system_reason",
+            "review_note",
+            "status",
+        )
+    ).lower()
+    if "late" in blob or "chase" in blob:
+        out.append("late_entry")
+    seen: set[str] = set()
+    clean: list[str] = []
+    for item in out:
+        if item and item not in seen:
+            seen.add(item)
+            clean.append(item)
+    return clean
+
+
+def handle_then_for(when: str) -> str:
+    w = str(when or "").strip().lower()
+    if w in {"late_entry", "wait_pullback"}:
+        return "wait_pullback"
+    return "limit"
+
+
+def _layer_threshold(layer: str, vote: str) -> int:
+    layer_s = str(layer or "").strip()
+    vote_s = str(vote or "").strip()
+    if layer_s == "handle":
+        return HANDLE_BAR
+    if layer_s == "extra":
+        return EXTRA_BAR
+    if layer_s == "hunt" and vote_s == "bad":
+        return HUNT_BAD_BAR
+    if layer_s == "hunt" and vote_s == "good":
+        return HUNT_GOOD_BAR
+    return 0
+
+
 def ingest_review(
     state: dict[str, Any],
     trade: dict[str, Any],
@@ -268,6 +329,10 @@ def ingest_review(
     """
     vote_clean = "good" if str(vote).lower().startswith("g") else "bad"
     ctx = resolve_trade_context(trade, session_state)
+    if _is_placeholder_strat(ctx["strategy"]) or ctx["strategy"] == "unknown":
+        return {}
+    if not normalize_tf(ctx["timeframe"]):
+        return {}
     trade_id = str(trade.get("id") or "").strip()
     vec: list[float] = []
     if session_state is not None:
@@ -284,73 +349,60 @@ def ingest_review(
         except (TypeError, ValueError):
             pass
 
+    found = list(traits) if traits else extract_trade_traits(trade)
+    extras = [t for t in found if t and t not in _HANDLE_WHENS]
+    handle_whens = [t for t in found if t in _HANDLE_WHENS]
+    if vote_clean == "bad" and not handle_whens:
+        handle_whens = ["execution"]
+
     observations = list(state.get("observations") or [])
     observations = [
         o
         for o in observations
         if not (
             str(o.get("trade_id") or "") == trade_id
-            and not str(o.get("trait") or "").strip()
             and str(o.get("status") or "") == "pending"
         )
     ]
-    primary = {
-        "id": f"obs-{uuid.uuid4().hex[:12]}",
-        "trade_id": trade_id,
-        "ticker": ctx["ticker"],
-        "strategy": ctx["strategy"],
-        "layout_id": ctx["layout_id"],
-        "timeframe": ctx["timeframe"],
-        "vote": vote_clean,
-        "near_miss": bool(near_miss),
-        "trait": "",
-        "pattern_key": pattern_key(
-            strategy=ctx["strategy"],
-            layout_id=ctx["layout_id"],
-            timeframe=ctx["timeframe"],
-        ),
-        "bucket_key": bucket_key(
-            layout_id=ctx["layout_id"],
-            strategy=ctx["strategy"],
-            timeframe=ctx["timeframe"],
-        ),
-        "vector": vec,
-        "status": "pending",
-        "created_at": _utc_now(),
-    }
-    observations.append(primary)
 
-    for trait in traits or []:
-        trait_s = str(trait or "").strip()
-        if not trait_s:
-            continue
-        observations.append(
-            {
-                "id": f"obs-{uuid.uuid4().hex[:12]}",
-                "trade_id": trade_id,
-                "ticker": ctx["ticker"],
-                "strategy": ctx["strategy"],
-                "layout_id": ctx["layout_id"],
-                "timeframe": ctx["timeframe"],
-                "vote": vote_clean,
-                "near_miss": bool(near_miss),
-                "trait": trait_s,
-                "pattern_key": pattern_key(
-                    strategy=ctx["strategy"],
-                    layout_id=ctx["layout_id"],
-                    timeframe=ctx["timeframe"],
-                    trait=trait_s,
-                ),
-                "bucket_key": bucket_key(
-                    layout_id=ctx["layout_id"],
-                    strategy=ctx["strategy"],
-                    timeframe=ctx["timeframe"],
-                ),
-                "vector": vec,
-                "status": "pending",
-                "created_at": _utc_now(),
-            }
-        )
+    def _obs(*, layer: str, trait: str, vote: str) -> dict[str, Any]:
+        return {
+            "id": f"obs-{uuid.uuid4().hex[:12]}",
+            "trade_id": trade_id,
+            "ticker": ctx["ticker"],
+            "strategy": ctx["strategy"],
+            "layout_id": ctx["layout_id"],
+            "timeframe": ctx["timeframe"],
+            "vote": vote,
+            "near_miss": bool(near_miss),
+            "layer": layer,
+            "trait": trait,
+            "pattern_key": pattern_key(
+                strategy=ctx["strategy"],
+                layout_id=ctx["layout_id"],
+                timeframe=ctx["timeframe"],
+                trait=trait,
+                layer=layer,
+                vote=vote if layer == "hunt" else "",
+            ),
+            "bucket_key": bucket_key(
+                layout_id=ctx["layout_id"],
+                strategy=ctx["strategy"],
+                timeframe=ctx["timeframe"],
+            ),
+            "vector": vec,
+            "status": "pending",
+            "created_at": _utc_now(),
+        }
+
+    primary = _obs(layer="hunt", trait="", vote=vote_clean)
+    observations.append(primary)
+    if vote_clean == "bad":
+        for when in handle_whens:
+            observations.append(_obs(layer="handle", trait=when, vote="bad"))
+    if vote_clean == "good":
+        for extra in extras:
+            observations.append(_obs(layer="extra", trait=extra, vote="good"))
 
     state["observations"] = observations[-2000:]
     return primary
@@ -385,6 +437,9 @@ def _count_pattern(obs: list[dict[str, Any]], pkey: str) -> dict[str, Any]:
     bads = sum(1 for o in hits if o.get("vote") == "bad")
     near = sum(1 for o in hits if o.get("near_miss"))
     tf = normalize_tf(str(hits[0].get("timeframe") if hits else "") or "")
+    layer = str(hits[0].get("layer") or "") if hits else ""
+    vote_s = str(hits[0].get("vote") or "") if hits else ""
+    bar = _layer_threshold(layer, vote_s)
     return {
         "count": len(hits),
         "goods": goods,
@@ -393,8 +448,9 @@ def _count_pattern(obs: list[dict[str, Any]], pkey: str) -> dict[str, Any]:
         "tickers": tickers,
         "ticker_count": len(tickers),
         "timeframe": tf,
-        "threshold": threshold_for_tf(tf),
-        "ready": bool(tf and len(hits) >= threshold_for_tf(tf)),
+        "layer": layer,
+        "threshold": bar,
+        "ready": bool(layer and bar and len(hits) >= bar),
         "pending": hits,
     }
 
@@ -421,6 +477,7 @@ def pending_pattern_stats(state: dict[str, Any]) -> list[dict[str, Any]]:
                 "ticker_count": stats["ticker_count"],
                 "threshold": stats["threshold"],
                 "ready": stats["ready"],
+                "layer": stats.get("layer") or sample.get("layer") or "",
             }
         )
     out.sort(key=lambda r: (-int(r.get("ready") or 0), -int(r.get("count") or 0)))
@@ -514,8 +571,12 @@ def apply_pattern(
         sample.get("bucket_key")
         or bucket_key(layout_id=layout_id, strategy=strategy, timeframe=tf)
     )
-    majority = "good" if int(stats["goods"]) >= int(stats["bads"]) else "bad"
+    majority = str(sample.get("vote") or ("good" if int(stats["goods"]) >= int(stats["bads"]) else "bad"))
     trait = str(sample.get("trait") or "").strip()
+    layer = str(sample.get("layer") or stats.get("layer") or "").strip()
+    if layer == "hunt" and majority == "bad" and int(stats.get("ticker_count") or 0) < 2:
+        # Same name repeating is a coat / case, not a gene rewrite.
+        return {"ok": False, "error": "hunt bad needs two tickers", "stats": stats, "deferred": True}
 
     layouts = _layouts_from_session(session_state)
     idx = _find_layout_index(layouts, bkey, layout_id, strategy, tf)
@@ -535,7 +596,7 @@ def apply_pattern(
         state,
         bucket=bkey,
         entry_before=entry_before,
-        reason="trait-compile" if trait else "strategy-compile",
+        reason=("handle-compile" if layer == "handle" else "trait-compile" if trait else "hunt-compile"),
         pattern_key_s=pattern_key_s,
         vote_majority=majority,
     )
@@ -543,27 +604,39 @@ def apply_pattern(
     overlay = dict((state.get("overlays") or {}).get(bkey) or {})
     overlay.setdefault("reinforce", 0)
     overlay.setdefault("trim", 0)
+    overlay.setdefault("hunt_caution", 0)
     overlay.setdefault("match_floor_delta", 0)
     overlay.setdefault("traits_good", [])
     overlay.setdefault("traits_bad", [])
+    overlay.setdefault("handle_rules", [])
     overlay["updated_at"] = _utc_now()
     overlay["last_version_id"] = ver["id"]
 
-    if majority == "good":
-        overlay["reinforce"] = int(overlay.get("reinforce") or 0) + 1
-        overlay["match_floor_delta"] = max(-5, int(overlay.get("match_floor_delta") or 0) - 1)
-        if trait and trait not in (overlay.get("traits_good") or []):
+    blend = False
+    if layer == "handle":
+        when = trait or "execution"
+        then = handle_then_for(when)
+        rules = list(overlay.get("handle_rules") or [])
+        if not any(str(r.get("when") or "") == when and str(r.get("then") or "") == then for r in rules):
+            rules.append({"when": when, "then": then, "at": _utc_now()})
+        overlay["handle_rules"] = rules[-20:]
+    elif layer == "extra" and majority == "good" and trait:
+        if trait not in (overlay.get("traits_good") or []):
             overlay["traits_good"] = list(overlay.get("traits_good") or []) + [trait]
-    else:
+    elif layer == "hunt" and majority == "good":
+        overlay["reinforce"] = int(overlay.get("reinforce") or 0) + 1
+        blend = True
+    elif layer == "hunt" and majority == "bad":
         overlay["trim"] = int(overlay.get("trim") or 0) + 1
-        overlay["match_floor_delta"] = min(10, int(overlay.get("match_floor_delta") or 0) + 2)
+        overlay["hunt_caution"] = int(overlay.get("hunt_caution") or 0) + 1
+        blend = True
         if trait and trait not in (overlay.get("traits_bad") or []):
             overlay["traits_bad"] = list(overlay.get("traits_bad") or []) + [trait]
 
     samples = [list(o.get("vector") or []) for o in pending if o.get("vector")]
     new_entry = copy.deepcopy(entry_before)
     base_vec = list(new_entry.get("vector") or [])
-    if base_vec and samples:
+    if blend and base_vec and samples:
         new_entry["vector"] = _blend_vectors(base_vec, samples, toward=(majority == "good"))
         new_entry["vector_source"] = "operator_compile"
     new_entry["operator_overlay"] = overlay
@@ -600,6 +673,7 @@ def apply_pattern(
         "stats": stats,
         "overlay": overlay,
         "trait": trait,
+        "layer": layer,
     }
 
 
@@ -675,7 +749,13 @@ def revert_version(state: dict[str, Any], session_state: Any, version_id: str) -
 def overlay_match_floor_delta(
     session_state: Any, layout_id: str, strategy: str, timeframe: str
 ) -> int:
-    """Delta applied on top of MATCH_THRESHOLD_PCT for this DNA bucket."""
+    """Dead. Good/Bad no longer move the 85% fire bar."""
+    return 0
+
+
+def _overlay_for(
+    session_state: Any, layout_id: str, strategy: str, timeframe: str
+) -> dict[str, Any]:
     bkey = bucket_key(layout_id=layout_id, strategy=strategy, timeframe=timeframe)
     for entry in _layouts_from_session(session_state):
         if str(entry.get("bucket_key") or "") == bkey or (
@@ -687,16 +767,58 @@ def overlay_match_floor_delta(
             == normalize_tf(timeframe)
         ):
             ov = entry.get("operator_overlay") or {}
-            try:
-                return int(ov.get("match_floor_delta") or 0)
-            except (TypeError, ValueError):
-                return 0
+            if isinstance(ov, dict):
+                return ov
     try:
         st = load_state()
         ov = (st.get("overlays") or {}).get(bkey) or {}
-        return int(ov.get("match_floor_delta") or 0)
+        return dict(ov) if isinstance(ov, dict) else {}
     except Exception:
-        return 0
+        return {}
+
+
+def force_patient_entry(
+    session_state: Any, layout_id: str, strategy: str, timeframe: str
+) -> bool:
+    """Hunt caution or a wait-pullback Handle → do not chase the print."""
+    ov = _overlay_for(session_state, layout_id, strategy, timeframe)
+    try:
+        if int(ov.get("hunt_caution") or 0) >= 1:
+            return True
+    except (TypeError, ValueError):
+        pass
+    for rule in ov.get("handle_rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        if str(rule.get("then") or "") == "wait_pullback":
+            return True
+    return False
+
+
+def resolved_order_style(
+    session_state: Any,
+    strategy: str,
+    timeframe: str,
+    *,
+    layout_id: str = "",
+    structural_move_pct: float = 0.0,
+) -> str:
+    """Recipe style, then Handle may force limit (slippage)."""
+    import room3_recipes
+
+    style = room3_recipes.order_style_for(
+        strategy,
+        timeframe,
+        layout_id=layout_id,
+        structural_move_pct=structural_move_pct,
+    )
+    ov = _overlay_for(session_state, layout_id, strategy, timeframe)
+    for rule in ov.get("handle_rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        if str(rule.get("then") or "") == "limit":
+            return "limit"
+    return style
 
 
 def sync_state_to_session(session_state: Any, state: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -731,7 +853,7 @@ def process_operator_vote(
     near_miss: bool = False,
     traits: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Bank vote, auto-compile anything that crossed the TF bar, persist."""
+    """Bank vote, compile Hunt/Handle/Purgatoria that crossed their bars, persist."""
     if trade.get("skip_matrix_learn") or trade.get("gap_exit"):
         return {"observation": None, "applied": [], "pending": {}, "versions": []}
     state = state_from_session(session_state)
@@ -743,6 +865,8 @@ def process_operator_vote(
         near_miss=near_miss,
         traits=traits,
     )
+    if not primary:
+        return {"observation": None, "applied": [], "pending": pending_pattern_stats(state), "versions": []}
     applied = compile_ready_patterns(state, session_state)
     save_state(state)
     sync_state_to_session(session_state, state)

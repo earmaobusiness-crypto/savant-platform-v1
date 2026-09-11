@@ -44,13 +44,16 @@ ET = ZoneInfo("America/New_York")
 _PROCESS_GAP_FLATTEN_DONE = False
 _GAP_EXIT_NOTE = "reboot — closed so the hold was not left hanging"
 # Operator-cleared hose day: keep the log / P/L, never vote, never feed Room 2.
-_VOID_LEARN_SESSION_DATES = frozenset({"2026-08-31", "2026-09-01"})
+_VOID_LEARN_SESSION_DATES = frozenset({"2026-08-31", "2026-09-01", "2026-09-10"})
 _VOID_LEARN_TICKERS = frozenset({"AEHL", "NCRA", "WETO", "VVOS"})
 _VOID_LEARN_PNL = frozenset(
     {("AEHL", -92), ("AEHL", -14), ("NCRA", -52), ("WETO", -709), ("VVOS", -113)}
 )
 # Operator closed this session out of the live tape so it lives under Session history.
-_FILE_SESSION_DATES = frozenset({"2026-08-31", "2026-09-01"})
+_FILE_SESSION_DATES = frozenset({"2026-08-31", "2026-09-01", "2026-09-10"})
+# One-shot: dump the unlabeled 2026-09-10 review pile without Good/Bad.
+_REJECT_REVIEW_PILE_FLAG = "room3_rejected_review_pile_2026_09_10"
+_REJECT_REVIEW_PILE_DAY = "2026-09-10"
 
 _SESSION_KEYS = (
     "room3_execution_mode",
@@ -318,6 +321,7 @@ def init_room3_session_state() -> None:
         room3_pulse.sync_operator_into_worker(st.session_state)
         _maybe_overnight_belt_clear()
         _void_session_reviews_no_learn()
+        _reject_review_pile_once()
         for day_key in _FILE_SESSION_DATES:
             _file_session_day(day_key)
     finally:
@@ -2144,23 +2148,7 @@ def _enrich_trade_row_meta(row: dict) -> dict:
         out = _apply_cached_fill_meta(out)
         if _row_has_frozen_identity(out):
             return _stamp_matrix_labels_on_row(out)
-        ticker = str(out.get("ticker") or "").upper()
-        letter = str(out.get("letter") or "").strip()
-        if not letter or _is_placeholder_strat(letter):
-            letter = ""
-        tf = str(out.get("timeframe") or "").strip()
-        if _is_placeholder_tf(tf):
-            tf = ""
-        label = room3_lots.take_close_label(
-            st.session_state,
-            ticker,
-            qty=abs(float(out.get("qty") or 0)),
-            lot_id=str(out.get("lot_id") or ""),
-            letter=letter,
-            tf=tf,
-        )
-        if label:
-            out = _apply_identity_label(out, label)
+        out = room3_lots.stamp_close_row(st.session_state, out, peel_open=False)
         return _stamp_matrix_labels_on_row(out)
     out = _apply_cached_fill_meta(out)
     cur_tf = str(out.get("timeframe") or "").strip()
@@ -2572,6 +2560,10 @@ def _record_operator_review(trade_id: str, vote: str) -> None:
         return
     if trade.get("gap_exit") or trade.get("skip_matrix_learn"):
         return
+    if _row_matches_voided_session(trade):
+        return
+    if not _row_has_frozen_identity(trade):
+        return
     st.session_state.room3_pending_reviews = [
         t for t in pending if str(t.get("id")) != str(trade_id)
     ]
@@ -2599,37 +2591,41 @@ def _record_operator_review(trade_id: str, vote: str) -> None:
         reviewed,
         vote_clean,
     )
-    applied_n = len(learn.get("applied") or [])
+    applied_ok = [a for a in (learn.get("applied") or []) if a.get("ok")]
     pending_ready = sum(1 for p in (learn.get("pending") or []) if p.get("ready"))
     sync_line = (
         f"[LEARN] {reviewed.get('ticker')} · {strat} · operator={vote_clean} · "
         f"banked"
-        + (f" · DNA updated ×{applied_n} (snapshot kept for revert)" if applied_n else "")
-        + (f" · {pending_ready} pattern(s) near harden bar" if pending_ready and not applied_n else "")
+        + (f" · overlay ×{len(applied_ok)} (snapshot kept for revert)" if applied_ok else "")
+        + (f" · {pending_ready} in Purgatoria" if pending_ready and not applied_ok else "")
     )
     log = list(st.session_state.room3_matrix_sync_log or [])
     log.append(sync_line)
-    for a in learn.get("applied") or []:
-        if a.get("ok"):
-            log.append(
-                f"[DNA] {a.get('bucket_key')} · majority={a.get('majority')} · "
-                f"ver {a.get('version_id')} · revert-able"
-            )
+    for a in applied_ok:
+        layer = str(a.get("layer") or "")
+        log.append(
+            f"[DNA] {a.get('bucket_key')} · {layer or a.get('majority')} · "
+            f"ver {a.get('version_id')} · revert-able"
+        )
     st.session_state.room3_matrix_sync_log = log[-20:]
 
     alerts = list(st.session_state.room3_decay_alerts or [])
-    if bucket.get("bad", 0) >= 2:
-        alert = f"Alpha decay watch — {strat} marked bad {bucket['bad']}× today (local only)."
+    for a in applied_ok:
+        layer = str(a.get("layer") or "")
+        if layer == "handle":
+            alert = (
+                f"Handle · {a.get('bucket_key')} · ver {a.get('version_id')} "
+                f"(limit / pullback overlay — revert from Strategy health)."
+            )
+        elif layer == "hunt" and a.get("majority") == "bad":
+            alert = (
+                f"Hunt caution · {a.get('bucket_key')} · ver {a.get('version_id')} "
+                f"(not deleted — revert from Strategy health)."
+            )
+        else:
+            continue
         if alert not in alerts:
             alerts.append(alert)
-    for a in learn.get("applied") or []:
-        if a.get("ok") and a.get("majority") == "bad":
-            alert = (
-                f"DNA trimmed · {a.get('bucket_key')} · ver {a.get('version_id')} "
-                f"(snapshot kept — revert from Strategy health)."
-            )
-            if alert not in alerts:
-                alerts.append(alert)
     st.session_state.room3_decay_alerts = alerts
     _persist_screener_to_disk()
 
@@ -3807,13 +3803,13 @@ def _render_operator_review_panel() -> None:
     st.markdown("### Operator review")
     _relabel_unlabeled_closes_from_lots()
     st.caption(
-        "You vote ✓ good or ✗ bad · votes bank first · "
-        "DNA hardens only after TF bars (15m≥2 · 5m≥3 · 1m≥4) · prior DNA snapshotted for revert. "
-        "Each card is one lot: ticker · TF · strategy, frozen at close. "
-        "Green card = profit · red card = loss. "
-        "If you don't vote, it stays here 24 hours after the window it closed in ended "
-        "(pre → 9:30 ET next day · RTH → 4:00 PM next day · post → 8:00 PM next day). "
-        "X'd-out closes stay in the log / session history only — not this pile, not a Room 2 vote."
+        "✓ Good / ✗ Bad are about this lot (ticker · TF · strategy frozen at close). "
+        "Good reaffirms the gene; extras sit in Purgatoria until the same extra shows 3 times. "
+        "Bad Handle can switch that letter to limit / wait-pullback on this shot (slippage) — "
+        "it does not change size and does not delete the letter. "
+        "Hunt (the detectors) waits for 2 Bads on two names before getting more cautious. "
+        "Green = profit · red = loss. Dash cards are not a vote. "
+        "Unvoted stays 24h after that window ended. Revert is Strategy health → DNA versions."
     )
     _sync_pending_from_closed_history()
     pending = st.session_state.room3_pending_reviews or []
@@ -3866,6 +3862,9 @@ def _render_operator_review_panel() -> None:
         )
         if is_gap:
             st.caption("Note only — reboot cut this hold. Not a ✓/✗. Does not feed Room 2.")
+            continue
+        if not _row_has_frozen_identity(trade):
+            st.caption("No TF / strategy on this close — not a vote. Does not feed DNA.")
             continue
         b1, b2, _ = st.columns([1, 1, 2])
         with b1:
@@ -3994,6 +3993,62 @@ def _void_session_reviews_no_learn() -> None:
         room3_review_learn.save_state(learn_state)
         room3_review_learn.sync_state_to_session(st.session_state, learn_state)
         _persist_screener_to_disk()
+
+
+def _reject_review_pile_once() -> None:
+    """Drop the 2026-09-10 Operator review pile with no Good/Bad. Log and P/L stay."""
+    if st.session_state.get(_REJECT_REVIEW_PILE_FLAG):
+        return
+    pending = list(st.session_state.get("room3_pending_reviews") or [])
+    history = list(st.session_state.get("room3_trade_history") or [])
+    today = _trading_day_key()
+    if today == _REJECT_REVIEW_PILE_DAY:
+        pile = list(pending)
+    else:
+        pile = [
+            p
+            for p in pending
+            if _trade_session_date(p) == _REJECT_REVIEW_PILE_DAY
+            or str(p.get("ticker") or "").upper() == "TNON"
+            or not _row_has_frozen_identity(p)
+        ]
+    sep10_hist = [
+        r
+        for r in history
+        if isinstance(r, dict)
+        and (
+            _trade_is_closed_row(r)
+            or "closing" in str(r.get("status") or "").lower()
+        )
+        and not str(r.get("operator_vote") or "").strip()
+        and not r.get("review_void")
+        and _trade_session_date(r) == _REJECT_REVIEW_PILE_DAY
+    ]
+    if not pile and not sep10_hist:
+        return
+
+    def _void_row(row: dict) -> None:
+        if not isinstance(row, dict):
+            return
+        _stamp_review_void(row)
+        row["session_date"] = _REJECT_REVIEW_PILE_DAY
+        row["skip_matrix_learn"] = True
+
+    pile_ids = {str(p.get("id") or "") for p in pile if p.get("id")}
+    for row in pile:
+        _void_row(row)
+    for row in history:
+        rid = str(row.get("id") or "")
+        if (rid and rid in pile_ids) or row in sep10_hist:
+            _void_row(row)
+
+    st.session_state.room3_pending_reviews = [
+        p for p in pending if not _row_matches_voided_session(p)
+    ]
+    st.session_state.room3_trade_history = history
+    st.session_state[_REJECT_REVIEW_PILE_FLAG] = True
+    _void_session_reviews_no_learn()
+    _persist_screener_to_disk()
 
 
 def _snapshot_open_positions_by_ticker() -> dict[str, dict]:
@@ -4917,6 +4972,8 @@ def _hydrate_screener_from_disk() -> None:
             )
         )
         st.session_state.room3_filed_session_dates = merged_filed[-30:]
+    if snap.get("rejected_review_pile_2026_09_10"):
+        st.session_state[_REJECT_REVIEW_PILE_FLAG] = True
     lot_snap = (snap.get("lots") or []) if snap else []
     if isinstance(lot_snap, list) and lot_snap and not (st.session_state.get("room3_lots") or []):
         st.session_state.room3_lots = lot_snap
@@ -5028,6 +5085,9 @@ def _persist_screener_to_disk() -> None:
         "pending_reviews": st.session_state.get("room3_pending_reviews") or [],
         "review_void_ids": st.session_state.get("room3_review_void_ids") or [],
         "filed_session_dates": st.session_state.get("room3_filed_session_dates") or [],
+        "rejected_review_pile_2026_09_10": bool(
+            st.session_state.get(_REJECT_REVIEW_PILE_FLAG)
+        ),
         "starting_equity": float(st.session_state.get("room3_starting_equity") or 0),
         "tradable_today": float(st.session_state.get("room3_tradable_today") or 0),
         "tradable_pct": float(st.session_state.get("room3_tradable_pct_ui") or 0),

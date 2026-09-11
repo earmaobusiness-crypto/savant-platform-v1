@@ -473,6 +473,256 @@ class lots:
         return dict(q[best_i])
 
     @staticmethod
+    def _placeholder_tf(raw: str) -> bool:
+        t = str(raw or "").strip()
+        return t in ("", "—", "-", "MKT", "Alpaca") or t.upper().startswith("ALPACA")
+
+    @staticmethod
+    def _placeholder_strat(raw: str) -> bool:
+        s = str(raw or "").strip()
+        return s in ("", "—", "-", "Alpaca", "matrix", "Alpaca BUY", "Alpaca SELL") or s.upper().startswith(
+            "ALPACA"
+        )
+
+    @staticmethod
+    def row_needs_identity(row: dict[str, Any] | None) -> bool:
+        if not isinstance(row, dict):
+            return False
+        tf = str(row.get("matrix_timeframe") or row.get("timeframe") or "").strip()
+        strat = str(row.get("matrix_strategy") or row.get("strategy") or "").strip()
+        return lots._placeholder_tf(tf) or lots._placeholder_strat(strat)
+
+    @staticmethod
+    def _exit_is_fresh(row: dict[str, Any], window_sec: int = 180) -> bool:
+        text = str(row.get("exit_time") or "").strip()
+        if not text or text in ("—", "-"):
+            return False
+        try:
+            parts = text.replace(".", ":").split(":")
+            h, m = int(parts[0]), int(parts[1])
+            s = int(parts[2]) if len(parts) > 2 else 0
+        except (TypeError, ValueError, IndexError):
+            return False
+        now = datetime.now(ET)
+        then = now.replace(hour=h, minute=m, second=s, microsecond=0)
+        return abs((now - then).total_seconds()) <= window_sec
+
+    @staticmethod
+    def _apply_label(row: dict[str, Any], label: dict[str, Any] | None) -> dict[str, Any]:
+        out = dict(row or {})
+        if not isinstance(label, dict):
+            return out
+        letter = str(label.get("letter") or label.get("strategy") or "").strip()
+        tf = str(label.get("tf") or label.get("timeframe") or "").strip()
+        layout = str(label.get("layout_id") or "").strip()
+        if letter and not lots._placeholder_strat(letter):
+            out["strategy"] = letter
+            out["matrix_strategy"] = letter
+            out["letter"] = letter
+        if tf and not lots._placeholder_tf(tf):
+            out["timeframe"] = tf
+            out["matrix_timeframe"] = tf
+        if layout and layout not in ("—", "-", "NEW_LAYOUT", "PURGATORY_PENDING"):
+            out["layout_id"] = layout
+            out["matrix_layout"] = layout
+        if label.get("lot_id") and not out.get("lot_id"):
+            out["lot_id"] = label.get("lot_id")
+        if not lots.row_needs_identity(out):
+            out["identity_frozen"] = True
+        return out
+
+    @staticmethod
+    def remember_entry_fill(session_state: Any, payload: dict[str, Any] | None) -> None:
+        """Keep buy TF/letter so a later Alpaca FIFO close can stamp the same lot."""
+        if session_state is None or not isinstance(payload, dict):
+            return
+        ticker = str(payload.get("ticker") or payload.get("symbol") or "").upper()
+        if not ticker:
+            return
+        try:
+            cache = dict(session_state.get("room3_fill_meta_by_ticker") or {})
+        except Exception:
+            cache = {}
+        entry = dict(cache.get(ticker) or {})
+        letter = lots.letter_token(
+            str(payload.get("layout_id") or ""),
+            str(payload.get("strategy") or payload.get("letter") or ""),
+        )
+        tf = str(payload.get("tf") or payload.get("timeframe") or "").strip()
+        try:
+            qty = abs(float(payload.get("qty") or 0))
+        except (TypeError, ValueError):
+            qty = 0.0
+        fills = list(entry.get("fills") or [])
+        fills.append(
+            {
+                "strategy": letter,
+                "letter": letter,
+                "timeframe": tf,
+                "tf": tf,
+                "qty": qty,
+                "entry_order_id": str(payload.get("order_id") or payload.get("entry_order_id") or ""),
+                "lot_id": str(payload.get("lot_id") or ""),
+                "layout_id": str(payload.get("layout_id") or ""),
+            }
+        )
+        entry["fills"] = fills[-24:]
+        if letter:
+            entry["strategy"] = letter
+        if tf:
+            entry["timeframe"] = tf
+        cache[ticker] = entry
+        try:
+            session_state.room3_fill_meta_by_ticker = cache
+        except Exception:
+            pass
+
+    @staticmethod
+    def _label_from_fill_cache(session_state: Any, row: dict[str, Any]) -> dict[str, Any] | None:
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker or session_state is None:
+            return None
+        try:
+            cache = (session_state.get("room3_fill_meta_by_ticker") or {}).get(ticker) or {}
+        except Exception:
+            cache = {}
+        fills = list(cache.get("fills") or [])
+        oid = str(row.get("entry_order_id") or "").strip()
+        if oid:
+            for fill in reversed(fills):
+                if not isinstance(fill, dict):
+                    continue
+                if str(fill.get("entry_order_id") or "").strip() == oid:
+                    return fill
+        try:
+            want_qty = abs(float(row.get("qty") or 0))
+        except (TypeError, ValueError):
+            want_qty = 0.0
+        for fill in reversed(fills):
+            if not isinstance(fill, dict) or fill.get("applied_close_id"):
+                continue
+            try:
+                fq = abs(float(fill.get("qty") or 0))
+            except (TypeError, ValueError):
+                fq = 0.0
+            letter = str(fill.get("letter") or fill.get("strategy") or "").strip()
+            tf = str(fill.get("timeframe") or fill.get("tf") or "").strip()
+            if want_qty > 0 and fq > 0 and abs(fq - want_qty) <= max(1.0, 0.05 * want_qty):
+                if letter and not lots._placeholder_strat(letter) and tf and not lots._placeholder_tf(tf):
+                    fill["applied_close_id"] = str(row.get("id") or "")
+                    try:
+                        full = dict(session_state.get("room3_fill_meta_by_ticker") or {})
+                        full[ticker] = dict(cache)
+                        full[ticker]["fills"] = fills
+                        session_state.room3_fill_meta_by_ticker = full
+                    except Exception:
+                        pass
+                    return fill
+        return None
+
+    @staticmethod
+    def _peel_open_lot_label(
+        session_state: Any, ticker: str, qty: float
+    ) -> dict[str, Any] | None:
+        opens = lots.open_lots(session_state, ticker)
+        if not opens:
+            return None
+        pick = None
+        want = abs(float(qty or 0))
+        for lot in opens:
+            try:
+                lq = abs(float(lot.get("qty") or 0))
+            except (TypeError, ValueError):
+                lq = 0.0
+            if want > 0 and lq > 0 and abs(lq - want) <= max(1.0, 0.05 * want):
+                pick = lot
+                break
+        if pick is None:
+            pick = opens[0]
+        closed = lots.close_lot(session_state, str(pick.get("id") or ""))
+        if not closed:
+            return None
+        return lots.take_close_label(
+            session_state,
+            ticker,
+            qty=abs(float(pick.get("qty") or qty or 0)),
+            lot_id=str(pick.get("id") or ""),
+            letter=str(pick.get("letter") or pick.get("strategy") or ""),
+            tf=str(pick.get("tf") or ""),
+        )
+
+    @staticmethod
+    def stamp_close_row(
+        session_state: Any,
+        row: dict[str, Any] | None,
+        *,
+        peel_open: bool = False,
+    ) -> dict[str, Any]:
+        """Put TF + letter on an Alpaca FIFO close. Never inherit the live watch-book stamp."""
+        out = dict(row or {})
+        if not lots.row_needs_identity(out):
+            return out
+        fill = lots._label_from_fill_cache(session_state, out)
+        if fill:
+            out = lots._apply_label(out, fill)
+            if not lots.row_needs_identity(out):
+                return out
+        ticker = str(out.get("ticker") or "").upper()
+        try:
+            qty = abs(float(out.get("qty") or 0))
+        except (TypeError, ValueError):
+            qty = 0.0
+        letter = str(out.get("letter") or "").strip()
+        if lots._placeholder_strat(letter):
+            letter = ""
+        tf = str(out.get("timeframe") or "").strip()
+        if lots._placeholder_tf(tf):
+            tf = ""
+        label = lots.take_close_label(
+            session_state,
+            ticker,
+            qty=qty,
+            lot_id=str(out.get("lot_id") or ""),
+            letter=letter,
+            tf=tf,
+        )
+        if label is None and peel_open and lots._exit_is_fresh(out):
+            label = lots._peel_open_lot_label(session_state, ticker, qty)
+        if label:
+            out = lots._apply_label(out, label)
+        return out
+
+    @staticmethod
+    def stamp_unlabeled_closes(session_state: Any, *, peel_open: bool = False) -> int:
+        """Retry unlabeled history after close_lot queues labels. Pulse must do this — UI paint is not enough."""
+        if session_state is None:
+            return 0
+        try:
+            hist = list(session_state.get("room3_trade_history") or [])
+        except Exception:
+            return 0
+        n = 0
+        for row in hist:
+            if not isinstance(row, dict):
+                continue
+            status = str(row.get("status") or "").lower()
+            closed = "closed" in status or "closing" in status or bool(row.get("exit_price") is not None)
+            if not closed:
+                continue
+            if not lots.row_needs_identity(row):
+                continue
+            stamped = lots.stamp_close_row(session_state, row, peel_open=peel_open)
+            if not lots.row_needs_identity(stamped):
+                row.update(stamped)
+                n += 1
+        if n:
+            try:
+                session_state.room3_trade_history = hist
+            except Exception:
+                pass
+        return n
+
+    @staticmethod
     def unused_close_labels(session_state: Any, ticker: str = "") -> list[dict[str, Any]]:
         sym = str(ticker or "").upper()
         out = []

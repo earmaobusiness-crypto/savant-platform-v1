@@ -16,4 +16,6 @@ find_lot = _lots.find_lot
 append_lot = _lots.append_lot
 close_lot = _lots.close_lot
 close_lots_for_ticker = _lots.close_lots_for_ticker
-peel_qty = _lots.peel_qty
+stamp_close_row = _lots.stamp_close_row
+stamp_unlabeled_closes = _lots.stamp_unlabeled_closes
+remember_entry_fill = _lots.remember_entry_fill

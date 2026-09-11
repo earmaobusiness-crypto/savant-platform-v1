@@ -334,6 +334,8 @@ def score_line_against_repertoire(
     """DNA match result + blended display score for the watch book."""
     layouts = list(repertoire.get("layouts") or [])
     vec = build_live_feature_vector(line)
+    if vec:
+        line["live_vector"] = vec
     if not vec or not layouts:
         warmth = min(
             1.0,
@@ -538,6 +540,7 @@ def _try_queue_child_entry(
             strategy=strategy,
             layout_id=layout_id,
             structural=structural,
+            session_state=session_state,
         )
         child["patience_note"] = trigger_note
         if not ready:
@@ -589,7 +592,8 @@ def _try_queue_child_entry(
             sig["add_lot"] = add_lot
             sig["letter"] = letter
             sig["trigger"] = trigger_note
-            sig["order_style"] = room3_recipes.order_style_for(
+            sig["order_style"] = room3_review_learn.resolved_order_style(
+                session_state,
                 strategy,
                 tf,
                 layout_id=layout_id,
@@ -695,10 +699,21 @@ def _enter_on_print(
     tf: str,
     layout_id: str,
     structural_move_pct: float,
+    session_state: Any = None,
 ) -> bool:
     """1m pops: the start is the trigger. Everything else waits a first hold/pullback."""
     tf_n = room3_recipes.normalize_tf(tf)
-    style = room3_recipes.order_style_for(
+    if session_state is not None and room3_review_learn.force_patient_entry(
+        session_state, layout_id, strategy, tf_n
+    ):
+        return False
+    style = room3_review_learn.resolved_order_style(
+        session_state,
+        strategy,
+        tf_n,
+        layout_id=layout_id,
+        structural_move_pct=structural_move_pct,
+    ) if session_state is not None else room3_recipes.order_style_for(
         strategy,
         tf_n,
         layout_id=layout_id,
@@ -736,6 +751,7 @@ def _entry_trigger_ready(
     strategy: str,
     layout_id: str,
     structural: float,
+    session_state: Any = None,
 ) -> tuple[bool, str]:
     """
     ≥85% = family. Fill = letter style, else TF fallback.
@@ -749,7 +765,7 @@ def _entry_trigger_ready(
         line["family_armed_px"] = last_px
         last_h = float((slices[-1] or {}).get("h") or last_px) if slices else last_px
         line["family_armed_high"] = last_h
-        if _enter_on_print(strategy, tf, layout_id, structural):
+        if _enter_on_print(strategy, tf, layout_id, structural, session_state):
             line["trigger_phase"] = "ready"
         else:
             line["trigger_phase"] = "wait_dip"
@@ -757,7 +773,7 @@ def _entry_trigger_ready(
         line["entry_skipped_late"] = True
         line["trigger_phase"] = "skipped"
         return False, "late · move already gone · skip"
-    if _enter_on_print(strategy, tf, layout_id, structural):
+    if _enter_on_print(strategy, tf, layout_id, structural, session_state):
         return True, "pop · enter now"
     tf_n = room3_recipes.normalize_tf(tf)
     armed_px = float(line.get("family_armed_px") or last_px)

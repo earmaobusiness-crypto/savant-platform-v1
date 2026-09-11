@@ -298,27 +298,7 @@ def _sync_alpaca(ss: PulseState, *, paper: bool) -> dict[str, Any]:
         rid = str(row.get("id") or "")
         if rid and rid in seen:
             continue
-        stamped = dict(row)
-        letter = str(stamped.get("strategy") or "").strip()
-        tf = str(stamped.get("timeframe") or "").strip()
-        if letter.lower() in ("", "—", "-", "alpaca", "none") or tf in ("", "—", "-"):
-            try:
-                qty = abs(float(stamped.get("qty") or 0))
-            except (TypeError, ValueError):
-                qty = 0.0
-            label = lots.take_close_label(
-                ss,
-                str(stamped.get("ticker") or "").upper(),
-                qty=qty,
-                letter="",
-                tf="",
-            )
-            if label:
-                stamped["timeframe"] = label.get("tf") or tf
-                stamped["strategy"] = label.get("letter") or letter
-                stamped["matrix_timeframe"] = stamped["timeframe"]
-                stamped["matrix_strategy"] = stamped["strategy"]
-                stamped["identity_frozen"] = True
+        stamped = lots.stamp_close_row(ss, dict(row), peel_open=True)
         hist.append(stamped)
         if rid:
             seen.add(rid)
@@ -342,6 +322,7 @@ def _flatten_open(ss: PulseState, *, paper: bool) -> str:
         except Exception:
             continue
     _sync_alpaca(ss, paper=paper)
+    room3_lots.stamp_unlabeled_closes(ss, peel_open=False)
     ss.room3_watch_book = room3_watcher.empty_book()
     ss.room3_filter_universe = []
     ss.room3_engine_armed = False
@@ -387,7 +368,7 @@ def _apply_signals(ss: PulseState, book: dict[str, Any], signals: list[dict], *,
                     line["state"] = "in"
                     line.pop("order_pending", None)
                     fill_qty = filled if filled > 0 else abs(float(sig.get("qty") or 0))
-                    room3_lots.append_lot(
+                    lot_row = room3_lots.append_lot(
                         ss,
                         {
                             "ticker": sym,
@@ -400,6 +381,18 @@ def _apply_signals(ss: PulseState, book: dict[str, Any], signals: list[dict], *,
                             or line.get("entry_price"),
                             "entry_match_pct": sig.get("match_pct") or line.get("entry_match_pct"),
                             "structural_move_pct": line.get("entry_structural_move_pct"),
+                        },
+                    )
+                    room3_lots.remember_entry_fill(
+                        ss,
+                        {
+                            "ticker": sym,
+                            "tf": str(lot_row.get("tf") or sig.get("timeframe") or ""),
+                            "strategy": str(lot_row.get("letter") or lot_row.get("strategy") or ""),
+                            "layout_id": str(lot_row.get("layout_id") or ""),
+                            "qty": fill_qty,
+                            "order_id": str(result.get("order_id") or ""),
+                            "lot_id": str(lot_row.get("id") or ""),
                         },
                     )
                     open_syms.add(sym)
@@ -422,6 +415,15 @@ def _apply_signals(ss: PulseState, book: dict[str, Any], signals: list[dict], *,
             lot_id = str(sig.get("lot_id") or "")
             if lot_id:
                 room3_lots.close_lot(ss, lot_id)
+            else:
+                letter = room3_lots.letter_token(
+                    str(sig.get("layout_id") or ""),
+                    str(sig.get("strategy") or ""),
+                )
+                tf = str(sig.get("timeframe") or "")
+                peeled = room3_lots.open_lots(ss, sym, tf=tf, letter=letter)
+                if peeled:
+                    room3_lots.close_lot(ss, str(peeled[0].get("id") or ""))
             remain = room3_lots.open_lots(
                 ss, sym, tf=str(sig.get("timeframe") or line.get("timeframe") or "")
             )
@@ -498,6 +500,7 @@ def run_pulse(ss: PulseState) -> str:
     )
     _apply_signals(ss, book, signals, paper=paper, new_ok=new_ok)
     ss.room3_watch_book = book
+    room3_engine.lots.stamp_unlabeled_closes(ss, peel_open=False)
     note = (
         f"unattended · {'ARMED' if ss.get('room3_engine_armed') else 'DISARMED'} · "
         f"{room3_engine.session_label(window)} · ticks {book.get('ticks') or 0}"
