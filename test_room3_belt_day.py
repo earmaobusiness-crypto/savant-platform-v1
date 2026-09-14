@@ -35,3 +35,32 @@ def test_same_day_belt_snap_is_not_stale():
 def test_empty_belt_snap_is_not_stale():
     assert t.belt_snapshot_is_stale({}, "2026-09-14") is False
     assert t.belt_snapshot_is_stale({"filter_universe": []}, "2026-09-14") is False
+
+
+def test_maps_without_chips_are_stale():
+    assert t.belt_snapshot_is_stale(
+        {"watch_book": {"lines": {"FTFT:1m": {"ticker": "FTFT"}}}},
+        "2026-09-14",
+    )
+
+
+def test_empty_belt_drops_white_rows():
+    import room3_watcher as w
+
+    book = w.set_filter_universe(w.empty_book(), ["FTFT", "TNON"])
+    assert "FTFT:1m" in book["lines"]
+    book["lines"]["FTFT:1m"]["state"] = "in"
+    cleared = w.set_filter_universe(book, [])
+    assert cleared["lines"] == {}
+    assert cleared["universe"] == []
+
+
+def test_leftover_open_keeps_maps_off_belt():
+    import room3_watcher as w
+
+    book = w.set_filter_universe(w.empty_book(), ["FTFT"])
+    book["keep_tickers"] = ["FTFT"]
+    leftover = w.set_filter_universe(book, [])
+    assert leftover["universe"] == []
+    assert "FTFT:1m" in leftover["lines"]
+    assert leftover["lines"]["FTFT:1m"]["in_filter"] is False

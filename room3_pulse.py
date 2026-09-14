@@ -153,6 +153,53 @@ def mark_unattended(ss: Any) -> None:
     b.room3_engine_armed = armed and not killed
 
 
+def _pulse_day_key() -> str:
+    now = datetime.now(ET)
+    return (now - timedelta(days=1) if now.hour < 4 else now).strftime("%Y-%m-%d")
+
+
+def stamp_belt_and_maps(ss: Any, *, force: bool = False) -> None:
+    """× chips and white map rows stay the same set. Worker must not keep one without the other."""
+    uni = [str(t).upper() for t in (ss.get("room3_filter_universe") or []) if str(t).strip()]
+    b = bag()
+    today = _pulse_day_key()
+    worker_uni = [str(t).upper() for t in (b.get("room3_filter_universe") or []) if str(t).strip()]
+    worker_snap = {
+        "filter_universe": worker_uni,
+        "filter_universe_day_key": str(b.get("filter_universe_day_key") or ""),
+        "watch_book": b.get("room3_watch_book") or {},
+        "tradable_day_key": str(b.get("tradable_day_key") or ""),
+        "session_day_key": str(b.get("session_day_key") or ""),
+    }
+    armed = bool(ss.get("room3_engine_armed"))
+    killed = bool(ss.get("room3_kill_flat"))
+    session_fresh_disarm = (
+        (not armed) and (not killed) and (not bool(ss.get("room3_unattended_armed")))
+    )
+    bag_live = bool(
+        b.get("room3_unattended_armed")
+        or (b.get("room3_engine_armed") and worker_uni)
+    )
+    stale_worker = room3_watcher.belt_snapshot_is_stale(worker_snap, today)
+    if not force and bag_live and session_fresh_disarm and not stale_worker:
+        return
+    book = dict(ss.get("room3_watch_book") or room3_watcher.empty_book())
+    book["keep_tickers"] = sorted(_open_syms(ss))
+    book = room3_watcher.set_filter_universe(book, uni)
+    try:
+        ss.room3_watch_book = book
+    except Exception:
+        try:
+            ss["room3_watch_book"] = book
+        except Exception:
+            pass
+    b.room3_filter_universe = uni
+    b.room3_watch_book = book
+    b.filter_universe_day_key = today
+    if worker_owns_execution():
+        persist_bag(b)
+
+
 def sync_operator_into_worker(ss: Any) -> None:
     mark_unattended(ss)
     if not worker_owns_execution():
@@ -188,6 +235,7 @@ def _hydrate_bag_from_disk(ss: PulseState) -> None:
     ss.room3_unattended_armed = bool(snap.get("unattended_armed"))
     ss.room3_kill_flat = False
     ss.room3_pause_entries = False
+    today_key = _pulse_day_key()
     ss.room3_filter_universe = list(snap.get("filter_universe") or [])
     ss.room3_allowed_sessions = list(
         snap.get("allowed_sessions") or [room3_engine.SESSION_RTH]
@@ -198,8 +246,6 @@ def _hydrate_bag_from_disk(ss: PulseState) -> None:
         ss.room3_tradable_today = 0.0
     ss.room3_tradable_operator_set = bool(snap.get("tradable_operator_set"))
     snap_day = str(snap.get("tradable_day_key") or "")
-    now = datetime.now(ET)
-    today_key = (now - timedelta(days=1) if now.hour < 4 else now).strftime("%Y-%m-%d")
     if snap_day and snap_day != today_key:
         ss.room3_tradable_today = 0.0
         ss.room3_tradable_operator_set = False
@@ -207,14 +253,17 @@ def _hydrate_bag_from_disk(ss: PulseState) -> None:
     ss.room3_lot_close_labels = list(snap.get("lot_close_labels") or [])
     ss.room3_trade_history = list(snap.get("trade_history") or [])
     ss.room3_fill_meta_by_ticker = dict(snap.get("fill_meta_by_ticker") or {})
-    book = snap.get("watch_book") if isinstance(snap.get("watch_book"), dict) else None
-    uni = list(ss.room3_filter_universe)
-    if book:
-        ss.room3_watch_book = room3_watcher.set_filter_universe(book, uni)
+    if room3_watcher.belt_snapshot_is_stale(snap, today_key):
+        ss.room3_filter_universe = []
+        ss.room3_watch_book = room3_watcher.empty_book()
+        ss.filter_universe_day_key = today_key
     else:
-        ss.room3_watch_book = room3_watcher.set_filter_universe(
-            room3_watcher.empty_book(), uni
-        )
+        book = snap.get("watch_book") if isinstance(snap.get("watch_book"), dict) else {}
+        book = dict(book or room3_watcher.empty_book())
+        book["keep_tickers"] = []
+        uni = list(ss.room3_filter_universe)
+        ss.room3_watch_book = room3_watcher.set_filter_universe(book, uni)
+        ss.filter_universe_day_key = str(snap.get("filter_universe_day_key") or today_key)
     ss.room3_open_positions = []
     ss.room3_cash_claimed = 0.0
     room3_bridge.ensure_layout_library(ss)
@@ -231,11 +280,11 @@ def persist_bag(ss: PulseState) -> None:
             "fill_meta_by_ticker": dict(ss.get("room3_fill_meta_by_ticker") or {}),
             "tradable_today": float(ss.get("room3_tradable_today") or 0),
             "tradable_operator_set": bool(ss.get("room3_tradable_operator_set")),
-            "tradable_day_key": (
-                datetime.now(ET) - timedelta(days=1)
-                if datetime.now(ET).hour < 4
-                else datetime.now(ET)
-            ).strftime("%Y-%m-%d"),
+            "tradable_day_key": _pulse_day_key(),
+            "filter_universe_day_key": str(
+                ss.get("filter_universe_day_key") or _pulse_day_key()
+            ),
+            "session_day_key": str(ss.get("session_day_key") or _pulse_day_key()),
             "allowed_sessions": list(ss.get("room3_allowed_sessions") or []),
             "unattended_armed": bool(ss.get("room3_unattended_armed")),
             "engine_armed": bool(ss.get("room3_engine_armed")),
@@ -263,7 +312,7 @@ def _session_trading_allowed(ss: PulseState) -> bool:
     return window in set(ss.get("room3_allowed_sessions") or [])
 
 
-def _open_syms(ss: PulseState) -> set[str]:
+def _open_syms(ss: Any) -> set[str]:
     out: set[str] = set()
     for pos in ss.get("room3_open_positions") or []:
         if not isinstance(pos, dict):
@@ -522,10 +571,9 @@ def run_pulse(ss: PulseState) -> str:
         persist_bag(ss)
         return note
     uni = [str(t).upper() for t in (ss.get("room3_filter_universe") or []) if str(t).strip()]
-    ss.room3_watch_book = room3_watcher.set_filter_universe(
-        ss.get("room3_watch_book") or room3_watcher.empty_book(),
-        uni,
-    )
+    book = dict(ss.get("room3_watch_book") or room3_watcher.empty_book())
+    book["keep_tickers"] = sorted(_open_syms(ss))
+    ss.room3_watch_book = room3_watcher.set_filter_universe(book, uni)
     window = room3_engine.detect_session_window()
     allowed = set(ss.get("room3_allowed_sessions") or [])
     new_ok = _session_trading_allowed(ss)

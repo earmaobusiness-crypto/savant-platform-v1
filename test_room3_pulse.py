@@ -164,6 +164,108 @@ def test_flatten_leftover_keeps_pulse_alive(monkeypatch=None):
     assert "TNON" in str(ss.get("room3_filter_universe") or [])
 
 
+def test_stamp_force_clears_maps_with_empty_belt():
+    import room3_watcher as w
+
+    book = w.set_filter_universe(w.empty_book(), ["FTFT"])
+    _reset_bag(
+        {
+            "room3_engine_armed": False,
+            "room3_filter_universe": ["FTFT"],
+            "room3_watch_book": book,
+            "filter_universe_day_key": "2000-01-01",
+        }
+    )
+    ss = room3_pulse.PulseState(
+        {
+            "room3_engine_armed": False,
+            "room3_kill_flat": False,
+            "room3_filter_universe": [],
+            "room3_watch_book": book,
+            "room3_open_positions": [],
+        }
+    )
+    room3_pulse.stamp_belt_and_maps(ss, force=True)
+    assert (ss.get("room3_watch_book") or {}).get("lines") == {}
+    assert room3_pulse.bag().get("room3_filter_universe") == []
+    assert (room3_pulse.bag().get("room3_watch_book") or {}).get("lines") == {}
+
+
+def test_stamp_fresh_disarm_keeps_today_pulse_maps():
+    import room3_watcher as w
+
+    today = room3_pulse._pulse_day_key()
+    book = w.set_filter_universe(w.empty_book(), ["GELS"])
+    _reset_bag(
+        {
+            "room3_unattended_armed": True,
+            "room3_engine_armed": True,
+            "room3_filter_universe": ["GELS"],
+            "room3_watch_book": book,
+            "filter_universe_day_key": today,
+        }
+    )
+    fresh = room3_pulse.PulseState(
+        {
+            "room3_engine_armed": False,
+            "room3_kill_flat": False,
+            "room3_unattended_armed": False,
+            "room3_filter_universe": [],
+            "room3_watch_book": w.empty_book(),
+            "room3_open_positions": [],
+        }
+    )
+    room3_pulse.stamp_belt_and_maps(fresh)
+    assert room3_pulse.bag().get("room3_filter_universe") == ["GELS"]
+    assert "GELS:1m" in ((room3_pulse.bag().get("room3_watch_book") or {}).get("lines") or {})
+
+
+def test_stamp_wipes_stale_friday_maps_on_fresh_tab():
+    import room3_watcher as w
+
+    book = w.set_filter_universe(w.empty_book(), ["FTFT", "TNON"])
+    _reset_bag(
+        {
+            "room3_unattended_armed": True,
+            "room3_engine_armed": True,
+            "room3_filter_universe": ["FTFT", "TNON"],
+            "room3_watch_book": book,
+            "filter_universe_day_key": "2000-01-01",
+        }
+    )
+    fresh = room3_pulse.PulseState(
+        {
+            "room3_engine_armed": False,
+            "room3_kill_flat": False,
+            "room3_unattended_armed": False,
+            "room3_filter_universe": [],
+            "room3_watch_book": book,
+            "room3_open_positions": [],
+        }
+    )
+    room3_pulse.stamp_belt_and_maps(fresh)
+    assert room3_pulse.bag().get("room3_filter_universe") == []
+    assert (room3_pulse.bag().get("room3_watch_book") or {}).get("lines") == {}
+
+
+def test_stamp_keeps_leftover_open_maps():
+    import room3_watcher as w
+
+    book = w.set_filter_universe(w.empty_book(), ["FTFT"])
+    _reset_bag({"room3_filter_universe": [], "room3_watch_book": book})
+    ss = room3_pulse.PulseState(
+        {
+            "room3_filter_universe": [],
+            "room3_watch_book": book,
+            "room3_open_positions": [{"ticker": "FTFT", "qty": 4}],
+            "room3_engine_armed": False,
+            "room3_kill_flat": False,
+        }
+    )
+    room3_pulse.stamp_belt_and_maps(ss, force=True)
+    assert "FTFT:1m" in ((ss.get("room3_watch_book") or {}).get("lines") or {})
+
+
 if __name__ == "__main__":
     test_pulse_state_duck_types_session()
     test_mark_unattended_requires_arm_and_belt()
@@ -172,4 +274,8 @@ if __name__ == "__main__":
     test_kill_stops_unattended()
     test_session_must_be_flat_when_closed()
     test_flatten_leftover_keeps_pulse_alive()
+    test_stamp_force_clears_maps_with_empty_belt()
+    test_stamp_fresh_disarm_keeps_today_pulse_maps()
+    test_stamp_wipes_stale_friday_maps_on_fresh_tab()
+    test_stamp_keeps_leftover_open_maps()
     print("ok")

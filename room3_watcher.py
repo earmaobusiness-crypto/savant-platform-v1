@@ -82,6 +82,31 @@ def line_key(ticker: str, tf: str) -> str:
     return f"{str(ticker).upper()}:{tf}"
 
 
+def belt_snapshot_is_stale(snap: dict[str, Any] | None, today: str) -> bool:
+    """Saved belt/maps from another trading day must not paint × chips or white rows."""
+    blob = snap if isinstance(snap, dict) else {}
+    belt_day = str(blob.get("filter_universe_day_key") or "").strip()[:10]
+    if belt_day:
+        return belt_day != today
+    names = [str(x).strip() for x in (blob.get("filter_universe") or []) if str(x).strip()]
+    if not names:
+        names = [
+            str(x).strip()
+            for x in ((blob.get("last") or {}).get("tickers") or [])
+            if str(x).strip()
+        ]
+    if not names and (blob.get("watch_book") or {}).get("lines"):
+        names = ["_maps_"]
+    if not names:
+        return False
+    day = str(
+        blob.get("session_day_key") or blob.get("tradable_day_key") or ""
+    ).strip()[:10]
+    if day and day != today:
+        return True
+    return True
+
+
 def _plain(value: Any) -> Any:
     if value is None or isinstance(value, (str, bool, int)):
         return value
@@ -251,10 +276,6 @@ def _ensure_lines_for_universe(book: dict[str, Any]) -> None:
             continue
         line["in_filter"] = False
         if t in keep:
-            continue
-        if line.get("state") == "in":
-            continue
-        if line.get("state") == "committed" and _entry_stamped(line):
             continue
         drop_keys.append(key)
     for key in drop_keys:

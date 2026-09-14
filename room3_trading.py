@@ -320,6 +320,7 @@ def init_room3_session_state() -> None:
         _maybe_flatten_on_cloud_process_boot()
         room3_pulse.ensure_worker()
         room3_pulse.sync_operator_into_worker(st.session_state)
+        room3_pulse.stamp_belt_and_maps(st.session_state)
         _maybe_overnight_belt_clear()
         _void_session_reviews_no_learn()
         _reject_review_pile_once()
@@ -990,30 +991,16 @@ def _trading_day_display(day_key: str) -> str:
 def belt_snapshot_is_stale(snap: dict | None, today: str | None = None) -> bool:
     """Friday's saved belt must not paint × chips on the next trading day."""
     today = str(today or _trading_day_key())
-    blob = snap if isinstance(snap, dict) else {}
-    belt_day = str(blob.get("filter_universe_day_key") or "").strip()[:10]
-    if belt_day:
-        return belt_day != today
-    names = [str(x).strip() for x in (blob.get("filter_universe") or []) if str(x).strip()]
-    if not names:
-        names = [
-            str(x).strip()
-            for x in ((blob.get("last") or {}).get("tickers") or [])
-            if str(x).strip()
-        ]
-    if not names:
-        return False
-    day = str(
-        blob.get("session_day_key") or blob.get("tradable_day_key") or ""
-    ).strip()[:10]
-    if day and day != today:
-        return True
-    # Old snaps never stamped a belt day — don't keep leftover × chips.
-    return True
+    return room3_watcher.belt_snapshot_is_stale(snap, today)
 
 
 def _clear_belt_chips() -> None:
-    """Drop × chips + disk/URL so a new session day matches the wiped white maps."""
+    """Drop × chips and their white map rows together. Leftover open piles stay."""
+    book = st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
+    if isinstance(book, dict):
+        book = dict(book)
+        book["keep_tickers"] = []
+        st.session_state.room3_watch_book = book
     ingest_filter_universe([])
     st.session_state.room3_screener_last = {
         "ok": True,
@@ -1024,6 +1011,7 @@ def _clear_belt_chips() -> None:
         "source": "session",
     }
     _sync_belt_query([])
+    room3_pulse.stamp_belt_and_maps(st.session_state, force=True)
     _persist_screener_to_disk()
 
 
@@ -4941,6 +4929,7 @@ def ingest_filter_universe(tickers: list[str] | None) -> None:
         st.session_state.room3_filter_universe,
     )
     room3_pulse.mark_unattended(st.session_state)
+    room3_pulse.stamp_belt_and_maps(st.session_state, force=True)
     _persist_screener_to_disk()
 
 
@@ -5119,16 +5108,8 @@ def _hydrate_screener_from_disk() -> None:
         session_flat = False
     stale_belt = belt_snapshot_is_stale(snap, today_key)
     if session_flat or stale_belt:
-        # New trading day / overnight: do not resurrect Friday × chips without maps.
-        if stale_belt or session_flat:
-            st.session_state.room3_filter_universe = []
-            last = dict(st.session_state.get("room3_screener_last") or {})
-            if last.get("tickers"):
-                last["tickers"] = []
-                last["passed"] = 0
-                st.session_state.room3_screener_last = last
-            _sync_belt_query([])
-            _persist_screener_to_disk()
+        # New trading day: × chips and white maps leave together.
+        _clear_belt_chips()
         return
     if uni and not (st.session_state.get("room3_filter_universe") or []):
         st.session_state.room3_filter_universe = uni
@@ -5146,11 +5127,12 @@ def _hydrate_screener_from_disk() -> None:
                 if isinstance(line, dict):
                     room3_recipes.scrub_purgatory_line(line)
             st.session_state.room3_watch_book = restored_book
-    if uni:
-        st.session_state.room3_watch_book = room3_watcher.set_filter_universe(
-            st.session_state.get("room3_watch_book") or room3_watcher.empty_book(),
-            uni,
-        )
+    # × chips and white rows stay the same set. Empty belt drops watching maps.
+    book = st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
+    if isinstance(book, dict):
+        book = dict(book)
+        book["keep_tickers"] = []
+    st.session_state.room3_watch_book = room3_watcher.set_filter_universe(book, uni)
 
 
 def _persist_screener_to_disk() -> None:
@@ -5598,6 +5580,7 @@ def _room3_heartbeat_fragment() -> None:
         st.caption("Heartbeat idle · broker disconnected")
         return
     room3_pulse.sync_operator_into_worker(st.session_state)
+    room3_pulse.stamp_belt_and_maps(st.session_state)
     _clear_dead_entry_locks()
     _relabel_unlabeled_closes_from_lots()
     if room3_pulse.worker_owns_execution():
@@ -5860,8 +5843,8 @@ def _render_rth_filter_attach() -> None:
 
     st.caption(
         "Drop **adds** names — they stay through this trading day "
-        "(maps keep going after a trade exits). Next trading day (4 AM ET) "
-        "starts a clean belt. "
+        "(× chips and white map rows stay together). Next trading day (4 AM ET) "
+        "starts a clean belt — both gone. "
         "Several names can be in at once (same TF is fine). "
         f"Max {room3_watcher.MAX_NAMES} on the belt; × removes one; Clear wipes all."
     )
