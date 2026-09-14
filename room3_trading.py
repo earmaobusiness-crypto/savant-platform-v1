@@ -315,6 +315,7 @@ def init_room3_session_state() -> None:
             room3_bridge.ensure_layout_library(st.session_state)
             st.session_state.pop("room3_repertoire_cache", None)
             st.session_state.room3_layout_hydrated_once = True
+        _maybe_roll_trading_session()
         _maybe_reconnect_alpaca()
         _maybe_flatten_on_cloud_process_boot()
         room3_pulse.ensure_worker()
@@ -986,6 +987,46 @@ def _trading_day_display(day_key: str) -> str:
         return day_key
 
 
+def belt_snapshot_is_stale(snap: dict | None, today: str | None = None) -> bool:
+    """Friday's saved belt must not paint × chips on the next trading day."""
+    today = str(today or _trading_day_key())
+    blob = snap if isinstance(snap, dict) else {}
+    belt_day = str(blob.get("filter_universe_day_key") or "").strip()[:10]
+    if belt_day:
+        return belt_day != today
+    names = [str(x).strip() for x in (blob.get("filter_universe") or []) if str(x).strip()]
+    if not names:
+        names = [
+            str(x).strip()
+            for x in ((blob.get("last") or {}).get("tickers") or [])
+            if str(x).strip()
+        ]
+    if not names:
+        return False
+    day = str(
+        blob.get("session_day_key") or blob.get("tradable_day_key") or ""
+    ).strip()[:10]
+    if day and day != today:
+        return True
+    # Old snaps never stamped a belt day — don't keep leftover × chips.
+    return True
+
+
+def _clear_belt_chips() -> None:
+    """Drop × chips + disk/URL so a new session day matches the wiped white maps."""
+    ingest_filter_universe([])
+    st.session_state.room3_screener_last = {
+        "ok": True,
+        "tickers": [],
+        "passed": 0,
+        "at": datetime.now(ET).strftime("%H:%M:%S ET"),
+        "pipeline": "day-roll",
+        "source": "session",
+    }
+    _sync_belt_query([])
+    _persist_screener_to_disk()
+
+
 def _maybe_roll_trading_session() -> None:
     """Reset intraday RAM when the trading day rolls (4 AM ET). Archive closed trades first."""
     key = _trading_day_key()
@@ -1013,8 +1054,9 @@ def _maybe_roll_trading_session() -> None:
     st.session_state.room3_tradable_pct_ui = 0.0
     st.session_state.room3_tradable_operator_set = False
     st.session_state.room3_tradable_custom_input = 0.0
+    _clear_belt_chips()
     log = list(st.session_state.room3_matrix_sync_log or [])
-    log.append(f"Session rolled · new trading day {key} (4 AM ET) · closed trades kept")
+    log.append(f"Session rolled · new trading day {key} (4 AM ET) · closed trades kept · belt cleared")
     st.session_state.room3_matrix_sync_log = log[-12:]
     _persist_screener_to_disk()
 
@@ -5075,8 +5117,18 @@ def _hydrate_screener_from_disk() -> None:
         session_flat = _session_must_be_flat()
     except Exception:
         session_flat = False
-    if session_flat:
-        # Post-off / overnight: do not resurrect Friday's belt without maps.
+    stale_belt = belt_snapshot_is_stale(snap, today_key)
+    if session_flat or stale_belt:
+        # New trading day / overnight: do not resurrect Friday × chips without maps.
+        if stale_belt or session_flat:
+            st.session_state.room3_filter_universe = []
+            last = dict(st.session_state.get("room3_screener_last") or {})
+            if last.get("tickers"):
+                last["tickers"] = []
+                last["passed"] = 0
+                st.session_state.room3_screener_last = last
+            _sync_belt_query([])
+            _persist_screener_to_disk()
         return
     if uni and not (st.session_state.get("room3_filter_universe") or []):
         st.session_state.room3_filter_universe = uni
@@ -5123,6 +5175,8 @@ def _persist_screener_to_disk() -> None:
         "tradable_pct": float(st.session_state.get("room3_tradable_pct_ui") or 0),
         "tradable_operator_set": bool(st.session_state.get("room3_tradable_operator_set")),
         "tradable_day_key": _trading_day_key(),
+        "filter_universe_day_key": _trading_day_key(),
+        "session_day_key": str(st.session_state.get("room3_session_day_key") or _trading_day_key()),
         "allowed_sessions": list(st.session_state.get("room3_allowed_sessions") or []),
         "unattended_armed": bool(st.session_state.get("room3_unattended_armed")),
         "engine_armed": bool(st.session_state.get("room3_engine_armed")),
@@ -5788,8 +5842,6 @@ def _render_rth_filter_attach() -> None:
     trading_now = _session_trading_allowed()
     window = room3_engine.detect_session_window()
     belt = list(st.session_state.get("room3_filter_universe") or [])
-    if not belt:
-        belt = list((st.session_state.get("room3_screener_last") or {}).get("tickers") or [])
 
     flash = st.session_state.pop("room3_belt_flash", None)
     if flash:
@@ -5807,7 +5859,9 @@ def _render_rth_filter_attach() -> None:
         )
 
     st.caption(
-        "Drop **adds** names — they stay all day and keep mapping after a trade exits. "
+        "Drop **adds** names — they stay through this trading day "
+        "(maps keep going after a trade exits). Next trading day (4 AM ET) "
+        "starts a clean belt. "
         "Several names can be in at once (same TF is fine). "
         f"Max {room3_watcher.MAX_NAMES} on the belt; × removes one; Clear wipes all."
     )
