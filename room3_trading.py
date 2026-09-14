@@ -5173,7 +5173,9 @@ def _persist_screener_to_disk() -> None:
         return
     operator.update(
         {
-            "watch_book": st.session_state.get("room3_watch_book") or {},
+            "watch_book": room3_watcher.watch_book_for_disk(
+                st.session_state.get("room3_watch_book")
+            ),
             "trade_history": _store_trade_history(),
             "fill_meta_by_ticker": st.session_state.get("room3_fill_meta_by_ticker") or {},
             "lots": st.session_state.get("room3_lots") or [],

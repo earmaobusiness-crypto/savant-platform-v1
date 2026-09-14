@@ -196,7 +196,9 @@ def stamp_belt_and_maps(ss: Any, *, force: bool = False) -> None:
     b.room3_filter_universe = uni
     b.room3_watch_book = book
     b.filter_universe_day_key = today
-    if worker_owns_execution():
+    # Heartbeat must not rewrite the snapshot every 15s — that froze the whole Cloud app.
+    # Drop / Clear / day-roll pass force=True so Friday maps actually leave disk.
+    if force and worker_owns_execution():
         persist_bag(b)
 
 
@@ -273,7 +275,7 @@ def persist_bag(ss: PulseState) -> None:
     room3_screener.merge_screener_snapshot(
         {
             "filter_universe": list(ss.get("room3_filter_universe") or []),
-            "watch_book": ss.get("room3_watch_book") or {},
+            "watch_book": room3_watcher.watch_book_for_disk(ss.get("room3_watch_book")),
             "lots": list(ss.get("room3_lots") or []),
             "lot_close_labels": list(ss.get("room3_lot_close_labels") or []),
             "trade_history": list(ss.get("room3_trade_history") or [])[-500:],

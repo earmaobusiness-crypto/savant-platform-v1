@@ -64,3 +64,15 @@ def test_leftover_open_keeps_maps_off_belt():
     assert leftover["universe"] == []
     assert "FTFT:1m" in leftover["lines"]
     assert leftover["lines"]["FTFT:1m"]["in_filter"] is False
+
+
+def test_watch_book_for_disk_drops_slices():
+    import room3_watcher as w
+
+    book = w.set_filter_universe(w.empty_book(), ["FTFT"])
+    book["lines"]["FTFT:1m"]["slices"] = [{"c": 1}, {"c": 2}]
+    book["_overlay_cache"] = {"FTFT": {"t": 1}}
+    slim = w.watch_book_for_disk(book)
+    assert "slices" not in slim["lines"]["FTFT:1m"]
+    assert "_overlay_cache" not in slim
+    assert slim["lines"]["FTFT:1m"]["ticker"] == "FTFT"

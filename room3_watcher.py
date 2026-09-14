@@ -78,6 +78,19 @@ def empty_book() -> dict[str, Any]:
     }
 
 
+def watch_book_for_disk(book: dict[str, Any] | None) -> dict[str, Any]:
+    """Persist map identity, not bar slices — those refill on the next tick."""
+    raw = dict(book or empty_book())
+    slim_lines: dict[str, Any] = {}
+    for key, line in (raw.get("lines") or {}).items():
+        if not isinstance(line, dict):
+            continue
+        slim_lines[str(key)] = {k: v for k, v in line.items() if k != "slices"}
+    raw["lines"] = slim_lines
+    raw.pop("_overlay_cache", None)
+    return raw
+
+
 def line_key(ticker: str, tf: str) -> str:
     return f"{str(ticker).upper()}:{tf}"
 
