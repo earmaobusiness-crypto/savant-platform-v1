@@ -423,6 +423,10 @@ def _apply_signals(ss: PulseState, book: dict[str, Any], signals: list[dict], *,
                             or line.get("entry_price"),
                             "entry_match_pct": sig.get("match_pct") or line.get("entry_match_pct"),
                             "structural_move_pct": line.get("entry_structural_move_pct"),
+                            "exit_style": sig.get("exit_style") or line.get("exit_style"),
+                            "exit_r_frac": sig.get("exit_r_frac") or line.get("exit_r_frac"),
+                            "exit_stop_px": sig.get("exit_stop_px") or line.get("exit_stop_px"),
+                            "exit_tgt_px": sig.get("exit_tgt_px") or line.get("exit_tgt_px"),
                         },
                     )
                     room3_lots.remember_entry_fill(

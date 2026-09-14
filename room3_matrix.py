@@ -7,6 +7,7 @@ Self-contained (no Room 2 imports). Uses repertoire from room3_bridge.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timedelta, time as dtime
 from typing import Any
 
 import room3_engine
@@ -19,6 +20,38 @@ MATCH_THRESHOLD_PCT = 85
 CHILD_READY_PCT = 84  # show a strategy sub-lane; fire still waits for MATCH_THRESHOLD
 EXIT_MATCH_FLOOR_PCT = 65
 STOP_LOSS_PCT = 2.5
+# 5B (1M) execution — DNA still detects; this is the shot.
+# Belt replay (Yahoo 1m, 2026-09-02..11): RVOL≥2, first of day, lookback-low
+# stop, half of ~33% pack structural. Not a next-ticket promise.
+FIVE_B_DUMP_RANGE_PCT = 4.0
+FIVE_B_VOL_MULT = 2.0
+FIVE_B_RVOL_MIN = 2.0
+FIVE_B_LOOKBACK_BARS = 5
+FIVE_B_STOP_FLOOR_PCT = 2.0
+FIVE_B_TARGET_FRAC = 0.165  # half of stored ~33% structural
+FIVE_B_HOLD_SEC = 8 * 60  # only leftover 1R lots (5b_range_1r)
+FIVE_B_COOL_SEC = 15 * 60
+FIVE_B_SKIP_UNTIL = dtime(9, 45)
+FIVE_B_EXIT_STYLE = "5b_pack_half"
+FIVE_B_EXIT_STYLE_LEGACY = "5b_range_1r"
+# 2A (1M) — still the up-window gene; live tape must look like the packs
+# (window still going up, fat bar, RVOL), then dip/pack tactics.
+# Belt replay Yahoo 1m 2026-09-02..11. Not a next-ticket promise.
+TWO_A_VEL_PCT = 10.0
+TWO_A_BAR_RANGE_PCT = 5.0
+TWO_A_RVOL_MIN = 2.0
+TWO_A_DIP_FRAC = 0.01
+TWO_A_TARGET_FRAC = 0.10  # clipped for WR ≥51% on the Sep belt
+TWO_A_SKIP_UNTIL = dtime(10, 0)
+TWO_A_EXIT_STYLE = "2a_pack_half"
+TWO_A_COOL_SEC = 15 * 60
+# Placeholder Handle for every other live letter (not 5B / 2A). Gene stays
+# nearest ≥85% same TF. Tactics only — specialize later.
+PH_EXIT_STYLE = "ph_pack"
+PH_RVOL_MIN = 2.0
+PH_DIP_FRAC_1M = 0.01
+PH_SKIP_UNTIL = dtime(9, 45)
+PH_COOL_SEC = 15 * 60
 MIN_SLICES = {"1m": 5, "5m": 4, "15m": 3}
 PLACEHOLDER_LAYOUTS = frozenset(
     {"NEW_LAYOUT", "PURGATORY_PENDING", "Purgatory", "PURGATORY", "—", "-", ""}
@@ -365,16 +398,386 @@ def score_line_against_repertoire(
 def _approaching_day_close() -> bool:
     """Last ~20 minutes of post — take the second-best exit rather than hold overnight."""
     try:
-        from datetime import datetime, time as dtime
-
-        import room3_engine
-
         now = datetime.now(room3_engine.ET)
         if room3_engine.detect_session_window(now) != room3_engine.SESSION_POST:
             return False
         return now.time() >= dtime(19, 40)
     except Exception:
         return False
+
+
+def _is_5b_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("5B") and "1M" in token
+
+
+def _is_2a_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("2A") and "1M" in token
+
+
+def _5b_now(session_state: Any = None) -> datetime:
+    try:
+        if session_state is not None:
+            forced = session_state.get("_now_et")
+            if isinstance(forced, datetime):
+                return forced
+    except Exception:
+        pass
+    return datetime.now(room3_engine.ET)
+
+
+def _rth_before(session_state: Any, until: dtime) -> bool:
+    now = _5b_now(session_state)
+    try:
+        if room3_engine.detect_session_window(now) != room3_engine.SESSION_RTH:
+            return False
+    except Exception:
+        if now.time() < dtime(9, 30) or now.time() >= dtime(16, 0):
+            return False
+    return now.time() < until
+
+
+def _5b_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, FIVE_B_SKIP_UNTIL)
+
+
+def _2a_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, TWO_A_SKIP_UNTIL)
+
+
+def _ph_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, PH_SKIP_UNTIL)
+
+
+def _5b_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_5b_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _5b_bag_set(session_state: Any, key: str, ticker: str, value: str) -> None:
+    if session_state is None:
+        return
+    token = str(ticker or "").upper()
+    if not token:
+        return
+    try:
+        bag = dict(session_state.get(key) or {})
+        bag[token] = value
+        setattr(session_state, key, bag)
+    except Exception:
+        try:
+            session_state[key] = {**(session_state.get(key) or {}), token: value}
+        except Exception:
+            pass
+
+
+def _5b_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=FIVE_B_COOL_SEC)
+    _5b_bag_set(session_state, "room3_5b_cool_until", ticker, until.isoformat())
+
+
+def _pack_mark_stop_cool(session_state: Any, ticker: str, lot: dict[str, Any]) -> None:
+    strat = str(lot.get("strategy") or lot.get("letter") or "")
+    tf = str(lot.get("tf") or lot.get("timeframe") or "1m")
+    style = str(lot.get("exit_style") or "")
+    if _is_2a_1m(strat, tf) or style == TWO_A_EXIT_STYLE:
+        _2a_mark_stop_cool(session_state, ticker)
+        return
+    if _is_5b_1m(strat, tf) or style in (FIVE_B_EXIT_STYLE, FIVE_B_EXIT_STYLE_LEGACY):
+        _5b_mark_stop_cool(session_state, ticker)
+        return
+    if style == PH_EXIT_STYLE and room3_recipes.normalize_tf(tf) == "1m":
+        _ph_mark_stop_cool(session_state, ticker, strat)
+
+
+def _5b_day_key(session_state: Any = None) -> str:
+    return _5b_now(session_state).strftime("%Y-%m-%d")
+
+
+def _5b_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_5b_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _5b_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_5b_used_day", ticker, _5b_day_key(session_state))
+
+
+def _2a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_2a_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _2a_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=TWO_A_COOL_SEC)
+    _5b_bag_set(session_state, "room3_2a_cool_until", ticker, until.isoformat())
+
+
+def _2a_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_2a_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _2a_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_2a_used_day", ticker, _5b_day_key(session_state))
+
+
+def _ph_token(ticker: str, strategy: str) -> str:
+    return f"{str(ticker or '').upper()}|{str(strategy or '').strip()}".upper()
+
+
+def _ph_used_today(session_state: Any, ticker: str, strategy: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_ph_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(_ph_token(ticker, strategy)) or "") == _5b_day_key(session_state)
+
+
+def _ph_mark_used(session_state: Any, ticker: str, strategy: str) -> None:
+    _5b_bag_set(
+        session_state,
+        "room3_ph_used_day",
+        _ph_token(ticker, strategy),
+        _5b_day_key(session_state),
+    )
+
+
+def _ph_cool_until(session_state: Any, ticker: str, strategy: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_ph_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(_ph_token(ticker, strategy))
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _ph_mark_stop_cool(session_state: Any, ticker: str, strategy: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=PH_COOL_SEC)
+    _5b_bag_set(
+        session_state,
+        "room3_ph_cool_until",
+        _ph_token(ticker, strategy),
+        until.isoformat(),
+    )
+
+
+def _window_velocity_pct(slices: list[dict[str, Any]]) -> float:
+    closes = [float(s.get("c") or 0) for s in slices if float(s.get("c") or 0) > 0]
+    if len(closes) < 3:
+        return 0.0
+    total = 0.0
+    prev = closes[0]
+    for c in closes[1:]:
+        if prev > 0:
+            total += (c - prev) / prev
+        prev = c
+    return total * 100.0
+
+
+def _2a_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Live tape must look like 2A packs: still-up window, fat green bar, RVOL."""
+    if len(slices) < 2:
+        return False
+    if _window_velocity_pct(slices) < TWO_A_VEL_PCT:
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < TWO_A_BAR_RANGE_PCT:
+        return False
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_c <= last_o:
+        return False
+    if _5b_tape_rvol(slices) < TWO_A_RVOL_MIN:
+        return False
+    return True
+
+
+def _bar_range_pct(bar: dict[str, Any]) -> float:
+    c = float(bar.get("c") or 0)
+    h = float(bar.get("h") or 0)
+    l = float(bar.get("l") or 0)
+    if c <= 0:
+        return 0.0
+    return (h - l) / c * 100.0
+
+
+def _5b_tape_rvol(slices: list[dict[str, Any]]) -> float:
+    """Window volume vs median bar volume (already-printed slices only)."""
+    vols = [float(s.get("v") or 0) for s in slices if float(s.get("v") or 0) > 0]
+    if not vols:
+        return 0.0
+    ordered = sorted(vols)
+    n = len(ordered)
+    mid = n // 2
+    med = ordered[mid] if n % 2 else 0.5 * (ordered[mid - 1] + ordered[mid])
+    if med <= 0:
+        return 0.0
+    return float(sum(vols) / (med * n))
+
+
+def _5b_climax_ok(slices: list[dict[str, Any]]) -> bool:
+    """Prior 1m dumps ≥4% on ≥2× volume; this bar holds the low and closes green."""
+    if len(slices) < 2:
+        return False
+    prior, last = slices[-2], slices[-1]
+    pc = float(prior.get("c") or 0)
+    po = float(prior.get("o") or pc)
+    if pc <= 0 or po <= 0:
+        return False
+    if pc >= po:
+        return False
+    if _bar_range_pct(prior) < FIVE_B_DUMP_RANGE_PCT:
+        return False
+    vols = [float(s.get("v") or 0) for s in slices[:-1]]
+    avg_v = (sum(vols) / len(vols)) if vols else 0.0
+    if avg_v <= 0 or float(prior.get("v") or 0) < FIVE_B_VOL_MULT * avg_v:
+        return False
+    last_l = float(last.get("l") or last.get("c") or 0)
+    prior_l = float(prior.get("l") or pc)
+    last_c = float(last.get("c") or 0)
+    last_o = float(last.get("o") or last_c)
+    hold = last_l >= prior_l
+    green = last_c > last_o or last_c > pc
+    return bool(hold and green)
+
+
+def _5b_r_frac(slices: list[dict[str, Any]]) -> float:
+    last = slices[-1] if slices else {}
+    rng = _bar_range_pct(last)
+    return max(rng / 100.0, FIVE_B_STOP_FLOOR_PCT / 100.0)
+
+
+def _5b_target_frac(structural_move_pct: float = 0.0) -> float:
+    move = abs(float(structural_move_pct or 0))
+    if move > 0:
+        return max(move / 100.0 * 0.5, FIVE_B_STOP_FLOOR_PCT / 100.0)
+    return FIVE_B_TARGET_FRAC
+
+
+def _5b_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    """Lookback-low stop (floor 2%), half-structural target. Prices for a long."""
+    px = float(fill or 0)
+    if px <= 0:
+        return 0.0, 0.0, FIVE_B_STOP_FLOOR_PCT / 100.0
+    win = slices[-FIVE_B_LOOKBACK_BARS:] if slices else []
+    lows = [float(s.get("l") or 0) for s in win if float(s.get("l") or 0) > 0]
+    lo_win = min(lows) if lows else px * (1.0 - FIVE_B_STOP_FLOOR_PCT / 100.0)
+    floor = px * (1.0 - FIVE_B_STOP_FLOOR_PCT / 100.0)
+    stop_px = min(lo_win, floor) if lo_win < px else floor
+    if stop_px >= px:
+        stop_px = floor
+    tgt_px = px * (1.0 + _5b_target_frac(structural_move_pct))
+    stop_frac = max((px - stop_px) / px, FIVE_B_STOP_FLOOR_PCT / 100.0)
+    return stop_px, tgt_px, stop_frac
+
+
+def _2a_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    stop_px, _, stop_frac = _5b_pack_exits(slices, fill, 0.0)
+    px = float(fill or 0)
+    tgt_px = px * (1.0 + TWO_A_TARGET_FRAC) if px > 0 else 0.0
+    return stop_px, tgt_px, stop_frac
+
+
+def _ph_lookback(tf: str) -> int:
+    tf_n = room3_recipes.normalize_tf(tf)
+    if tf_n == "1m":
+        return FIVE_B_LOOKBACK_BARS
+    return 3
+
+
+def _ph_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+    tf: str = "1m",
+) -> tuple[float, float, float]:
+    px = float(fill or 0)
+    n = _ph_lookback(tf)
+    if px <= 0:
+        return 0.0, 0.0, FIVE_B_STOP_FLOOR_PCT / 100.0
+    win = slices[-n:] if slices else []
+    lows = [float(s.get("l") or 0) for s in win if float(s.get("l") or 0) > 0]
+    floor = px * (1.0 - FIVE_B_STOP_FLOOR_PCT / 100.0)
+    lo_win = min(lows) if lows else floor
+    stop_px = min(lo_win, floor) if lo_win < px else floor
+    if stop_px >= px:
+        stop_px = floor
+    tgt_px = px * (1.0 + _5b_target_frac(structural_move_pct))
+    stop_frac = max((px - stop_px) / px, FIVE_B_STOP_FLOOR_PCT / 100.0)
+    return stop_px, tgt_px, stop_frac
+
+
+def _5b_lot_exit(lot: dict[str, Any]) -> bool:
+    style = str(lot.get("exit_style") or "")
+    if style in (FIVE_B_EXIT_STYLE, FIVE_B_EXIT_STYLE_LEGACY, TWO_A_EXIT_STYLE, PH_EXIT_STYLE):
+        return True
+    strat = str(lot.get("strategy") or lot.get("letter") or "")
+    tf = str(lot.get("tf") or lot.get("timeframe") or "1m")
+    return _is_5b_1m(strat, tf) or _is_2a_1m(strat, tf)
 
 
 def _ticker_already_engaged(
@@ -599,6 +1002,45 @@ def _try_queue_child_entry(
                 layout_id=layout_id,
                 structural_move_pct=structural,
             )
+            if _is_5b_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _5b_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = FIVE_B_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = FIVE_B_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5b_mark_used(session_state, ticker)
+            elif _is_2a_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _2a_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = TWO_A_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = TWO_A_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _2a_mark_used(session_state, ticker)
+            else:
+                stop_px, tgt_px, stop_frac = _ph_pack_exits(
+                    slices, last_px, structural, tf
+                )
+                sig["exit_style"] = PH_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = PH_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _ph_mark_used(session_state, ticker, strategy)
         line["nearest_strategy"] = strategy
         line["patience"] = False
         line.pop("patience_note", None)
@@ -612,7 +1054,11 @@ def _lot_should_exit(
     cur_match: int,
     last_px: float,
     patience: bool,
+    bar: dict[str, Any] | None = None,
+    session_state: Any = None,
 ) -> str:
+    if _5b_lot_exit(lot):
+        return _5b_should_exit(lot, last_px=last_px, bar=bar, session_state=session_state)
     entry_px = float(lot.get("entry_px") or 0)
     entry_match = int(lot.get("entry_match_pct") or MATCH_THRESHOLD_PCT)
     structural = float(lot.get("structural_move_pct") or 0)
@@ -631,6 +1077,57 @@ def _lot_should_exit(
         return f"stop {pnl_pct:.1f}%"
     if structural > 0 and pnl_pct >= structural * 0.5:
         return f"target {pnl_pct:.1f}%"
+    if _approaching_day_close():
+        return "day close · second-best exit"
+    return ""
+
+
+def _5b_should_exit(
+    lot: dict[str, Any],
+    *,
+    last_px: float,
+    bar: dict[str, Any] | None = None,
+    session_state: Any = None,
+) -> str:
+    entry_px = float(lot.get("entry_px") or 0)
+    if entry_px <= 0:
+        return ""
+    frac = float(lot.get("exit_r_frac") or FIVE_B_STOP_FLOOR_PCT / 100.0)
+    stop_px = float(lot.get("exit_stop_px") or entry_px * (1.0 - frac))
+    style = str(lot.get("exit_style") or FIVE_B_EXIT_STYLE)
+    if style == FIVE_B_EXIT_STYLE_LEGACY:
+        tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + frac))
+    else:
+        if style == TWO_A_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + TWO_A_TARGET_FRAC))
+        else:
+            tgt_px = float(
+                lot.get("exit_tgt_px")
+                or entry_px * (1.0 + _5b_target_frac(float(lot.get("structural_move_pct") or 0)))
+            )
+    lo = float((bar or {}).get("l") or last_px or 0)
+    hi = float((bar or {}).get("h") or last_px or 0)
+    if lo > 0 and lo <= stop_px:
+        pnl_pct = (stop_px - entry_px) / entry_px * 100.0
+        return f"stop {pnl_pct:.1f}%"
+    if last_px > 0 and last_px <= stop_px:
+        pnl_pct = (last_px - entry_px) / entry_px * 100.0
+        return f"stop {pnl_pct:.1f}%"
+    if hi >= tgt_px or (last_px > 0 and last_px >= tgt_px):
+        pnl_pct = (tgt_px - entry_px) / entry_px * 100.0
+        return f"target {pnl_pct:.1f}%"
+    if style == FIVE_B_EXIT_STYLE_LEGACY:
+        raw_ts = lot.get("entry_ts") or ""
+        if raw_ts:
+            try:
+                opened = datetime.fromisoformat(str(raw_ts))
+                if opened.tzinfo is None:
+                    opened = opened.replace(tzinfo=room3_engine.ET)
+                if (_5b_now(session_state) - opened).total_seconds() >= FIVE_B_HOLD_SEC:
+                    pnl_pct = ((last_px - entry_px) / entry_px * 100.0) if last_px else 0.0
+                    return f"time {pnl_pct:.1f}%"
+            except (TypeError, ValueError):
+                pass
     if _approaching_day_close():
         return "day close · second-best exit"
     return ""
@@ -701,25 +1198,8 @@ def _enter_on_print(
     structural_move_pct: float,
     session_state: Any = None,
 ) -> bool:
-    """1m pops: the start is the trigger. Everything else waits a first hold/pullback."""
-    tf_n = room3_recipes.normalize_tf(tf)
-    if session_state is not None and room3_review_learn.force_patient_entry(
-        session_state, layout_id, strategy, tf_n
-    ):
-        return False
-    style = room3_review_learn.resolved_order_style(
-        session_state,
-        strategy,
-        tf_n,
-        layout_id=layout_id,
-        structural_move_pct=structural_move_pct,
-    ) if session_state is not None else room3_recipes.order_style_for(
-        strategy,
-        tf_n,
-        layout_id=layout_id,
-        structural_move_pct=structural_move_pct,
-    )
-    return tf_n == "1m" and style == "market"
+    """Placeholder Handle waits a dip. 5B / 2A have their own shot. No 1m pop-now."""
+    return False
 
 
 def _reset_entry_trigger(line: dict[str, Any]) -> None:
@@ -742,6 +1222,158 @@ def _entry_is_late(line: dict[str, Any], last_px: float, structural: float) -> b
     return False
 
 
+def _5b_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _5b_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"5B · cool {mins}m after stop"
+    if _5b_open_chop(session_state):
+        return False, "5B · skip 9:30–9:45"
+    if _5b_used_today(session_state, ticker):
+        return False, "5B · first of day already used"
+    if not _5b_climax_ok(slices):
+        return False, "5B · wait dump-then-hold"
+    if _5b_tape_rvol(slices) < FIVE_B_RVOL_MIN:
+        return False, "5B · wait RVOL ≥2"
+    line["trigger_phase"] = "ready"
+    return True, "5B · climax · RVOL · enter now"
+
+
+def _2a_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _2a_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"2A · cool {mins}m after stop"
+    if _2a_open_chop(session_state):
+        return False, "2A · skip 9:30–10:00"
+    if _2a_used_today(session_state, ticker):
+        return False, "2A · first of day already used"
+    phase = str(line.get("trigger_phase") or "")
+    hunting = phase in ("wait_dip", "wait_reclaim", "ready")
+    if not hunting and not _2a_gene_ok(slices):
+        _reset_entry_trigger(line)
+        return False, "2A · wait pack-like up tape"
+    last = slices[-1] if slices else {}
+    last_c = float(last.get("c") or last_px)
+    last_l = float(last.get("l") or last_c)
+    last_o = float(last.get("o") or last_c)
+    prior = slices[-2] if len(slices) >= 2 else last
+    prior_h = float(prior.get("h") or prior.get("c") or 0)
+    if not line.get("family_armed_px"):
+        line["family_armed_px"] = last_px
+        line["family_armed_high"] = float(last.get("h") or last_px)
+        line["trigger_phase"] = "wait_dip"
+    armed_px = float(line.get("family_armed_px") or last_px)
+    phase = str(line.get("trigger_phase") or "wait_dip")
+    if phase == "ready":
+        return True, "2A · dip-reclaim · enter now"
+    if phase == "wait_dip":
+        if last_l <= armed_px * (1.0 - TWO_A_DIP_FRAC) or last_c < armed_px:
+            line["trigger_phase"] = "wait_reclaim"
+            line["pullback_low"] = last_l
+            return False, "2A · 1% dip · waiting reclaim"
+        return False, "2A · waiting 1% pullback"
+    if phase == "wait_reclaim":
+        pb = min(float(line.get("pullback_low") or last_l), last_l)
+        line["pullback_low"] = pb
+        green = last_c > last_o
+        if last_c > pb and (prior_h <= 0 or last_c >= prior_h) and green:
+            line["trigger_phase"] = "ready"
+            return True, "2A · dip-reclaim · enter now"
+        return False, "2A · waiting green reclaim"
+    return False, "2A · waiting trigger"
+
+
+def _ph_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    tf: str,
+    strategy: str,
+    layout_id: str,
+    structural: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    """Shared Handle for letters that are not 5B / 2A. Detect is still ≥85% same TF."""
+    ticker = str(line.get("ticker") or "").upper()
+    tf_n = room3_recipes.normalize_tf(tf)
+    cool = _ph_cool_until(session_state, ticker, strategy)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"{strategy} · cool {mins}m after stop"
+    if tf_n in ("1m", "5m") and _ph_open_chop(session_state):
+        return False, f"{strategy} · skip 9:30–9:45"
+    if _ph_used_today(session_state, ticker, strategy):
+        return False, f"{strategy} · first of day already used"
+    if tf_n == "1m" and _5b_tape_rvol(slices) < PH_RVOL_MIN:
+        return False, f"{strategy} · wait RVOL ≥2"
+    last = slices[-1] if slices else {}
+    last_c = float(last.get("c") or last_px)
+    last_l = float(last.get("l") or last_c)
+    last_o = float(last.get("o") or last_c)
+    prior = slices[-2] if len(slices) >= 2 else last
+    prior_h = float(prior.get("h") or prior.get("c") or 0)
+    if not line.get("family_armed_px"):
+        line["family_armed_px"] = last_px
+        line["family_armed_high"] = float(last.get("h") or last_px)
+        line["trigger_phase"] = "wait_dip"
+    if _entry_is_late(line, last_px, structural):
+        line["entry_skipped_late"] = True
+        line["trigger_phase"] = "skipped"
+        return False, "late · move already gone · skip"
+    armed_px = float(line.get("family_armed_px") or last_px)
+    phase = str(line.get("trigger_phase") or "wait_dip")
+    dip_frac = (
+        PH_DIP_FRAC_1M
+        if tf_n == "1m"
+        else (0.012 if tf_n == "15m" else 0.008)
+    )
+    if phase == "ready":
+        return True, f"{strategy} · dip-reclaim · enter now"
+    if phase == "wait_dip":
+        if last_l <= armed_px * (1.0 - dip_frac) or last_c < armed_px:
+            line["trigger_phase"] = "wait_reclaim"
+            line["pullback_low"] = last_l
+            return False, f"{strategy} · waiting pullback"
+        return False, f"{strategy} · waiting first pullback"
+    if phase == "wait_reclaim":
+        pb = min(float(line.get("pullback_low") or last_l), last_l)
+        line["pullback_low"] = pb
+        if tf_n == "15m":
+            if last_c > pb and last_c >= armed_px * 0.997:
+                line["trigger_phase"] = "ready"
+                return True, f"{strategy} · 15m hold after pullback"
+            return False, f"{strategy} · waiting hold after dip"
+        green = last_c > last_o
+        if tf_n == "1m" and not green:
+            return False, f"{strategy} · waiting green reclaim"
+        if last_c > pb and (prior_h <= 0 or last_c >= prior_h):
+            if tf_n == "1m" and not green:
+                return False, f"{strategy} · waiting green reclaim"
+            line["trigger_phase"] = "ready"
+            return True, f"{strategy} · dip-reclaim · enter now"
+        return False, f"{strategy} · waiting reclaim after dip"
+    return False, f"{strategy} · waiting trigger"
+
+
 def _entry_trigger_ready(
     line: dict[str, Any],
     slices: list[dict[str, Any]],
@@ -761,50 +1393,20 @@ def _entry_trigger_ready(
         return False, "late · skipped · wait next pattern"
     if last_px <= 0:
         return False, "no last print"
-    if not line.get("family_armed_px"):
-        line["family_armed_px"] = last_px
-        last_h = float((slices[-1] or {}).get("h") or last_px) if slices else last_px
-        line["family_armed_high"] = last_h
-        if _enter_on_print(strategy, tf, layout_id, structural, session_state):
-            line["trigger_phase"] = "ready"
-        else:
-            line["trigger_phase"] = "wait_dip"
-    if _entry_is_late(line, last_px, structural):
-        line["entry_skipped_late"] = True
-        line["trigger_phase"] = "skipped"
-        return False, "late · move already gone · skip"
-    if _enter_on_print(strategy, tf, layout_id, structural, session_state):
-        return True, "pop · enter now"
-    tf_n = room3_recipes.normalize_tf(tf)
-    armed_px = float(line.get("family_armed_px") or last_px)
-    last = slices[-1] if slices else {}
-    last_c = float(last.get("c") or last_px)
-    last_l = float(last.get("l") or last_c)
-    dip_frac = 0.012 if tf_n == "15m" else 0.008 if tf_n == "5m" else 0.004
-    phase = str(line.get("trigger_phase") or "wait_dip")
-    if phase == "ready":
-        return True, "trigger ready"
-    if phase == "wait_dip":
-        if last_l <= armed_px * (1.0 - dip_frac) or last_c < armed_px:
-            line["trigger_phase"] = "wait_reclaim"
-            line["pullback_low"] = last_l
-            return False, "≥85% · first dip · waiting reclaim"
-        return False, "≥85% · waiting first pullback"
-    if phase == "wait_reclaim":
-        pb = min(float(line.get("pullback_low") or last_l), last_l)
-        line["pullback_low"] = pb
-        if tf_n == "15m":
-            if last_c > pb and last_c >= armed_px * 0.997:
-                line["trigger_phase"] = "ready"
-                return True, "15m hold after pullback"
-            return False, "15m · waiting hold after dip"
-        prior = slices[-2] if len(slices) >= 2 else last
-        prior_high = float(prior.get("h") or prior.get("c") or 0)
-        if last_c > pb and (prior_high <= 0 or last_c >= prior_high):
-            line["trigger_phase"] = "ready"
-            return True, "reclaim after pullback"
-        return False, "waiting reclaim after dip"
-    return False, "≥85% · waiting trigger"
+    if _is_5b_1m(strategy, tf):
+        return _5b_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_2a_1m(strategy, tf):
+        return _2a_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    return _ph_entry_ready(
+        line,
+        slices,
+        last_px=last_px,
+        tf=tf,
+        strategy=strategy,
+        layout_id=layout_id,
+        structural=structural,
+        session_state=session_state,
+    )
 
 
 def _ss_get(session_state: Any, key: str, default: Any = None) -> Any:
@@ -1347,7 +1949,12 @@ def maybe_queue_matrix_signals(
                 child = children_by.get(letter) or {}
                 lot_match = int(child.get("match_pct") or line.get("match_pct") or 0)
                 exit_reason = _lot_should_exit(
-                    lot, cur_match=lot_match, last_px=last_px, patience=True
+                    lot,
+                    cur_match=lot_match,
+                    last_px=last_px,
+                    patience=True,
+                    bar=slices[-1] if slices else None,
+                    session_state=session_state,
                 )
                 if not exit_reason or line.get("exit_signal"):
                     if not exit_reason and lot_match < EXIT_MATCH_FLOOR_PCT:
@@ -1378,6 +1985,8 @@ def maybe_queue_matrix_signals(
                     es["ref_price"] = last_px
                     es["lot_id"] = str(lot.get("id") or "")
                     es["letter"] = letter
+                if str(exit_reason).startswith("stop") and _5b_lot_exit(lot):
+                    _pack_mark_stop_cool(session_state, ticker, lot)
                 return
         else:
             entry_px = float(line.get("entry_price") or last_px or 0)
@@ -1388,9 +1997,22 @@ def maybe_queue_matrix_signals(
                 "entry_px": entry_px,
                 "entry_match_pct": entry_match,
                 "structural_move_pct": structural,
+                "strategy": str(line.get("entry_strategy") or ""),
+                "letter": str(line.get("entry_strategy") or ""),
+                "tf": tf,
+                "exit_style": line.get("exit_style"),
+                "exit_r_frac": line.get("exit_r_frac"),
+                "exit_stop_px": line.get("exit_stop_px"),
+                "exit_tgt_px": line.get("exit_tgt_px"),
+                "entry_ts": line.get("entry_ts"),
             }
             exit_reason = _lot_should_exit(
-                dummy, cur_match=cur_match, last_px=last_px, patience=True
+                dummy,
+                cur_match=cur_match,
+                last_px=last_px,
+                patience=True,
+                bar=slices[-1] if slices else None,
+                session_state=session_state,
             )
             if exit_reason and not line.get("exit_signal"):
                 qty = _open_qty(session_state, ticker)
@@ -1413,6 +2035,8 @@ def maybe_queue_matrix_signals(
                 es = line.get("exit_signal")
                 if isinstance(es, dict):
                     es["ref_price"] = last_px
+                if str(exit_reason).startswith("stop") and _5b_lot_exit(dummy):
+                    _pack_mark_stop_cool(session_state, ticker, dummy)
                 return
 
         entry_px = float(line.get("entry_price") or last_px or 0)

@@ -1,0 +1,12 @@
+---
+description: Room 3 — when quoting profit %, always put win rate next to it
+alwaysApply: true
+---
+
+# Profit % + win rate (locked 2026-09-14)
+
+When the operator asks **profit / percent / $1,000 pile / what it made**: put **win rate immediately next to it**. Same sentence. Do not wait for a follow-up.
+
+**Win rate** = share of fills with P/L **> 0**. The rest did not win. If some of those were flats/scratches, say that count too — do not hide them inside “not wins.”
+
+Example: **2A those two weeks: about +42% ($422 on $1,000) · win rate 46% (11 of 24).**

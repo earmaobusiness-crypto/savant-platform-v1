@@ -375,6 +375,74 @@ class lots:
             "structural_move_pct": float(payload.get("structural_move_pct") or 0),
             "status": "open",
         }
+        fill = float(row["entry_px"] or 0)
+        frac = payload.get("exit_r_frac")
+        style = str(payload.get("exit_style") or "")
+        token = str(row["strategy"] or letter).strip().upper().replace(" ", "")
+        is_5b = token.startswith("5B") and "1M" in token and (not tf or tf == "1m")
+        is_2a = token.startswith("2A") and "1M" in token and (not tf or tf == "1m")
+        pack_style = style in ("5b_pack_half", "5b_range_1r", "2a_pack_half", "ph_pack") or is_5b or is_2a
+        if frac is not None or pack_style:
+            try:
+                frac_f = float(frac if frac is not None else 0.02)
+            except (TypeError, ValueError):
+                frac_f = 0.02
+            frac_f = max(frac_f, 0.02)
+            row["exit_style"] = style or ("2a_pack_half" if is_2a else "5b_pack_half")
+            row["exit_r_frac"] = frac_f
+            stop_px = payload.get("exit_stop_px")
+            tgt_px = payload.get("exit_tgt_px")
+            try:
+                stop_f = float(stop_px) if stop_px not in (None, "") else 0.0
+            except (TypeError, ValueError):
+                stop_f = 0.0
+            try:
+                tgt_f = float(tgt_px) if tgt_px not in (None, "") else 0.0
+            except (TypeError, ValueError):
+                tgt_f = 0.0
+            if fill > 0:
+                if stop_f > 0:
+                    row["exit_stop_px"] = stop_f
+                else:
+                    row["exit_stop_px"] = fill * (1.0 - frac_f)
+                if tgt_f > 0:
+                    row["exit_tgt_px"] = tgt_f
+                elif str(row["exit_style"]) == "5b_range_1r":
+                    row["exit_tgt_px"] = fill * (1.0 + frac_f)
+                else:
+                    struct = abs(float(row.get("structural_move_pct") or 0))
+                    fallback = 0.10 if is_2a else 0.165
+                    tgt_frac = (struct / 100.0 * 0.5) if struct > 0 else fallback
+                    row["exit_tgt_px"] = fill * (1.0 + max(tgt_frac, 0.02))
+            row["entry_ts"] = str(
+                payload.get("entry_ts")
+                or datetime.now(ET).isoformat()
+            )
+            if is_5b:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_5b_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_5b_used_day = bag
+                except Exception:
+                    pass
+            if is_2a:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_2a_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_2a_used_day = bag
+                except Exception:
+                    pass
+            if str(row.get("exit_style") or "") == "ph_pack":
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_ph_used_day") or {})
+                    token = f"{ticker}|{str(row.get('strategy') or letter).strip()}".upper()
+                    bag[token] = day
+                    session_state.room3_ph_used_day = bag
+                except Exception:
+                    pass
         rows = lots._rows(session_state)
         rows.append(row)
         lots.save_lots(session_state, rows)

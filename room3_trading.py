@@ -2400,6 +2400,10 @@ def _reconcile_watch_book_with_broker() -> int:
                     "entry_px": line.get("entry_price"),
                     "entry_match_pct": line.get("entry_match_pct"),
                     "structural_move_pct": line.get("entry_structural_move_pct"),
+                    "exit_style": line.get("exit_style"),
+                    "exit_r_frac": line.get("exit_r_frac"),
+                    "exit_stop_px": line.get("exit_stop_px"),
+                    "exit_tgt_px": line.get("exit_tgt_px"),
                 },
             )
         n += 1
@@ -4819,6 +4823,15 @@ def _render_execution_posture(mode: str) -> None:
             f"Collective matrix ({src}) · **{hs['layout_count']} layout bucket(s)** "
             f"from **{vault_n}** pattern save(s) · "
             f"entry when map match ≥ **{room3_matrix.MATCH_THRESHOLD_PCT}%** · "
+            f"**5B (1M)** dump-then-hold + RVOL ≥2, first shot of the day "
+            f"(skip 9:30–9:45 ET) · stop under the 5-bar lookback low (floor 2%), "
+            f"hold for half the pack move (~16.5%) · "
+            f"**2A (1M)** only if the live up-window still looks like the packs "
+            f"(~10%+ window, ≥5% green bar, RVOL ≥2), skip 9:30–10:00 ET, "
+            f"first shot, 1% dip then green reclaim, 10% target · "
+            f"other letters: placeholder Handle (1m/5m skip 9:30–9:45, 1m RVOL ≥2, "
+            f"first of that letter that day, wait a dip, lookback-low stop floor 2%, "
+            f"half pack target) — not specialized yet · "
             f"arm engine to fire Alpaca orders."
         )
 
@@ -5635,9 +5648,13 @@ def _room3_heartbeat_fragment() -> None:
                             "entry_px": result.get("filled_avg_price")
                             or sig.get("ref_price")
                             or line.get("entry_price"),
-                            "entry_match_pct": sig.get("match_pct") or line.get("entry_match_pct"),
-                            "structural_move_pct": line.get("entry_structural_move_pct"),
-                        },
+                    "entry_match_pct": sig.get("match_pct") or line.get("entry_match_pct"),
+                    "structural_move_pct": line.get("entry_structural_move_pct"),
+                    "exit_style": sig.get("exit_style") or line.get("exit_style"),
+                    "exit_r_frac": sig.get("exit_r_frac") or line.get("exit_r_frac"),
+                    "exit_stop_px": sig.get("exit_stop_px") or line.get("exit_stop_px"),
+                    "exit_tgt_px": sig.get("exit_tgt_px") or line.get("exit_tgt_px"),
+                },
                     )
                     _persist_screener_to_disk()
                     if not sig.get("scale_in"):
