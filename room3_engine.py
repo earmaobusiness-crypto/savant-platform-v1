@@ -381,14 +381,40 @@ class lots:
         token = str(row["strategy"] or letter).strip().upper().replace(" ", "")
         is_5b = token.startswith("5B") and "1M" in token and (not tf or tf == "1m")
         is_2a = token.startswith("2A") and "1M" in token and (not tf or tf == "1m")
-        pack_style = style in ("5b_pack_half", "5b_range_1r", "2a_pack_half", "ph_pack") or is_5b or is_2a
+        is_1a = token.startswith("1A") and "1M" in token and (not tf or tf == "1m")
+        is_2d = token.startswith("2D") and "1M" in token and (not tf or tf == "1m")
+        pack_style = (
+            style
+            in (
+                "5b_pack_half",
+                "5b_range_1r",
+                "2a_pack_half",
+                "2d_pack",
+                "ph_pack",
+                "1a_mild",
+                "1a_violent",
+                "1a_trip",
+            )
+            or is_5b
+            or is_2a
+            or is_1a
+            or is_2d
+        )
         if frac is not None or pack_style:
             try:
                 frac_f = float(frac if frac is not None else 0.02)
             except (TypeError, ValueError):
                 frac_f = 0.02
             frac_f = max(frac_f, 0.02)
-            row["exit_style"] = style or ("2a_pack_half" if is_2a else "5b_pack_half")
+            row["exit_style"] = style or (
+                "2d_pack"
+                if is_2d
+                else (
+                    "2a_pack_half"
+                    if is_2a
+                    else ("1a_violent" if is_1a else "5b_pack_half")
+                )
+            )
             row["exit_r_frac"] = frac_f
             stop_px = payload.get("exit_stop_px")
             tgt_px = payload.get("exit_tgt_px")
@@ -405,13 +431,17 @@ class lots:
                     row["exit_stop_px"] = stop_f
                 else:
                     row["exit_stop_px"] = fill * (1.0 - frac_f)
-                if tgt_f > 0:
+                if str(row["exit_style"]) == "1a_trip":
+                    row["exit_tgt_px"] = 0.0
+                elif tgt_f > 0:
                     row["exit_tgt_px"] = tgt_f
                 elif str(row["exit_style"]) == "5b_range_1r":
                     row["exit_tgt_px"] = fill * (1.0 + frac_f)
+                elif is_2d:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.0625)
                 else:
                     struct = abs(float(row.get("structural_move_pct") or 0))
-                    fallback = 0.10 if is_2a else 0.165
+                    fallback = 0.10 if is_2a else (0.12 if is_1a else 0.165)
                     tgt_frac = (struct / 100.0 * 0.5) if struct > 0 else fallback
                     row["exit_tgt_px"] = fill * (1.0 + max(tgt_frac, 0.02))
             row["entry_ts"] = str(
@@ -434,6 +464,22 @@ class lots:
                     session_state.room3_2a_used_day = bag
                 except Exception:
                     pass
+            if is_1a:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_1a_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_1a_used_day = bag
+                except Exception:
+                    pass
+                handle = str(payload.get("1a_handle") or row.get("1a_handle") or "")
+                if handle:
+                    row["1a_handle"] = handle
+                if payload.get("exit_high_px") not in (None, ""):
+                    try:
+                        row["exit_high_px"] = float(payload.get("exit_high_px"))
+                    except (TypeError, ValueError):
+                        pass
             if str(row.get("exit_style") or "") == "ph_pack":
                 try:
                     day = datetime.now(ET).strftime("%Y-%m-%d")
@@ -566,6 +612,43 @@ class lots:
         return lots._placeholder_tf(tf) or lots._placeholder_strat(strat)
 
     @staticmethod
+    def _hhmmss_to_sec(raw: Any) -> int | None:
+        text = str(raw or "").strip()
+        if not text or text in ("—", "-"):
+            return None
+        parts = text.replace(".", ":").split(":")
+        try:
+            if len(parts) >= 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
+            if len(parts) == 2:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60
+        except (TypeError, ValueError):
+            return None
+        return None
+
+    @staticmethod
+    def _entry_near(
+        row: dict[str, Any],
+        fill: dict[str, Any],
+        *,
+        window_sec: int = 180,
+        px_tol: float = 0.03,
+    ) -> bool:
+        """Same buy print — leftover FIFO qty will not match the original ticket."""
+        rt = lots._hhmmss_to_sec(row.get("entry_time") or "")
+        ft = lots._hhmmss_to_sec(fill.get("entry_time") or "")
+        if rt is None or ft is None or abs(rt - ft) > window_sec:
+            return False
+        try:
+            rp = abs(float(row.get("entry_price") or row.get("entry_px") or 0))
+            fp = abs(float(fill.get("entry_px") or fill.get("entry_price") or 0))
+        except (TypeError, ValueError):
+            return False
+        if rp <= 0 or fp <= 0:
+            return False
+        return abs(rp - fp) / max(rp, fp) <= px_tol
+
+    @staticmethod
     def _exit_is_fresh(row: dict[str, Any], window_sec: int = 180) -> bool:
         text = str(row.get("exit_time") or "").strip()
         if not text or text in ("—", "-"):
@@ -637,6 +720,8 @@ class lots:
                 "entry_order_id": str(payload.get("order_id") or payload.get("entry_order_id") or ""),
                 "lot_id": str(payload.get("lot_id") or ""),
                 "layout_id": str(payload.get("layout_id") or ""),
+                "entry_time": str(payload.get("entry_time") or payload.get("filled_at") or ""),
+                "entry_px": payload.get("entry_px") or payload.get("entry_price") or payload.get("filled_avg_price"),
             }
         )
         entry["fills"] = fills[-24:]
@@ -691,6 +776,16 @@ class lots:
                     except Exception:
                         pass
                     return fill
+        # Partial FIFO / leftover flatten: same buy print, qty will not match.
+        for fill in reversed(fills):
+            if not isinstance(fill, dict):
+                continue
+            letter = str(fill.get("letter") or fill.get("strategy") or "").strip()
+            tf = str(fill.get("timeframe") or fill.get("tf") or "").strip()
+            if not letter or lots._placeholder_strat(letter) or not tf or lots._placeholder_tf(tf):
+                continue
+            if lots._entry_near(row, fill):
+                return fill
         return None
 
     @staticmethod
@@ -793,6 +888,43 @@ class lots:
                 session_state.room3_trade_history = hist
             except Exception:
                 pass
+            try:
+                pending = list(session_state.get("room3_pending_reviews") or [])
+            except Exception:
+                pending = []
+            for row in hist:
+                if not isinstance(row, dict) or lots.row_needs_identity(row):
+                    continue
+                for card in pending:
+                    if not isinstance(card, dict) or lots.row_needs_identity(card) is False:
+                        continue
+                    same_id = str(row.get("id") or "") and str(row.get("id")) == str(card.get("id") or "")
+                    same_print = (
+                        str(row.get("ticker") or "").upper() == str(card.get("ticker") or "").upper()
+                        and str(row.get("entry_time") or "") == str(card.get("entry_time") or "")
+                    )
+                    if same_id or same_print:
+                        card.update(
+                            {
+                                k: row.get(k)
+                                for k in (
+                                    "timeframe",
+                                    "strategy",
+                                    "matrix_timeframe",
+                                    "matrix_strategy",
+                                    "letter",
+                                    "layout_id",
+                                    "matrix_layout",
+                                    "lot_id",
+                                )
+                                if row.get(k)
+                            }
+                        )
+            if pending:
+                try:
+                    session_state.room3_pending_reviews = pending
+                except Exception:
+                    pass
         return n
 
     @staticmethod

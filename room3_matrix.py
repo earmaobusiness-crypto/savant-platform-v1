@@ -45,7 +45,37 @@ TWO_A_TARGET_FRAC = 0.10  # clipped for WR ≥51% on the Sep belt
 TWO_A_SKIP_UNTIL = dtime(10, 0)
 TWO_A_EXIT_STYLE = "2a_pack_half"
 TWO_A_COOL_SEC = 15 * 60
-# Placeholder Handle for every other live letter (not 5B / 2A). Gene stays
+# 1A (1M) — one gene, three Handles. Classify the live tape; do not apply
+# one recipe to every 1A ≥85% print. Yahoo 1m belt 2026-09-02..11.
+ONE_A_RVOL_MIN = 2.0
+ONE_A_DIP_FRAC = 0.02
+ONE_A_MILD_VEL5 = 8.0
+ONE_A_MILD_RNG_PCT = 3.0
+ONE_A_MILD_TARGET_FRAC = 0.08
+ONE_A_VIOLENT_VEL20 = 20.0
+ONE_A_VIOLENT_RNG_PCT = 3.0
+ONE_A_VIOLENT_TARGET_FRAC = 0.12
+ONE_A_TRIP_VEL20 = 25.0
+ONE_A_TRIP_RNG_PCT = 5.0
+ONE_A_TRIP_ARM_FRAC = 0.12
+ONE_A_TRIP_TRAIL_FRAC = 0.05
+ONE_A_SKIP_UNTIL = dtime(9, 45)
+ONE_A_LONG_PAUSE = dtime(10, 0)  # trip + mild wait past the open
+ONE_A_COOL_SEC = 15 * 60
+ONE_A_EXIT_MILD = "1a_mild"
+ONE_A_EXIT_VIOLENT = "1a_violent"
+ONE_A_EXIT_TRIP = "1a_trip"
+ONE_A_EXIT_STYLES = (ONE_A_EXIT_MILD, ONE_A_EXIT_VIOLENT, ONE_A_EXIT_TRIP)
+# 2D (1M) — still the 2D gene; Hunt extra is RVOL/green/range + match ≥91.
+# Fill now (no dip). Yahoo 1m belt 2026-09-02..11. Not a next-ticket promise.
+TWO_D_RVOL_MIN = 3.0
+TWO_D_BAR_RANGE_PCT = 3.0
+TWO_D_MATCH_MIN = 91
+TWO_D_TARGET_FRAC = 0.0625
+TWO_D_SKIP_UNTIL = dtime(9, 45)
+TWO_D_EXIT_STYLE = "2d_pack"
+TWO_D_COOL_SEC = 15 * 60
+# Placeholder Handle for every other live letter (not 5B / 2A / 1A / 2D). Gene stays
 # nearest ≥85% same TF. Tactics only — specialize later.
 PH_EXIT_STYLE = "ph_pack"
 PH_RVOL_MIN = 2.0
@@ -420,6 +450,20 @@ def _is_2a_1m(strategy: str, tf: str = "1m") -> bool:
     return token.startswith("2A") and "1M" in token
 
 
+def _is_1a_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("1A") and "1M" in token
+
+
+def _is_2d_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("2D") and "1M" in token
+
+
 def _5b_now(session_state: Any = None) -> datetime:
     try:
         if session_state is not None:
@@ -452,6 +496,10 @@ def _2a_open_chop(session_state: Any = None) -> bool:
 
 def _ph_open_chop(session_state: Any = None) -> bool:
     return _rth_before(session_state, PH_SKIP_UNTIL)
+
+
+def _2d_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, TWO_D_SKIP_UNTIL)
 
 
 def _5b_cool_until(session_state: Any, ticker: str) -> datetime | None:
@@ -501,6 +549,12 @@ def _pack_mark_stop_cool(session_state: Any, ticker: str, lot: dict[str, Any]) -
     style = str(lot.get("exit_style") or "")
     if _is_2a_1m(strat, tf) or style == TWO_A_EXIT_STYLE:
         _2a_mark_stop_cool(session_state, ticker)
+        return
+    if _is_2d_1m(strat, tf) or style == TWO_D_EXIT_STYLE:
+        _2d_mark_stop_cool(session_state, ticker)
+        return
+    if _is_1a_1m(strat, tf) or style in ONE_A_EXIT_STYLES:
+        _1a_mark_stop_cool(session_state, ticker)
         return
     if _is_5b_1m(strat, tf) or style in (FIVE_B_EXIT_STYLE, FIVE_B_EXIT_STYLE_LEGACY):
         _5b_mark_stop_cool(session_state, ticker)
@@ -565,6 +619,113 @@ def _2a_mark_used(session_state: Any, ticker: str) -> None:
     _5b_bag_set(session_state, "room3_2a_used_day", ticker, _5b_day_key(session_state))
 
 
+def _1a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_1a_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _1a_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=ONE_A_COOL_SEC)
+    _5b_bag_set(session_state, "room3_1a_cool_until", ticker, until.isoformat())
+
+
+def _1a_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_1a_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _1a_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_1a_used_day", ticker, _5b_day_key(session_state))
+
+
+def _2d_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_2d_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _2d_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=TWO_D_COOL_SEC)
+    _5b_bag_set(session_state, "room3_2d_cool_until", ticker, until.isoformat())
+
+
+def _2d_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_2d_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _2d_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_2d_used_day", ticker, _5b_day_key(session_state))
+
+
+def _2d_shots_today(session_state: Any, ticker: str) -> int:
+    if session_state is None:
+        return 0
+    try:
+        bag = session_state.get("room3_2d_shots_day") or {}
+    except Exception:
+        return 0
+    raw = str(bag.get(str(ticker or "").upper()) or "")
+    day = _5b_day_key(session_state)
+    if raw.startswith(f"{day}:"):
+        try:
+            return max(0, int(raw.split(":", 1)[1]))
+        except (TypeError, ValueError):
+            return 0
+    if raw == day:
+        return 1
+    return 0
+
+
+def _2d_mark_shot(session_state: Any, ticker: str) -> None:
+    n = _2d_shots_today(session_state, ticker) + 1
+    _5b_bag_set(
+        session_state,
+        "room3_2d_shots_day",
+        ticker,
+        f"{_5b_day_key(session_state)}:{n}",
+    )
+    if n >= 2:
+        _2d_mark_used(session_state, ticker)
+
+
 def _ph_token(ticker: str, strategy: str) -> str:
     return f"{str(ticker or '').upper()}|{str(strategy or '').strip()}".upper()
 
@@ -617,8 +778,9 @@ def _ph_mark_stop_cool(session_state: Any, ticker: str, strategy: str) -> None:
     )
 
 
-def _window_velocity_pct(slices: list[dict[str, Any]]) -> float:
-    closes = [float(s.get("c") or 0) for s in slices if float(s.get("c") or 0) > 0]
+def _window_velocity_pct(slices: list[dict[str, Any]], bars: int = 0) -> float:
+    win = slices[-bars:] if bars and bars > 0 else slices
+    closes = [float(s.get("c") or 0) for s in win if float(s.get("c") or 0) > 0]
     if len(closes) < 3:
         return 0.0
     total = 0.0
@@ -646,6 +808,56 @@ def _2a_gene_ok(slices: list[dict[str, Any]]) -> bool:
     if _5b_tape_rvol(slices) < TWO_A_RVOL_MIN:
         return False
     return True
+
+
+def _2d_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Hunt extra — not a new gene. Fat green bar + RVOL ≥3. Wallpaper 2D does not fire."""
+    if len(slices) < 2:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < TWO_D_BAR_RANGE_PCT:
+        return False
+    if _5b_tape_rvol(slices) < TWO_D_RVOL_MIN:
+        return False
+    return True
+
+
+def _1a_last_green(slices: list[dict[str, Any]]) -> bool:
+    if not slices:
+        return False
+    last = slices[-1]
+    last_c = float(last.get("c") or 0)
+    last_o = float(last.get("o") or last_c)
+    return last_c > last_o
+
+
+def _1a_classify(slices: list[dict[str, Any]]) -> str:
+    """Pick one 1A Handle from already-printed tape. Empty = wallpaper, skip."""
+    if len(slices) < 3:
+        return ""
+    if _5b_tape_rvol(slices) < ONE_A_RVOL_MIN:
+        return ""
+    last = slices[-1]
+    rng = _bar_range_pct(last)
+    vel20 = _window_velocity_pct(slices, 20)
+    vel5 = _window_velocity_pct(slices, 5)
+    green = _1a_last_green(slices)
+    if vel20 >= ONE_A_TRIP_VEL20 and rng >= ONE_A_TRIP_RNG_PCT and green:
+        return "trip"
+    if vel20 >= ONE_A_VIOLENT_VEL20 and rng >= ONE_A_VIOLENT_RNG_PCT:
+        return "violent"
+    if (
+        vel5 >= ONE_A_MILD_VEL5
+        and rng >= ONE_A_MILD_RNG_PCT
+        and green
+        and vel20 < ONE_A_VIOLENT_VEL20
+    ):
+        return "mild"
+    return ""
 
 
 def _bar_range_pct(bar: dict[str, Any]) -> float:
@@ -742,6 +954,40 @@ def _2a_pack_exits(
     return stop_px, tgt_px, stop_frac
 
 
+def _2d_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    stop_px, _, stop_frac = _5b_pack_exits(slices, fill, 0.0)
+    px = float(fill or 0)
+    tgt_px = px * (1.0 + TWO_D_TARGET_FRAC) if px > 0 else 0.0
+    return stop_px, tgt_px, stop_frac
+
+
+def _1a_style_for(handle: str) -> str:
+    if handle == "trip":
+        return ONE_A_EXIT_TRIP
+    if handle == "mild":
+        return ONE_A_EXIT_MILD
+    return ONE_A_EXIT_VIOLENT
+
+
+def _1a_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    handle: str,
+) -> tuple[float, float, float]:
+    stop_px, _, stop_frac = _5b_pack_exits(slices, fill, 0.0)
+    px = float(fill or 0)
+    if px <= 0:
+        return stop_px, 0.0, stop_frac
+    if handle == "trip":
+        return stop_px, 0.0, stop_frac
+    frac = ONE_A_MILD_TARGET_FRAC if handle == "mild" else ONE_A_VIOLENT_TARGET_FRAC
+    return stop_px, px * (1.0 + frac), stop_frac
+
+
 def _ph_lookback(tf: str) -> int:
     tf_n = room3_recipes.normalize_tf(tf)
     if tf_n == "1m":
@@ -773,11 +1019,23 @@ def _ph_pack_exits(
 
 def _5b_lot_exit(lot: dict[str, Any]) -> bool:
     style = str(lot.get("exit_style") or "")
-    if style in (FIVE_B_EXIT_STYLE, FIVE_B_EXIT_STYLE_LEGACY, TWO_A_EXIT_STYLE, PH_EXIT_STYLE):
+    if style in (
+        FIVE_B_EXIT_STYLE,
+        FIVE_B_EXIT_STYLE_LEGACY,
+        TWO_A_EXIT_STYLE,
+        TWO_D_EXIT_STYLE,
+        PH_EXIT_STYLE,
+        *ONE_A_EXIT_STYLES,
+    ):
         return True
     strat = str(lot.get("strategy") or lot.get("letter") or "")
     tf = str(lot.get("tf") or lot.get("timeframe") or "1m")
-    return _is_5b_1m(strat, tf) or _is_2a_1m(strat, tf)
+    return (
+        _is_5b_1m(strat, tf)
+        or _is_2a_1m(strat, tf)
+        or _is_1a_1m(strat, tf)
+        or _is_2d_1m(strat, tf)
+    )
 
 
 def _ticker_already_engaged(
@@ -1028,6 +1286,34 @@ def _try_queue_child_entry(
                 stamped["exit_stop_px"] = stop_px
                 stamped["exit_tgt_px"] = tgt_px
                 _2a_mark_used(session_state, ticker)
+            elif _is_1a_1m(strategy, tf):
+                handle = str(line.get("1a_handle") or _1a_classify(slices) or "violent")
+                stop_px, tgt_px, stop_frac = _1a_pack_exits(slices, last_px, handle)
+                style = _1a_style_for(handle)
+                sig["exit_style"] = style
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                sig["1a_handle"] = handle
+                stamped["exit_style"] = style
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                stamped["1a_handle"] = handle
+                _1a_mark_used(session_state, ticker)
+            elif _is_2d_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _2d_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = TWO_D_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = TWO_D_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _2d_mark_shot(session_state, ticker)
             else:
                 stop_px, tgt_px, stop_frac = _ph_pack_exits(
                     slices, last_px, structural, tf
@@ -1100,6 +1386,14 @@ def _5b_should_exit(
     else:
         if style == TWO_A_EXIT_STYLE:
             tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + TWO_A_TARGET_FRAC))
+        elif style == TWO_D_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + TWO_D_TARGET_FRAC))
+        elif style == ONE_A_EXIT_MILD:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + ONE_A_MILD_TARGET_FRAC))
+        elif style == ONE_A_EXIT_VIOLENT:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + ONE_A_VIOLENT_TARGET_FRAC))
+        elif style == ONE_A_EXIT_TRIP:
+            tgt_px = 0.0
         else:
             tgt_px = float(
                 lot.get("exit_tgt_px")
@@ -1107,6 +1401,25 @@ def _5b_should_exit(
             )
     lo = float((bar or {}).get("l") or last_px or 0)
     hi = float((bar or {}).get("h") or last_px or 0)
+    if style == ONE_A_EXIT_TRIP:
+        peak = max(float(lot.get("exit_high_px") or entry_px), hi if hi > 0 else 0.0, last_px or 0.0)
+        lot["exit_high_px"] = peak
+        if peak >= entry_px * (1.0 + ONE_A_TRIP_ARM_FRAC):
+            lot["exit_runner_on"] = True
+        if lot.get("exit_runner_on"):
+            trail = peak * (1.0 - ONE_A_TRIP_TRAIL_FRAC)
+            if trail > stop_px:
+                stop_px = trail
+                lot["exit_stop_px"] = stop_px
+        if lo > 0 and lo <= stop_px:
+            pnl_pct = (stop_px - entry_px) / entry_px * 100.0
+            return f"{'runner' if lot.get('exit_runner_on') else 'stop'} {pnl_pct:.1f}%"
+        if last_px > 0 and last_px <= stop_px:
+            pnl_pct = (last_px - entry_px) / entry_px * 100.0
+            return f"{'runner' if lot.get('exit_runner_on') else 'stop'} {pnl_pct:.1f}%"
+        if _approaching_day_close():
+            return "day close · second-best exit"
+        return ""
     if lo > 0 and lo <= stop_px:
         pnl_pct = (stop_px - entry_px) / entry_px * 100.0
         return f"stop {pnl_pct:.1f}%"
@@ -1198,7 +1511,7 @@ def _enter_on_print(
     structural_move_pct: float,
     session_state: Any = None,
 ) -> bool:
-    """Placeholder Handle waits a dip. 5B / 2A have their own shot. No 1m pop-now."""
+    """Placeholder Handle waits a dip. 5B / 2A / 1A / 2D have their own shot. No 1m pop-now."""
     return False
 
 
@@ -1208,6 +1521,7 @@ def _reset_entry_trigger(line: dict[str, Any]) -> None:
     line.pop("pullback_low", None)
     line.pop("trigger_phase", None)
     line.pop("entry_skipped_late", None)
+    line.pop("1a_handle", None)
 
 
 def _entry_is_late(line: dict[str, Any], last_px: float, structural: float) -> bool:
@@ -1300,6 +1614,101 @@ def _2a_entry_ready(
     return False, "2A · waiting trigger"
 
 
+def _2d_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _2d_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"2D · cool {mins}m after stop"
+    if _2d_open_chop(session_state):
+        return False, "2D · skip 9:30–9:45"
+    if _2d_used_today(session_state, ticker):
+        return False, "2D · done for the day"
+    shots = _2d_shots_today(session_state, ticker)
+    if shots >= 2:
+        return False, "2D · two shots already used"
+    if shots >= 1 and (cool is None or now < cool):
+        return False, "2D · first of day already used"
+    match = int(line.get("match_pct") or line.get("entry_match_pct") or 0)
+    if match < TWO_D_MATCH_MIN:
+        return False, "2D · wait match ≥91"
+    if not _2d_gene_ok(slices):
+        _reset_entry_trigger(line)
+        return False, "2D · wait RVOL/green/range"
+    line["trigger_phase"] = "ready"
+    return True, "2D · RVOL · fat green · enter now"
+
+
+def _1a_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _1a_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"1A · cool {mins}m after stop"
+    if _rth_before(session_state, ONE_A_SKIP_UNTIL):
+        return False, "1A · skip 9:30–9:45"
+    if _1a_used_today(session_state, ticker):
+        return False, "1A · first of day already used"
+    phase = str(line.get("trigger_phase") or "")
+    hunting = phase in ("wait_dip", "wait_reclaim", "ready")
+    handle = str(line.get("1a_handle") or "")
+    if not hunting:
+        handle = _1a_classify(slices)
+        if not handle:
+            _reset_entry_trigger(line)
+            return False, "1A · wait suited tape"
+        if handle in ("trip", "mild") and _rth_before(session_state, ONE_A_LONG_PAUSE):
+            _reset_entry_trigger(line)
+            return False, "1A · longer pause until 10:00"
+        line["1a_handle"] = handle
+    last = slices[-1] if slices else {}
+    last_c = float(last.get("c") or last_px)
+    last_l = float(last.get("l") or last_c)
+    last_o = float(last.get("o") or last_c)
+    prior = slices[-2] if len(slices) >= 2 else last
+    prior_h = float(prior.get("h") or prior.get("c") or 0)
+    if not line.get("family_armed_px"):
+        line["family_armed_px"] = last_px
+        line["family_armed_high"] = float(last.get("h") or last_px)
+        line["trigger_phase"] = "wait_dip"
+    armed_px = float(line.get("family_armed_px") or last_px)
+    phase = str(line.get("trigger_phase") or "wait_dip")
+    tag = {"trip": "trip runner", "mild": "mild 8%", "violent": "violent 12%"}.get(
+        handle, "1A"
+    )
+    if phase == "ready":
+        return True, f"1A · {tag} · dip-reclaim · enter now"
+    if phase == "wait_dip":
+        if last_l <= armed_px * (1.0 - ONE_A_DIP_FRAC) or last_c < armed_px:
+            line["trigger_phase"] = "wait_reclaim"
+            line["pullback_low"] = last_l
+            return False, f"1A · {tag} · 2% dip · waiting reclaim"
+        return False, f"1A · {tag} · waiting 2% pullback"
+    if phase == "wait_reclaim":
+        pb = min(float(line.get("pullback_low") or last_l), last_l)
+        line["pullback_low"] = pb
+        green = last_c > last_o
+        if last_c > pb and (prior_h <= 0 or last_c >= prior_h) and green:
+            line["trigger_phase"] = "ready"
+            return True, f"1A · {tag} · dip-reclaim · enter now"
+        return False, f"1A · {tag} · waiting green reclaim"
+    return False, "1A · waiting trigger"
+
+
 def _ph_entry_ready(
     line: dict[str, Any],
     slices: list[dict[str, Any]],
@@ -1311,7 +1720,7 @@ def _ph_entry_ready(
     structural: float,
     session_state: Any = None,
 ) -> tuple[bool, str]:
-    """Shared Handle for letters that are not 5B / 2A. Detect is still ≥85% same TF."""
+    """Shared Handle for letters that are not 5B / 2A / 1A / 2D. Detect is still ≥85% same TF."""
     ticker = str(line.get("ticker") or "").upper()
     tf_n = room3_recipes.normalize_tf(tf)
     cool = _ph_cool_until(session_state, ticker, strategy)
@@ -1397,6 +1806,10 @@ def _entry_trigger_ready(
         return _5b_entry_ready(line, slices, last_px=last_px, session_state=session_state)
     if _is_2a_1m(strategy, tf):
         return _2a_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_1a_1m(strategy, tf):
+        return _1a_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_2d_1m(strategy, tf):
+        return _2d_entry_ready(line, slices, last_px=last_px, session_state=session_state)
     return _ph_entry_ready(
         line,
         slices,
@@ -1987,6 +2400,11 @@ def maybe_queue_matrix_signals(
                     es["letter"] = letter
                 if str(exit_reason).startswith("stop") and _5b_lot_exit(lot):
                     _pack_mark_stop_cool(session_state, ticker, lot)
+                elif _is_2d_1m(
+                    str(lot.get("strategy") or lot.get("letter") or ""),
+                    str(lot.get("tf") or lot.get("timeframe") or "1m"),
+                ) or str(lot.get("exit_style") or "") == TWO_D_EXIT_STYLE:
+                    _2d_mark_used(session_state, ticker)
                 return
         else:
             entry_px = float(line.get("entry_price") or last_px or 0)
@@ -2004,6 +2422,9 @@ def maybe_queue_matrix_signals(
                 "exit_r_frac": line.get("exit_r_frac"),
                 "exit_stop_px": line.get("exit_stop_px"),
                 "exit_tgt_px": line.get("exit_tgt_px"),
+                "exit_high_px": line.get("exit_high_px"),
+                "exit_runner_on": line.get("exit_runner_on"),
+                "1a_handle": line.get("1a_handle"),
                 "entry_ts": line.get("entry_ts"),
             }
             exit_reason = _lot_should_exit(
@@ -2037,6 +2458,11 @@ def maybe_queue_matrix_signals(
                     es["ref_price"] = last_px
                 if str(exit_reason).startswith("stop") and _5b_lot_exit(dummy):
                     _pack_mark_stop_cool(session_state, ticker, dummy)
+                elif _is_2d_1m(
+                    str(dummy.get("strategy") or dummy.get("letter") or ""),
+                    str(dummy.get("tf") or dummy.get("timeframe") or "1m"),
+                ) or str(dummy.get("exit_style") or "") == TWO_D_EXIT_STYLE:
+                    _2d_mark_used(session_state, ticker)
                 return
 
         entry_px = float(line.get("entry_price") or last_px or 0)

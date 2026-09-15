@@ -180,10 +180,76 @@ def test_reconcile_ghost_lots_to_broker_pile():
     assert opens[0]["id"] == "lot-new"
 
 
+def test_stamp_leftover_fifo_by_entry_print():
+    """Second Alpaca slice of the same buy still gets that lot's letter."""
+    ss = _S()
+    lots.remember_entry_fill(
+        ss,
+        {
+            "ticker": "FTFT",
+            "tf": "5m",
+            "strategy": "2C (5M)",
+            "qty": 10,
+            "entry_time": "15:00:38",
+            "entry_px": 7.46,
+            "lot_id": "lot-2c",
+        },
+    )
+    leftover = lots.stamp_close_row(
+        ss,
+        {
+            "id": "fifo-leftover",
+            "ticker": "FTFT",
+            "timeframe": "—",
+            "strategy": "Alpaca",
+            "qty": 1,
+            "entry_time": "15:00:56",
+            "entry_price": 7.44,
+            "status": "closed · alpaca",
+        },
+        peel_open=False,
+    )
+    assert leftover["strategy"] == "2C (5M)"
+    assert leftover["timeframe"] == "5m"
+
+
+def test_stamp_does_not_borrow_an_earlier_letter():
+    """A later BMGL entry is not yesterday's 2B just because the ticker matches."""
+    ss = _S()
+    lots.remember_entry_fill(
+        ss,
+        {
+            "ticker": "BMGL",
+            "tf": "5m",
+            "strategy": "2B (5M)",
+            "qty": 2,
+            "entry_time": "12:44:44",
+            "entry_px": 7.45,
+        },
+    )
+    later = lots.stamp_close_row(
+        ss,
+        {
+            "id": "bmgl-later",
+            "ticker": "BMGL",
+            "timeframe": "—",
+            "strategy": "Alpaca",
+            "qty": 7,
+            "entry_time": "15:04:31",
+            "entry_price": 7.4586,
+            "status": "closed · flatten",
+        },
+        peel_open=False,
+    )
+    assert lots.row_needs_identity(later) is True
+
+
 if __name__ == "__main__":
     test_take_close_label_ignores_alpaca_placeholder()
     test_stamp_unlabeled_history_after_lot_close()
     test_stamp_close_row_from_entry_fill_cache()
     test_open_lots_skips_qty_zero()
     test_reconcile_ghost_lots_to_broker_pile()
+    test_stamp_leftover_fifo_by_entry_print()
+    test_stamp_does_not_borrow_an_earlier_letter()
     print("ok")

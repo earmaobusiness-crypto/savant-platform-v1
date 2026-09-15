@@ -478,6 +478,7 @@ def _apply_signals(ss: PulseState, book: dict[str, Any], signals: list[dict], *,
                             "exit_r_frac": sig.get("exit_r_frac") or line.get("exit_r_frac"),
                             "exit_stop_px": sig.get("exit_stop_px") or line.get("exit_stop_px"),
                             "exit_tgt_px": sig.get("exit_tgt_px") or line.get("exit_tgt_px"),
+                            "1a_handle": sig.get("1a_handle") or line.get("1a_handle"),
                         },
                     )
                     room3_lots.remember_entry_fill(

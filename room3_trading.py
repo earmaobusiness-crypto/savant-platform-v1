@@ -257,6 +257,10 @@ def init_room3_session_state() -> None:
         st.session_state.room3_tradable_pct_ui = 100.0
     if "room3_tradable_operator_set" not in st.session_state:
         st.session_state.room3_tradable_operator_set = False
+    if "room3_tradable_session_used" not in st.session_state:
+        st.session_state.room3_tradable_session_used = 0.0
+    if "room3_tradable_session_day" not in st.session_state:
+        st.session_state.room3_tradable_session_day = ""
     if "room3_lot_close_labels" not in st.session_state:
         st.session_state.room3_lot_close_labels = []
     if "room3_engine_armed" not in st.session_state:
@@ -1042,6 +1046,8 @@ def _maybe_roll_trading_session() -> None:
     st.session_state.room3_tradable_pct_ui = 0.0
     st.session_state.room3_tradable_operator_set = False
     st.session_state.room3_tradable_custom_input = 0.0
+    st.session_state.room3_tradable_session_used = 0.0
+    st.session_state.room3_tradable_session_day = ""
     _clear_belt_chips()
     log = list(st.session_state.room3_matrix_sync_log or [])
     log.append(f"Session rolled · new trading day {key} (4 AM ET) · closed trades kept · belt cleared")
@@ -1186,21 +1192,32 @@ def _session_pl_stats() -> dict:
         day_pl_pct = (day_pl / equity * 100.0) if equity > 0 else 0.0
     wins = sum(1 for r in closed_rows if float(r.get("pnl_usd") or 0) > 0)
     losses = sum(1 for r in closed_rows if float(r.get("pnl_usd") or 0) < 0)
+    flats = sum(1 for r in closed_rows if float(r.get("pnl_usd") or 0) == 0)
     decided = wins + losses
     win_rate = (wins / decided * 100.0) if decided else 0.0
     trades_today = len(closed_rows)
     awaiting_review = len(pending)
     tradable = _clamp_tradable(equity)
+    book_day = str(st.session_state.get("room3_tradable_session_day") or "")
+    book = float(st.session_state.get("room3_tradable_session_used") or 0)
+    if book_day and book_day != today_key:
+        book = 0.0
+    if book <= 0:
+        book = tradable
+    vs_book_pct = (closed_pl / book * 100.0) if book > 0 else None
     return {
         "equity": equity,
         "tradable": tradable,
         "tradable_pct": (tradable / equity * 100.0) if equity > 0 else 0.0,
+        "session_book": book,
+        "closed_vs_book_pct": vs_book_pct,
         "day_pl": day_pl,
         "day_pl_pct": day_pl_pct,
         "open_pl": open_pl,
         "closed_pl": closed_pl,
         "wins": wins,
         "losses": losses,
+        "flats": flats,
         "win_rate": win_rate,
         "open_count": len(open_rows),
         "trades_today": trades_today,
@@ -1221,6 +1238,10 @@ def _clamp_tradable(equity: float | None = None) -> float:
 
 def _lock_tradable_from_operator() -> None:
     st.session_state.room3_tradable_operator_set = True
+    amt = float(st.session_state.get("room3_tradable_today") or 0)
+    if amt > 0:
+        st.session_state.room3_tradable_session_used = amt
+        st.session_state.room3_tradable_session_day = _trading_day_key()
     _persist_screener_to_disk()
 
 
@@ -2032,6 +2053,14 @@ def _remember_matrix_fill_meta(result: dict) -> None:
                 "entry_order_id": oid,
                 "lot_id": str(result.get("lot_id") or ""),
                 "letter": str(result.get("letter") or strat),
+                "entry_time": str(
+                    result.get("entry_time")
+                    or result.get("filled_at")
+                    or datetime.now(ET).strftime("%H:%M:%S")
+                ),
+                "entry_px": result.get("filled_avg_price")
+                or result.get("entry_price")
+                or result.get("ref_price"),
             }
         )
         entry["fills"] = fills[-24:]
@@ -2077,6 +2106,17 @@ def _apply_cached_fill_meta(row: dict) -> dict:
                     if letter and not _is_placeholder_strat(letter) and tf and not _is_placeholder_tf(tf):
                         pick = fill
                         break
+        if pick is None:
+            for fill in reversed(fills):
+                if not isinstance(fill, dict):
+                    continue
+                letter = str(fill.get("letter") or fill.get("strategy") or "").strip()
+                tf = str(fill.get("timeframe") or fill.get("tf") or "").strip()
+                if not letter or _is_placeholder_strat(letter) or not tf or _is_placeholder_tf(tf):
+                    continue
+                if room3_lots._entry_near(out, fill):
+                    pick = fill
+                    break
         if pick is not None:
             labeled = _apply_identity_label(out, pick)
             pick["applied_close_id"] = str(out.get("id") or "")
@@ -2434,6 +2474,7 @@ def _reconcile_watch_book_with_broker() -> int:
                     "exit_r_frac": line.get("exit_r_frac"),
                     "exit_stop_px": line.get("exit_stop_px"),
                     "exit_tgt_px": line.get("exit_tgt_px"),
+                    "1a_handle": line.get("1a_handle"),
                 },
             )
         n += 1
@@ -3397,7 +3438,28 @@ def _render_session_summary() -> None:
                 "sub": _fmt_pl_usd(stats["day_pl"]),
                 "detail": (
                     f"Day vs account {stats['day_pl_pct']:+.2f}% · "
-                    f"total day {_fmt_pl_usd(stats['day_pl'])}"
+                    f"total day {_fmt_pl_usd(stats['day_pl'])} ÷ full account"
+                ),
+            },
+            {
+                "id": "vs_book",
+                "label": "Vs today's $",
+                "value": (
+                    f"{stats['closed_vs_book_pct']:+.2f}%"
+                    if stats.get("closed_vs_book_pct") is not None
+                    else "—"
+                ),
+                "sub": (
+                    f"{_fmt_pl_usd(stats['closed_pl'])} on "
+                    f"${stats['session_book']:,.0f}"
+                    if float(stats.get("session_book") or 0) > 0
+                    else "Set $ to see % of today's book"
+                ),
+                "detail": (
+                    f"Closed P/L vs the amount you allowed today "
+                    f"(${float(stats.get('session_book') or 0):,.0f})"
+                    if float(stats.get("session_book") or 0) > 0
+                    else "Vs today's $ needs Set $ / a % for this session"
                 ),
             },
             {
@@ -3410,7 +3472,10 @@ def _render_session_summary() -> None:
         ],
         grid_class="room3-metric-grid-2",
     )
-    st.caption("Day % = (open + closed P/L) ÷ account equity.")
+    st.caption(
+        "Day vs account = (open + closed P/L) ÷ full account. "
+        "Vs today's $ = closed P/L ÷ the amount you Set $ for this session."
+    )
     with st.expander("All-time performance", expanded=False):
         _render_all_time_panel()
 
@@ -4859,6 +4924,11 @@ def _render_execution_posture(mode: str) -> None:
             f"**2A (1M)** only if the live up-window still looks like the packs "
             f"(~10%+ window, ≥5% green bar, RVOL ≥2), skip 9:30–10:00 ET, "
             f"first shot, 1% dip then green reclaim, 10% target · "
+            f"**1A (1M)** three Handles from the live tape (trip / violent / mild) · "
+            f"**2D (1M)** fill-now when RVOL ≥3, last bar green range ≥3%, match ≥91 "
+            f"(skip 9:30–9:45 ET); lookback-low stop (floor 2%), 6.25% target; "
+            f"if it stops, 15 min cool then one more 2D shot; market in RTH, "
+            f"limit outside RTH · "
             f"other letters: placeholder Handle (1m/5m skip 9:30–9:45, 1m RVOL ≥2, "
             f"first of that letter that day, wait a dip, lookback-low stop floor 2%, "
             f"half pack target) — not specialized yet · "
@@ -5053,6 +5123,8 @@ def _hydrate_screener_from_disk() -> None:
         st.session_state.room3_tradable_operator_set = False
         st.session_state.room3_tradable_pct_ui = 0.0
         st.session_state.room3_tradable_custom_input = 0.0
+        st.session_state.room3_tradable_session_used = 0.0
+        st.session_state.room3_tradable_session_day = ""
     elif restored > 0 and float(st.session_state.get("room3_tradable_today") or 0) <= 0:
         st.session_state.room3_tradable_today = restored
         st.session_state.room3_tradable_custom_input = restored
@@ -5061,6 +5133,17 @@ def _hydrate_screener_from_disk() -> None:
         except (TypeError, ValueError):
             pass
         _refresh_book_ticket_sizes()
+    try:
+        used = float((snap or {}).get("tradable_session_used") or 0)
+    except (TypeError, ValueError):
+        used = 0.0
+    used_day = str((snap or {}).get("tradable_session_day") or "")
+    if used > 0 and (not used_day or used_day == today_key):
+        st.session_state.room3_tradable_session_used = used
+        st.session_state.room3_tradable_session_day = used_day or today_key
+    elif restored > 0 and snap_day == today_key:
+        st.session_state.room3_tradable_session_used = restored
+        st.session_state.room3_tradable_session_day = today_key
     if (snap or {}).get("unattended_armed") and room3_engine.is_cloud_host():
         st.session_state.room3_engine_armed = True
         st.session_state.room3_unattended_armed = True
@@ -5156,6 +5239,10 @@ def _persist_screener_to_disk() -> None:
         "tradable_today": float(st.session_state.get("room3_tradable_today") or 0),
         "tradable_pct": float(st.session_state.get("room3_tradable_pct_ui") or 0),
         "tradable_operator_set": bool(st.session_state.get("room3_tradable_operator_set")),
+        "tradable_session_used": float(st.session_state.get("room3_tradable_session_used") or 0),
+        "tradable_session_day": str(
+            st.session_state.get("room3_tradable_session_day") or ""
+        ),
         "tradable_day_key": _trading_day_key(),
         "filter_universe_day_key": _trading_day_key(),
         "session_day_key": str(st.session_state.get("room3_session_day_key") or _trading_day_key()),
@@ -5496,9 +5583,9 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
             return _wipe_maps_and_belt()
         return ""
 
-    wipe_note = _wipe_maps_and_belt()
     positions = list(st.session_state.get("room3_open_positions") or [])
     if not positions:
+        wipe_note = _wipe_maps_and_belt()
         st.session_state[marker_key] = marker_val
         if overnight:
             st.session_state.room3_rth_end_flat_day = day_key
@@ -5525,11 +5612,9 @@ def _maybe_flatten_when_rth_ends(*, paper: bool) -> str:
             errs.append(f"{sym}:{exc}")
     _sync_alpaca_account_into_session(paper=paper)
     _materialize_lot_closes(symbols, pos_snap, status="closed · flatten")
-    # Sync rebuilds leftover maps for names still open — kill them while Post is off.
-    if _session_must_be_flat():
-        extra_wipe = _wipe_maps_and_belt()
-        if extra_wipe and extra_wipe not in (wipe_note or ""):
-            wipe_note = f"{wipe_note} · {extra_wipe}" if wipe_note else extra_wipe
+    room3_lots.stamp_unlabeled_closes(st.session_state, peel_open=False)
+    # Stamp first — then drop maps so leftover flatten rows can still take the lot letter.
+    wipe_note = _wipe_maps_and_belt()
     remaining = list(st.session_state.get("room3_open_positions") or [])
     if remaining:
         still = ", ".join(
@@ -5693,6 +5778,7 @@ def _room3_heartbeat_fragment() -> None:
                     "exit_r_frac": sig.get("exit_r_frac") or line.get("exit_r_frac"),
                     "exit_stop_px": sig.get("exit_stop_px") or line.get("exit_stop_px"),
                     "exit_tgt_px": sig.get("exit_tgt_px") or line.get("exit_tgt_px"),
+                    "1a_handle": sig.get("1a_handle") or line.get("1a_handle"),
                 },
                     )
                     _persist_screener_to_disk()
