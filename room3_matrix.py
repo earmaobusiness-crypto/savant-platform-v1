@@ -1335,19 +1335,18 @@ def _try_queue_child_entry(
     layouts: list[dict[str, Any]],
     match: dict[str, Any],
 ) -> bool:
-    """Queue one child that is fire-ready. Second letter on the pile is an add."""
+    """Queue one child that is fire-ready. Second letter on the pile is an add.
+
+    A sibling TF's unfilled stamp does not freeze this TF. Alpaca is one pile;
+    the second fill adds as its own lot. This line still waits if *it* already
+    has a working order.
+    """
     import room3_watcher
 
     if line.get("entry_signal"):
         return False
-    ticker_u = str(ticker or "").upper()
-    for other in (book.get("lines") or {}).values():
-        if not isinstance(other, dict):
-            continue
-        if str(other.get("ticker") or "").upper() != ticker_u:
-            continue
-        if other.get("order_pending") or str(other.get("state") or "") == "committed":
-            return False
+    if line.get("order_pending") or str(line.get("state") or "") == "committed":
+        return False
     children = list(line.get("children") or [])
     for child in children:
         if not isinstance(child, dict):

@@ -1033,7 +1033,7 @@ def _maybe_roll_trading_session() -> None:
     _rebuild_archive_from_history()
     st.session_state.room3_session_day_key = key
     st.session_state.room3_open_positions = []
-    # Unvoted reviews stay in Operator review ≥24h — do not wipe the pile at day roll.
+    # Unvoted reviews stay until 9:00 AM ET the next calendar day — do not wipe at 4 AM roll.
     st.session_state.room3_decay_alerts = []
     st.session_state.room3_broker_day_pl = None
     st.session_state.room3_broker_day_pl_pct = None
@@ -1762,7 +1762,7 @@ def _pending_has_row(pending: list, row: dict) -> bool:
     return False
 
 
-REVIEW_HOLD = timedelta(hours=24)
+REVIEW_EXPIRE_HOUR_ET = 9
 
 
 def _trade_exit_dt(row: dict) -> datetime | None:
@@ -1783,32 +1783,21 @@ def _trade_exit_dt(row: dict) -> datetime | None:
 
 
 def _review_hold_until(row: dict) -> datetime:
-    """24h after the session window that contained this close actually ended."""
-    dt = _trade_exit_dt(row)
-    if dt is None:
-        day = _trade_session_date(row)
-        try:
-            d = datetime.strptime(day, "%Y-%m-%d").date()
-        except ValueError:
-            d = datetime.now(ET).date()
-        window_end = datetime.combine(d, dt_time(16, 0)).replace(tzinfo=ET)
-        return window_end + REVIEW_HOLD
-    window = room3_engine.detect_session_window(dt)
-    d = dt.date()
-    if window == room3_engine.SESSION_PRE:
-        end_t = dt_time(9, 30)
-    elif window == room3_engine.SESSION_RTH:
-        end_t = dt_time(16, 0)
-    else:
-        end_t = dt_time(20, 0)
-    return datetime.combine(d, end_t).replace(tzinfo=ET) + REVIEW_HOLD
+    """Unvoted cards drop at 9:00 AM ET the calendar day after the close's session date."""
+    day = _trade_session_date(row)
+    try:
+        d = datetime.strptime(day, "%Y-%m-%d").date()
+    except ValueError:
+        d = datetime.now(ET).date()
+    nxt = d + timedelta(days=1)
+    return datetime.combine(nxt, dt_time(REVIEW_EXPIRE_HOUR_ET, 0)).replace(tzinfo=ET)
 
 
 def _within_review_hold(row: dict) -> bool:
-    """Unvoted closes stay reviewable 24h after that window ended (pre / RTH / post)."""
+    """Unvoted closes stay reviewable until 9:00 AM ET the next day. No vote = no DNA."""
     if str(row.get("operator_vote") or "").strip():
         return False
-    return datetime.now(ET) <= _review_hold_until(row)
+    return datetime.now(ET) < _review_hold_until(row)
 
 
 def _row_matches_voided_session(row: dict) -> bool:
@@ -1877,7 +1866,7 @@ def _stamp_review_void(row: dict) -> None:
 
 
 def _sync_pending_from_closed_history() -> None:
-    """Closed fills belong in Operator review until ✓/✗, held ≥24h across day roll."""
+    """Closed fills belong in Operator review until ✓/✗, or 9:00 AM ET the next morning."""
     now_iso = datetime.now(timezone.utc).isoformat()
     pending = [
         p
@@ -3203,8 +3192,8 @@ def _render_trade_history() -> None:
         "Closes land here and in Operator review with the TF and strategy frozen at that fill — "
         "not whatever letter the watch book is showing now. After you vote ✓/✗ the row leaves this tape "
         "(history stays under All-time). If you don't vote, this tape rolls at the next session day; "
-        "the review pile keeps the unvoted close 24 hours after the window it closed in ended "
-        "(pre → 9:30 ET next day · RTH → 4:00 PM next day · post → 8:00 PM next day). "
+        "the review pile keeps the unvoted close until 9:00 AM ET the next morning, then drops it "
+        "(log and P/L stay; no DNA). "
         "A finished session is filed into Session history and leaves this tape."
     )
     pending_ids = {
@@ -3895,7 +3884,7 @@ def _render_operator_review_panel() -> None:
         "it does not change size and does not delete the letter. "
         "Hunt (the detectors) waits for 2 Bads on two names before getting more cautious. "
         "Green = profit · red = loss. Closes with no TF / strategy are dropped from this pile "
-        "(log and P/L stay). Unvoted stays 24h after that window ended. "
+        "(log and P/L stay). Unvoted stays until 9:00 AM ET the next morning, then drops with no DNA. "
         "Revert is Strategy health → DNA versions."
     )
     _sync_pending_from_closed_history()

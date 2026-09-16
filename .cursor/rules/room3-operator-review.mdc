@@ -11,6 +11,8 @@ alwaysApply: true
 
 Vote only cards that already show **TF + strategy**. Dash cards (no TF / strategy) are **dropped from Operator review** — they cannot be voted and must not learn. Log and P/L stay.
 
+**Unvoted:** gone at **9:00 AM ET the next morning**. No ✓/✗ = no DNA, no Hunt/Handle, no Room 2. 4 AM session roll does not wipe them early.
+
 **Buttons now:** Hunt / Handle / Purgatoria overlays. Match-floor fade is dead. Vault / Supabase stay read-only. Revert = Strategy health → DNA versions.
 
 **2026-09-10:** Operator review pile rejected — log and P/L stay, no Good/Bad, no DNA.

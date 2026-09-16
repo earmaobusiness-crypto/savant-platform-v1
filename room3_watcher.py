@@ -982,11 +982,8 @@ def purge_untouched_maps(book: dict[str, Any]) -> dict[str, Any]:
 
 
 def _line_owns_seat(line: dict[str, Any]) -> bool:
-    """True when this TF is the live pile (in) or has a real entry stamped (queued)."""
-    raw = str(line.get("state") or "")
-    if raw == "in":
-        return True
-    return raw == "committed" and _entry_stamped(line)
+    """True when this TF already has the live pile (filled). Unfilled committed is not in."""
+    return str(line.get("state") or "") == "in"
 
 
 def _display_state(line: dict[str, Any], book: dict[str, Any] | None = None) -> str:
