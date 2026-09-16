@@ -361,6 +361,7 @@ class lots:
             row = existing[0]
             row["qty"] = abs(float(row.get("qty") or 0)) + qty
             lots.save_lots(session_state, lots._rows(session_state))
+            lots._remember_from_lot(session_state, row, payload, qty)
             return row
         row = {
             "id": str(payload.get("id") or f"{ticker}-{tf}-{letter}-{int(_time.time() * 1000)}"),
@@ -381,6 +382,8 @@ class lots:
         token = str(row["strategy"] or letter).strip().upper().replace(" ", "")
         is_5b = token.startswith("5B") and "1M" in token and (not tf or tf == "1m")
         is_2a = token.startswith("2A") and "1M" in token and (not tf or tf == "1m")
+        is_2b = token.startswith("2B") and "1M" in token and (not tf or tf == "1m")
+        is_2c = token.startswith("2C") and "1M" in token and (not tf or tf == "1m")
         is_1a = token.startswith("1A") and "1M" in token and (not tf or tf == "1m")
         is_2d = token.startswith("2D") and "1M" in token and (not tf or tf == "1m")
         pack_style = (
@@ -389,6 +392,8 @@ class lots:
                 "5b_pack_half",
                 "5b_range_1r",
                 "2a_pack_half",
+                "2b_pack",
+                "2c_pack",
                 "2d_pack",
                 "ph_pack",
                 "1a_mild",
@@ -397,6 +402,8 @@ class lots:
             )
             or is_5b
             or is_2a
+            or is_2b
+            or is_2c
             or is_1a
             or is_2d
         )
@@ -410,9 +417,17 @@ class lots:
                 "2d_pack"
                 if is_2d
                 else (
-                    "2a_pack_half"
-                    if is_2a
-                    else ("1a_violent" if is_1a else "5b_pack_half")
+                    "2c_pack"
+                    if is_2c
+                    else (
+                        "2b_pack"
+                        if is_2b
+                        else (
+                            "2a_pack_half"
+                            if is_2a
+                            else ("1a_violent" if is_1a else "5b_pack_half")
+                        )
+                    )
                 )
             )
             row["exit_r_frac"] = frac_f
@@ -439,6 +454,10 @@ class lots:
                     row["exit_tgt_px"] = fill * (1.0 + frac_f)
                 elif is_2d:
                     row["exit_tgt_px"] = fill * (1.0 + 0.0625)
+                elif is_2b:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.06)
+                elif is_2c:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.10)
                 else:
                     struct = abs(float(row.get("structural_move_pct") or 0))
                     fallback = 0.10 if is_2a else (0.12 if is_1a else 0.165)
@@ -462,6 +481,22 @@ class lots:
                     bag = dict(session_state.get("room3_2a_used_day") or {})
                     bag[ticker] = day
                     session_state.room3_2a_used_day = bag
+                except Exception:
+                    pass
+            if is_2b:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_2b_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_2b_used_day = bag
+                except Exception:
+                    pass
+            if is_2c:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_2c_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_2c_used_day = bag
                 except Exception:
                     pass
             if is_1a:
@@ -489,9 +524,17 @@ class lots:
                     session_state.room3_ph_used_day = bag
                 except Exception:
                     pass
+        if not row.get("entry_ts"):
+            row["entry_ts"] = str(
+                payload.get("entry_ts") or datetime.now(ET).isoformat()
+            )
+        row["entry_time"] = lots._clock_hms(
+            payload.get("entry_time") or payload.get("filled_at") or row.get("entry_ts")
+        )
         rows = lots._rows(session_state)
         rows.append(row)
         lots.save_lots(session_state, rows)
+        lots._remember_from_lot(session_state, row, payload, qty)
         return row
 
     @staticmethod
@@ -612,10 +655,63 @@ class lots:
         return lots._placeholder_tf(tf) or lots._placeholder_strat(strat)
 
     @staticmethod
+    def _clock_hms(raw: Any) -> str:
+        """Normalize fill/lot clocks to HH:MM:SS. Empty → now so leftover FIFO can still match."""
+        text = str(raw or "").strip()
+        sec = lots._hhmmss_to_sec(text)
+        if sec is not None:
+            h, rem = divmod(sec, 3600)
+            m, s = divmod(rem, 60)
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        return datetime.now(ET).strftime("%H:%M:%S")
+
+    @staticmethod
+    def _remember_from_lot(
+        session_state: Any,
+        row: dict[str, Any],
+        payload: dict[str, Any] | None,
+        qty: float,
+    ) -> None:
+        body = dict(payload or {})
+        lots.remember_entry_fill(
+            session_state,
+            {
+                "ticker": str(row.get("ticker") or body.get("ticker") or "").upper(),
+                "tf": str(row.get("tf") or body.get("tf") or body.get("timeframe") or ""),
+                "strategy": str(row.get("letter") or row.get("strategy") or body.get("strategy") or ""),
+                "layout_id": str(row.get("layout_id") or body.get("layout_id") or ""),
+                "qty": qty,
+                "order_id": str(body.get("order_id") or body.get("entry_order_id") or ""),
+                "lot_id": str(row.get("id") or ""),
+                "entry_time": body.get("entry_time")
+                or body.get("filled_at")
+                or row.get("entry_ts"),
+                "entry_px": body.get("entry_px")
+                or body.get("entry_price")
+                or row.get("entry_px"),
+            },
+        )
+
+    @staticmethod
     def _hhmmss_to_sec(raw: Any) -> int | None:
         text = str(raw or "").strip()
         if not text or text in ("—", "-"):
             return None
+        if "T" in text:
+            try:
+                t = text.split("T", 1)[1]
+                t = t.split(".")[0]
+                cut = len(t)
+                for i, ch in enumerate(t):
+                    if i >= 8 and ch in "+-":
+                        cut = i
+                        break
+                    if ch == "Z":
+                        cut = i
+                        break
+                text = t[:cut].strip()
+            except Exception:
+                return None
         parts = text.replace(".", ":").split(":")
         try:
             if len(parts) >= 3:
@@ -635,8 +731,12 @@ class lots:
         px_tol: float = 0.03,
     ) -> bool:
         """Same buy print — leftover FIFO qty will not match the original ticket."""
-        rt = lots._hhmmss_to_sec(row.get("entry_time") or "")
-        ft = lots._hhmmss_to_sec(fill.get("entry_time") or "")
+        rt = lots._hhmmss_to_sec(
+            row.get("entry_time") or row.get("entry_ts") or ""
+        )
+        ft = lots._hhmmss_to_sec(
+            fill.get("entry_time") or fill.get("entry_ts") or ""
+        )
         if rt is None or ft is None or abs(rt - ft) > window_sec:
             return False
         try:
@@ -720,8 +820,12 @@ class lots:
                 "entry_order_id": str(payload.get("order_id") or payload.get("entry_order_id") or ""),
                 "lot_id": str(payload.get("lot_id") or ""),
                 "layout_id": str(payload.get("layout_id") or ""),
-                "entry_time": str(payload.get("entry_time") or payload.get("filled_at") or ""),
-                "entry_px": payload.get("entry_px") or payload.get("entry_price") or payload.get("filled_avg_price"),
+                "entry_time": lots._clock_hms(
+                    payload.get("entry_time") or payload.get("filled_at") or payload.get("entry_ts")
+                ),
+                "entry_px": payload.get("entry_px")
+                or payload.get("entry_price")
+                or payload.get("filled_avg_price"),
             }
         )
         entry["fills"] = fills[-24:]
@@ -820,6 +924,62 @@ class lots:
         )
 
     @staticmethod
+    def _label_from_closed_lots(
+        session_state: Any, row: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Fill cache gone (reboot) — a closed lot on this ticker can still stamp the FIFO close."""
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker:
+            return None
+        try:
+            want_qty = abs(float(row.get("qty") or 0))
+        except (TypeError, ValueError):
+            want_qty = 0.0
+        pick = None
+        for lot in lots._rows(session_state):
+            if not isinstance(lot, dict):
+                continue
+            if str(lot.get("ticker") or "").upper() != ticker:
+                continue
+            if str(lot.get("status") or "") != "closed":
+                continue
+            if lot.get("applied_close_id"):
+                continue
+            letter = str(lot.get("letter") or lot.get("strategy") or "").strip()
+            tf = str(lot.get("tf") or lot.get("timeframe") or "").strip()
+            if not letter or lots._placeholder_strat(letter) or not tf or lots._placeholder_tf(tf):
+                continue
+            try:
+                lq = abs(float(lot.get("qty") or 0))
+            except (TypeError, ValueError):
+                lq = 0.0
+            qty_hit = (
+                want_qty > 0
+                and lq > 0
+                and abs(lq - want_qty) <= max(1.0, 0.05 * want_qty)
+            )
+            if qty_hit or lots._entry_near(row, lot):
+                pick = lot
+                break
+        if pick is None:
+            return None
+        pick["applied_close_id"] = str(row.get("id") or "")
+        try:
+            lots.save_lots(session_state, lots._rows(session_state))
+        except Exception:
+            pass
+        return {
+            "ticker": ticker,
+            "tf": str(pick.get("tf") or ""),
+            "letter": str(pick.get("letter") or pick.get("strategy") or ""),
+            "strategy": str(pick.get("strategy") or pick.get("letter") or ""),
+            "layout_id": str(pick.get("layout_id") or ""),
+            "lot_id": str(pick.get("id") or ""),
+            "qty": pick.get("qty"),
+            "entry_px": pick.get("entry_px"),
+        }
+
+    @staticmethod
     def stamp_close_row(
         session_state: Any,
         row: dict[str, Any] | None,
@@ -854,6 +1014,8 @@ class lots:
             letter=letter,
             tf=tf,
         )
+        if label is None:
+            label = lots._label_from_closed_lots(session_state, out)
         if label is None and peel_open and lots._exit_is_fresh(out):
             label = lots._peel_open_lot_label(session_state, ticker, qty)
         if label:
@@ -1010,6 +1172,96 @@ class lots:
                     n += 1
                     break
             lots.save_lots(session_state, lots._rows(session_state))
+        return n
+
+    @staticmethod
+    def heal_lots_from_watch(
+        session_state: Any,
+        book: dict[str, Any] | None,
+        positions: list | None,
+    ) -> int:
+        """If Alpaca has shares and the watch line is `in`, the lot book must exist — else Handle and labels die."""
+        broker: dict[str, float] = {}
+        for pos in positions or []:
+            if not isinstance(pos, dict):
+                continue
+            ticker = str(pos.get("ticker") or pos.get("symbol") or "").upper()
+            if not ticker:
+                continue
+            try:
+                qty = abs(float(pos.get("qty") or 0))
+            except (TypeError, ValueError):
+                qty = 0.0
+            if qty > 0:
+                broker[ticker] = broker.get(ticker, 0.0) + qty
+        lines = ((book or {}).get("lines") or {}) if isinstance(book, dict) else {}
+        n = 0
+        for ticker, bqty in broker.items():
+            opens = lots.open_lots(session_state, ticker)
+            lot_sum = sum(abs(float(r.get("qty") or 0)) for r in opens)
+            if lot_sum + 1e-9 >= bqty:
+                continue
+            gap = bqty - lot_sum
+            in_lines: list[dict[str, Any]] = []
+            letters: set[tuple[str, str]] = set()
+            for line in lines.values() if isinstance(lines, dict) else []:
+                if not isinstance(line, dict):
+                    continue
+                if str(line.get("ticker") or "").upper() != ticker:
+                    continue
+                if str(line.get("state") or "") not in ("in", "committed"):
+                    continue
+                letter = lots.letter_token(
+                    str(line.get("entry_layout") or ""),
+                    str(line.get("entry_strategy") or ""),
+                )
+                tf = str(line.get("timeframe") or "").strip()
+                if (
+                    not letter
+                    or lots._placeholder_strat(letter)
+                    or not tf
+                    or lots._placeholder_tf(tf)
+                ):
+                    continue
+                in_lines.append(line)
+                letters.add((tf, letter))
+            if len(opens) == 1:
+                opens[0]["qty"] = abs(float(opens[0].get("qty") or 0)) + gap
+                lots.save_lots(session_state, lots._rows(session_state))
+                n += 1
+                continue
+            if opens:
+                continue
+            if len(letters) != 1 or not in_lines:
+                continue
+            line = in_lines[0]
+            tf, letter = next(iter(letters))
+            try:
+                q = abs(float(line.get("entry_qty") or 0))
+            except (TypeError, ValueError):
+                q = 0.0
+            if q < 1:
+                q = bqty
+            lots.append_lot(
+                session_state,
+                {
+                    "ticker": ticker,
+                    "tf": tf,
+                    "strategy": letter,
+                    "layout_id": str(line.get("entry_layout") or ""),
+                    "qty": min(q, bqty),
+                    "entry_px": line.get("entry_price"),
+                    "entry_match_pct": line.get("entry_match_pct"),
+                    "structural_move_pct": line.get("entry_structural_move_pct"),
+                    "exit_style": line.get("exit_style"),
+                    "exit_r_frac": line.get("exit_r_frac"),
+                    "exit_stop_px": line.get("exit_stop_px"),
+                    "exit_tgt_px": line.get("exit_tgt_px"),
+                    "1a_handle": line.get("1a_handle"),
+                    "entry_time": line.get("entry_time") or line.get("filled_at"),
+                },
+            )
+            n += 1
         return n
 
     @staticmethod

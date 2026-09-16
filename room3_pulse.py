@@ -346,6 +346,9 @@ def _sync_alpaca(ss: PulseState, *, paper: bool) -> dict[str, Any]:
         if isinstance(p, dict) and abs(float(p.get("qty") or 0)) >= 1e-9
     ]
     room3_engine.lots.reconcile_to_broker(ss, ss.room3_open_positions)
+    room3_engine.lots.heal_lots_from_watch(
+        ss, ss.get("room3_watch_book"), ss.room3_open_positions
+    )
     dbg = room3_alpaca.fetch_closed_trades_today_debug(paper=paper)
     hist = list(ss.get("room3_trade_history") or [])
     seen = {str(r.get("id") or "") for r in hist if isinstance(r, dict)}
@@ -461,7 +464,7 @@ def _apply_signals(ss: PulseState, book: dict[str, Any], signals: list[dict], *,
                     line["state"] = "in"
                     line.pop("order_pending", None)
                     fill_qty = filled if filled > 0 else abs(float(sig.get("qty") or 0))
-                    lot_row = room3_lots.append_lot(
+                    room3_lots.append_lot(
                         ss,
                         {
                             "ticker": sym,
@@ -479,18 +482,9 @@ def _apply_signals(ss: PulseState, book: dict[str, Any], signals: list[dict], *,
                             "exit_stop_px": sig.get("exit_stop_px") or line.get("exit_stop_px"),
                             "exit_tgt_px": sig.get("exit_tgt_px") or line.get("exit_tgt_px"),
                             "1a_handle": sig.get("1a_handle") or line.get("1a_handle"),
-                        },
-                    )
-                    room3_lots.remember_entry_fill(
-                        ss,
-                        {
-                            "ticker": sym,
-                            "tf": str(lot_row.get("tf") or sig.get("timeframe") or ""),
-                            "strategy": str(lot_row.get("letter") or lot_row.get("strategy") or ""),
-                            "layout_id": str(lot_row.get("layout_id") or ""),
-                            "qty": fill_qty,
                             "order_id": str(result.get("order_id") or ""),
-                            "lot_id": str(lot_row.get("id") or ""),
+                            "entry_time": result.get("filled_at")
+                            or datetime.now(ET).strftime("%H:%M:%S"),
                         },
                     )
                     open_syms.add(sym)

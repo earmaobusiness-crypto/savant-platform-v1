@@ -26,7 +26,7 @@ def _bar(o, h, l, c, v=100.0):
 
 def _climax_slices():
     quiet = _bar(3.05, 3.06, 3.04, 3.05, v=50)
-    dump = _bar(3.02, 3.025, 2.851, 2.9215, v=400)
+    dump = _bar(3.02, 3.025, 2.84, 2.9215, v=800)
     hold = _bar(2.93, 2.95, 2.92, 2.9409, v=80)
     return [quiet] * 5 + [dump, hold]
 
@@ -101,7 +101,23 @@ def test_5b_skips_open_chop():
     assert "9:30" in note
 
 
-def test_5b_waits_without_climax():
+def test_5b_waits_small_dump():
+    ss = _SS(_now_et=datetime(2026, 9, 11, 12, 59, tzinfo=ET))
+    quiet = _bar(3.05, 3.06, 3.04, 3.05, v=50)
+    dump = _bar(3.02, 3.025, 2.90, 2.94, v=800)
+    hold = _bar(2.95, 2.97, 2.94, 2.96, v=80)
+    ready, note = m._entry_trigger_ready(
+        {"ticker": "FTFT"},
+        [quiet] * 5 + [dump, hold],
+        last_px=2.96,
+        tf="1m",
+        strategy="5B (1M)",
+        layout_id="5",
+        structural=33.0,
+        session_state=ss,
+    )
+    assert ready is False
+    assert "dump-then-hold" in note
     ss = _SS(_now_et=datetime(2026, 9, 11, 9, 55, tzinfo=ET))
     knife = _bar(3.02, 3.06, 2.97, 2.99, v=200)
     ready, note = m._entry_trigger_ready(
@@ -121,7 +137,7 @@ def test_5b_waits_without_climax():
 def test_5b_waits_without_rvol():
     ss = _SS(_now_et=datetime(2026, 9, 11, 12, 59, tzinfo=ET))
     quiet = _bar(3.05, 3.06, 3.04, 3.05, v=100)
-    dump = _bar(3.02, 3.025, 2.851, 2.9215, v=250)
+    dump = _bar(3.02, 3.025, 2.84, 2.9215, v=250)
     hold = _bar(2.93, 2.95, 2.92, 2.9409, v=80)
     ready, note = m._entry_trigger_ready(
         {"ticker": "FTFT"},

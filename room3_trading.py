@@ -1196,7 +1196,7 @@ def _session_pl_stats() -> dict:
     decided = wins + losses
     win_rate = (wins / decided * 100.0) if decided else 0.0
     trades_today = len(closed_rows)
-    awaiting_review = len(pending)
+    awaiting_review = sum(1 for p in pending if _row_has_frozen_identity(p))
     tradable = _clamp_tradable(equity)
     book_day = str(st.session_state.get("room3_tradable_session_day") or "")
     book = float(st.session_state.get("room3_tradable_session_used") or 0)
@@ -1885,6 +1885,7 @@ def _sync_pending_from_closed_history() -> None:
         if not str(p.get("operator_vote") or "").strip()
         and _within_review_hold(p)
         and not _row_matches_voided_session(p)
+        and _row_has_frozen_identity(p)
     ]
     for row in list(st.session_state.get("room3_trade_history") or []):
         if not _trade_is_closed_row(row):
@@ -1908,13 +1909,16 @@ def _sync_pending_from_closed_history() -> None:
                     break
             continue
         item = _enrich_trade_row_meta(dict(row))
-        if _row_has_frozen_identity(item):
-            _copy_frozen_identity(item, row)
+        if not _row_has_frozen_identity(item):
+            continue
+        _copy_frozen_identity(item, row)
         if not item.get("review_queued_at"):
             item["review_queued_at"] = now_iso
             row["review_queued_at"] = now_iso
         pending.append(item)
-    st.session_state.room3_pending_reviews = pending
+    st.session_state.room3_pending_reviews = [
+        p for p in pending if _row_has_frozen_identity(p)
+    ]
 
 
 def _dedupe_trade_history(hist: list | None = None) -> list:
@@ -2433,6 +2437,11 @@ def _reconcile_watch_book_with_broker() -> int:
     open_syms = _broker_open_symbols()
     book["keep_tickers"] = sorted(open_syms)
     n = 0
+    room3_lots.heal_lots_from_watch(
+        st.session_state,
+        book,
+        st.session_state.get("room3_open_positions") or [],
+    )
     for line in lines.values():
         if not isinstance(line, dict):
             continue
@@ -2475,6 +2484,7 @@ def _reconcile_watch_book_with_broker() -> int:
                     "exit_stop_px": line.get("exit_stop_px"),
                     "exit_tgt_px": line.get("exit_tgt_px"),
                     "1a_handle": line.get("1a_handle"),
+                    "entry_time": line.get("entry_time") or line.get("filled_at"),
                 },
             )
         n += 1
@@ -3278,9 +3288,7 @@ def _render_trade_history() -> None:
         st.caption(
             f"Broker closed sync · {sync_meta.get('at') or '—'} · "
             f"session {sync_meta.get('session_day') or '—'} · "
-            f"{sync_meta.get('today_closed_count', sync_meta.get('closed_count', 0))} today / "
-            f"{sync_meta.get('closed_count', 0)} lookback from "
-            f"{sync_meta.get('fill_events', 0)} fills"
+            f"{sync_meta.get('today_closed_count', sync_meta.get('closed_count', 0))} today"
         )
 
     fb = st.session_state.room3_strategy_feedback or {}
@@ -3634,7 +3642,6 @@ def _render_all_time_panel() -> None:
     """Hidden all-time readout — collective P/L vs bankroll, risk, expectancy."""
     at = _all_time_stats()
     start = float(at["start"])
-    closed = list(at.get("closed_trades") or [])
     _render_metric_tiles(
         [
             {
@@ -3683,28 +3690,8 @@ def _render_all_time_panel() -> None:
     )
     st.caption(
         f"Live tiles (not props) · Collective P/L = current account − starting bankroll "
-        f"(${start:,.2f}). Round-trips come from Alpaca fill lookback + Session history."
+        f"(${start:,.2f}). Finished days live under Session history."
     )
-    if closed:
-        table_rows = [
-            {
-                "Date": str(r.get("session_date") or "—"),
-                "Ticker": r.get("ticker"),
-                "TF": _display_trade_timeframe(r),
-                "Strategy": _display_trade_strategy(r),
-                "P/L $": _fmt_pl_usd(r.get("pnl_usd")),
-                "P/L %": _fmt_pl_pct(r.get("pnl_pct")),
-                "Exit": r.get("exit_time") or "—",
-            }
-            for r in closed
-        ]
-        st.markdown("**Closed round-trips in lookback**")
-        _render_dark_table(table_rows)
-    else:
-        st.caption(
-            "No closed round-trips in the Alpaca lookback yet. "
-            "Session history fills from paired buy/sell fills, not from belt names."
-        )
     _render_equity_trajectory_chart(at, height=360)
 
 
@@ -3907,8 +3894,9 @@ def _render_operator_review_panel() -> None:
         "Bad Handle can switch that letter to limit / wait-pullback on this shot (slippage) — "
         "it does not change size and does not delete the letter. "
         "Hunt (the detectors) waits for 2 Bads on two names before getting more cautious. "
-        "Green = profit · red = loss. Dash cards are not a vote. "
-        "Unvoted stays 24h after that window ended. Revert is Strategy health → DNA versions."
+        "Green = profit · red = loss. Closes with no TF / strategy are dropped from this pile "
+        "(log and P/L stay). Unvoted stays 24h after that window ended. "
+        "Revert is Strategy health → DNA versions."
     )
     _sync_pending_from_closed_history()
     pending = st.session_state.room3_pending_reviews or []
@@ -3918,6 +3906,8 @@ def _render_operator_review_panel() -> None:
     shown = 0
     for i, trade in enumerate(pending):
         if trade.get("review_void") or _row_matches_voided_session(trade):
+            continue
+        if not _row_has_frozen_identity(trade):
             continue
         shown += 1
         tid = str(trade.get("id") or "").strip()
@@ -3961,9 +3951,6 @@ def _render_operator_review_panel() -> None:
         )
         if is_gap:
             st.caption("Note only — reboot cut this hold. Not a ✓/✗. Does not feed Room 2.")
-            continue
-        if not _row_has_frozen_identity(trade):
-            st.caption("No TF / strategy on this close — not a vote. Does not feed DNA.")
             continue
         b1, b2, _ = st.columns([1, 1, 2])
         with b1:
@@ -4918,7 +4905,7 @@ def _render_execution_posture(mode: str) -> None:
             f"Collective matrix ({src}) · **{hs['layout_count']} layout bucket(s)** "
             f"from **{vault_n}** pattern save(s) · "
             f"entry when map match ≥ **{room3_matrix.MATCH_THRESHOLD_PCT}%** · "
-            f"**5B (1M)** dump-then-hold + RVOL ≥2, first shot of the day "
+            f"**5B (1M)** dump-then-hold + RVOL ≥3, dump range ≥6%, first shot of the day "
             f"(skip 9:30–9:45 ET) · stop under the 5-bar lookback low (floor 2%), "
             f"hold for half the pack move (~16.5%) · "
             f"**2A (1M)** only if the live up-window still looks like the packs "
@@ -4929,6 +4916,12 @@ def _render_execution_posture(mode: str) -> None:
             f"(skip 9:30–9:45 ET); lookback-low stop (floor 2%), 6.25% target; "
             f"if it stops, 15 min cool then one more 2D shot; market in RTH, "
             f"limit outside RTH · "
+            f"**2B (1M)** 9-bar window still up ≥10% and last bar range ≥2% "
+            f"(no RVOL gate), skip 9:30–9:45 ET, first shot, 2% dip then green reclaim, "
+            f"6% target · "
+            f"**2C (1M)** slower than 2B (5-bar ≥4%, 9-bar ≥4%, last bar range ≥3%, "
+            f"no RVOL gate), skip 9:30–10:00 ET, first shot, 1% dip then green reclaim, "
+            f"10% target · "
             f"other letters: placeholder Handle (1m/5m skip 9:30–9:45, 1m RVOL ≥2, "
             f"first of that letter that day, wait a dip, lookback-low stop floor 2%, "
             f"half pack target) — not specialized yet · "
@@ -5772,14 +5765,17 @@ def _room3_heartbeat_fragment() -> None:
                             "entry_px": result.get("filled_avg_price")
                             or sig.get("ref_price")
                             or line.get("entry_price"),
-                    "entry_match_pct": sig.get("match_pct") or line.get("entry_match_pct"),
-                    "structural_move_pct": line.get("entry_structural_move_pct"),
-                    "exit_style": sig.get("exit_style") or line.get("exit_style"),
-                    "exit_r_frac": sig.get("exit_r_frac") or line.get("exit_r_frac"),
-                    "exit_stop_px": sig.get("exit_stop_px") or line.get("exit_stop_px"),
-                    "exit_tgt_px": sig.get("exit_tgt_px") or line.get("exit_tgt_px"),
-                    "1a_handle": sig.get("1a_handle") or line.get("1a_handle"),
-                },
+                            "entry_match_pct": sig.get("match_pct") or line.get("entry_match_pct"),
+                            "structural_move_pct": line.get("entry_structural_move_pct"),
+                            "exit_style": sig.get("exit_style") or line.get("exit_style"),
+                            "exit_r_frac": sig.get("exit_r_frac") or line.get("exit_r_frac"),
+                            "exit_stop_px": sig.get("exit_stop_px") or line.get("exit_stop_px"),
+                            "exit_tgt_px": sig.get("exit_tgt_px") or line.get("exit_tgt_px"),
+                            "1a_handle": sig.get("1a_handle") or line.get("1a_handle"),
+                            "order_id": str(result.get("order_id") or ""),
+                            "entry_time": result.get("filled_at")
+                            or datetime.now(ET).strftime("%H:%M:%S"),
+                        },
                     )
                     _persist_screener_to_disk()
                     if not sig.get("scale_in"):

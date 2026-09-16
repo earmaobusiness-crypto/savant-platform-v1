@@ -76,3 +76,21 @@ def test_watch_book_for_disk_drops_slices():
     assert "slices" not in slim["lines"]["FTFT:1m"]
     assert "_overlay_cache" not in slim
     assert slim["lines"]["FTFT:1m"]["ticker"] == "FTFT"
+
+
+def test_dash_close_is_not_reviewable():
+    assert t._row_has_frozen_identity(
+        {"ticker": "PDSB", "timeframe": "—", "strategy": "Alpaca"}
+    ) is False
+
+
+def test_named_close_is_reviewable():
+    assert t._row_has_frozen_identity(
+        {
+            "ticker": "ADBT",
+            "timeframe": "5m",
+            "strategy": "8B (5M)",
+            "matrix_timeframe": "5m",
+            "matrix_strategy": "8B (5M)",
+        }
+    ) is True

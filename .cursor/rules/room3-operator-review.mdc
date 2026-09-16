@@ -9,7 +9,7 @@ alwaysApply: true
 
 **Bad** = this *shot* was off, not “the letter is dead.” **Handle** (when X, do Y) can apply **now** — prefer **limit** / wait-pullback. That can change order style (slippage). It does **not** change size. **Hunt** (detectors) waits for **two** Bads on **two names** before hunt_caution (patient entry). Bye-bye is never a Bad tap.
 
-Vote only cards that already show **TF + strategy**. Dash cards must not learn.
+Vote only cards that already show **TF + strategy**. Dash cards (no TF / strategy) are **dropped from Operator review** — they cannot be voted and must not learn. Log and P/L stay.
 
 **Buttons now:** Hunt / Handle / Purgatoria overlays. Match-floor fade is dead. Vault / Supabase stay read-only. Revert = Strategy health → DNA versions.
 

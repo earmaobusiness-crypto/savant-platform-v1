@@ -1,14 +1,16 @@
 ---
-description: Room 3 — 5B (1M) dump-then-hold tactics (locked 2026-09-14)
+description: Room 3 — 5B (1M) dump-then-hold tactics (locked 2026-09-16 WR push)
 alwaysApply: true
 ---
 
-# 5B (1M) — locked 2026-09-14
+# 5B (1M) — locked 2026-09-16 (WR push)
 
 Detect is still **5B nearest, ≥85%, same TF** (dump gene). Do not treat every 85% print as 5B.
 
-**Tactics:** dump-then-hold (prior 1m red, range ≥4%, vol ≥2× lookback avg; this bar holds low, closes green); tape **RVOL ≥ 2**; **first 5B of the day** on that name; skip **9:30–9:45 ET**; stop under the **5-bar lookback low** (floor 2%); hold for **half the pack move (~16.5%)**. 15 min cool after a stop. Not the 2.5% / 8-minute scalp.
+**Hunt extra:** prior 1m **red**, range **≥6%**, vol ≥2× lookback avg; this bar holds the low and closes green; tape **RVOL ≥ 3**. Wallpaper 4–5% dumps do not fire.
+
+**Tactics:** **first 5B of the day** on that name; skip **9:30–9:45 ET**; **fill now**; stop under the **5-bar lookback low** (floor 2%); hold for **half the pack move (~16.5%)**. 15 min cool after a stop. Not the 2.5% / 8-minute scalp. Do not clip 16.5% — that was not the WR leak.
 
 Local until Cloud push.
 
-**Sep 2–11 belt (Yahoo 1m):** **+15% ($154 on $1,000)** · **win rate 53% (9 of 17)**. Total **~$1,154**. Not live Alpaca. Already ≥51% — do not clip the 16.5% target just to juice WR.
+**Sep 2–11 belt (Yahoo 1m):** a firing day about **+10.2% on $1,000** · **win rate 75% (6 of 8)**. When a ticket wins, about **+12%**. None of those firing days were red. Train **71% (5 of 7)** · test **100% (1 of 1)** — test is thin; 4 of 7 days quiet. Prior RVOL≥2 / dump≥4% was **53% (9 of 17)** / +3.1% firing day with 2 red days. Not live Alpaca.

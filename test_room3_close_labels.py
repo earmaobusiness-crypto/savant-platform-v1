@@ -213,6 +213,178 @@ def test_stamp_leftover_fifo_by_entry_print():
     assert leftover["timeframe"] == "5m"
 
 
+def test_append_lot_remembers_fill_for_leftover():
+    """Tab fills used to skip remember_entry_fill — leftover FIFO then came in as dashes."""
+    ss = _S()
+    lots.append_lot(
+        ss,
+        {
+            "ticker": "PDSB",
+            "tf": "1m",
+            "strategy": "4A (1M)",
+            "qty": 10,
+            "entry_px": 0.608,
+            "entry_time": "11:08:00",
+        },
+    )
+    leftover = lots.stamp_close_row(
+        ss,
+        {
+            "id": "pdsb-fifo",
+            "ticker": "PDSB",
+            "timeframe": "—",
+            "strategy": "Alpaca",
+            "qty": 1,
+            "entry_time": "11:08:12",
+            "entry_price": 0.607,
+            "status": "closed · alpaca",
+        },
+        peel_open=False,
+    )
+    assert leftover["strategy"] == "4A (1M)"
+    assert leftover["timeframe"] == "1m"
+
+
+def test_stamp_from_closed_lot_without_fill_cache():
+    ss = _S()
+    lots.append_lot(
+        ss,
+        {
+            "id": "lot-9a",
+            "ticker": "SUGP",
+            "tf": "15m",
+            "strategy": "9A (15M)",
+            "qty": 168,
+            "entry_px": 0.7774,
+            "entry_time": "11:43:08",
+        },
+    )
+    ss.room3_fill_meta_by_ticker = {}
+    closed = lots.close_lot(ss, "lot-9a")
+    assert closed is not None
+    ss.room3_lot_close_labels = []
+    stamped = lots.stamp_close_row(
+        ss,
+        {
+            "id": "sugp-fifo",
+            "ticker": "SUGP",
+            "timeframe": "—",
+            "strategy": "Alpaca",
+            "qty": 168,
+            "entry_time": "11:43:08",
+            "entry_price": 0.7774,
+            "status": "closed · alpaca",
+        },
+        peel_open=False,
+    )
+    assert stamped["strategy"] == "9A (15M)"
+    assert stamped["timeframe"] == "15m"
+
+
+def test_heal_pads_single_lot_to_broker_pile():
+    ss = _S()
+    lots.append_lot(
+        ss,
+        {
+            "ticker": "ADBT",
+            "tf": "5m",
+            "strategy": "2D (5M)",
+            "qty": 113,
+            "entry_px": 0.11,
+        },
+    )
+    n = lots.heal_lots_from_watch(
+        ss,
+        {
+            "lines": {
+                "ADBT|5m": {
+                    "ticker": "ADBT",
+                    "timeframe": "5m",
+                    "state": "in",
+                    "entry_strategy": "2D (5M)",
+                    "entry_qty": 113,
+                }
+            }
+        },
+        [{"ticker": "ADBT", "qty": 2533}],
+    )
+    assert n == 1
+    opens = lots.open_lots(ss, "ADBT")
+    assert len(opens) == 1
+    assert abs(float(opens[0]["qty"]) - 2533) < 1e-9
+    assert opens[0]["letter"] == "2D (5M)"
+
+
+def test_heal_creates_lot_from_lone_in_line():
+    ss = _S()
+    n = lots.heal_lots_from_watch(
+        ss,
+        {
+            "lines": {
+                "MYSZ|15m": {
+                    "ticker": "MYSZ",
+                    "timeframe": "15m",
+                    "state": "in",
+                    "entry_strategy": "1A (15M)",
+                    "entry_layout": "Layout 1",
+                    "entry_qty": 45,
+                    "entry_price": 2.3,
+                    "entry_time": "13:00:28",
+                }
+            }
+        },
+        [{"ticker": "MYSZ", "qty": 45}],
+    )
+    assert n == 1
+    opens = lots.open_lots(ss, "MYSZ")
+    assert len(opens) == 1
+    assert opens[0]["tf"] == "15m"
+    assert "1A" in str(opens[0]["letter"])
+    leftover = lots.stamp_close_row(
+        ss,
+        {
+            "id": "mysz-flat",
+            "ticker": "MYSZ",
+            "timeframe": "—",
+            "strategy": "Alpaca",
+            "qty": 45,
+            "entry_time": "13:00:29",
+            "entry_price": 2.2985,
+            "status": "closed · flatten",
+        },
+        peel_open=False,
+    )
+    assert leftover["timeframe"] == "15m"
+
+
+def test_heal_does_not_guess_two_letters():
+    ss = _S()
+    n = lots.heal_lots_from_watch(
+        ss,
+        {
+            "lines": {
+                "ADBT|5m-8b": {
+                    "ticker": "ADBT",
+                    "timeframe": "5m",
+                    "state": "in",
+                    "entry_strategy": "8B (5M)",
+                    "entry_qty": 10,
+                },
+                "ADBT|5m-2d": {
+                    "ticker": "ADBT",
+                    "timeframe": "5m",
+                    "state": "in",
+                    "entry_strategy": "2D (5M)",
+                    "entry_qty": 100,
+                },
+            }
+        },
+        [{"ticker": "ADBT", "qty": 110}],
+    )
+    assert n == 0
+    assert lots.open_lots(ss, "ADBT") == []
+
+
 def test_stamp_does_not_borrow_an_earlier_letter():
     """A later BMGL entry is not yesterday's 2B just because the ticker matches."""
     ss = _S()
@@ -251,5 +423,10 @@ if __name__ == "__main__":
     test_open_lots_skips_qty_zero()
     test_reconcile_ghost_lots_to_broker_pile()
     test_stamp_leftover_fifo_by_entry_print()
+    test_append_lot_remembers_fill_for_leftover()
+    test_stamp_from_closed_lot_without_fill_cache()
+    test_heal_pads_single_lot_to_broker_pile()
+    test_heal_creates_lot_from_lone_in_line()
+    test_heal_does_not_guess_two_letters()
     test_stamp_does_not_borrow_an_earlier_letter()
     print("ok")

@@ -21,11 +21,11 @@ CHILD_READY_PCT = 84  # show a strategy sub-lane; fire still waits for MATCH_THR
 EXIT_MATCH_FLOOR_PCT = 65
 STOP_LOSS_PCT = 2.5
 # 5B (1M) execution — DNA still detects; this is the shot.
-# Belt replay (Yahoo 1m, 2026-09-02..11): RVOL≥2, first of day, lookback-low
-# stop, half of ~33% pack structural. Not a next-ticket promise.
-FIVE_B_DUMP_RANGE_PCT = 4.0
+# Belt replay (Yahoo 1m, 2026-09-02..11): dump ≥6% + RVOL≥3, first of day,
+# lookback-low stop, half of ~33% pack structural. Not a next-ticket promise.
+FIVE_B_DUMP_RANGE_PCT = 6.0
 FIVE_B_VOL_MULT = 2.0
-FIVE_B_RVOL_MIN = 2.0
+FIVE_B_RVOL_MIN = 3.0
 FIVE_B_LOOKBACK_BARS = 5
 FIVE_B_STOP_FLOOR_PCT = 2.0
 FIVE_B_TARGET_FRAC = 0.165  # half of stored ~33% structural
@@ -45,6 +45,25 @@ TWO_A_TARGET_FRAC = 0.10  # clipped for WR ≥51% on the Sep belt
 TWO_A_SKIP_UNTIL = dtime(10, 0)
 TWO_A_EXIT_STYLE = "2a_pack_half"
 TWO_A_COOL_SEC = 15 * 60
+# 2B (1M) — 9-bar window still up ≥10%, last bar range ≥2%. Not 2A
+# (no RVOL/green/5% bar). Yahoo 1m belt 2026-09-02..11.
+TWO_B_VEL9_PCT = 10.0
+TWO_B_BAR_RANGE_PCT = 2.0
+TWO_B_DIP_FRAC = 0.02
+TWO_B_TARGET_FRAC = 0.06
+TWO_B_SKIP_UNTIL = dtime(9, 45)
+TWO_B_EXIT_STYLE = "2b_pack"
+TWO_B_COOL_SEC = 15 * 60
+# 2C (1M) — slower than 2B: 5-bar ≥4%, 9-bar ≥4%, last bar range ≥3%.
+# No RVOL gate (2C almost never prints ≥2). Yahoo 1m belt 2026-09-02..11.
+TWO_C_VEL5_PCT = 4.0
+TWO_C_VEL9_PCT = 4.0
+TWO_C_BAR_RANGE_PCT = 3.0
+TWO_C_DIP_FRAC = 0.01
+TWO_C_TARGET_FRAC = 0.10
+TWO_C_SKIP_UNTIL = dtime(10, 0)
+TWO_C_EXIT_STYLE = "2c_pack"
+TWO_C_COOL_SEC = 15 * 60
 # 1A (1M) — one gene, three Handles. Classify the live tape; do not apply
 # one recipe to every 1A ≥85% print. Yahoo 1m belt 2026-09-02..11.
 ONE_A_RVOL_MIN = 2.0
@@ -75,7 +94,7 @@ TWO_D_TARGET_FRAC = 0.0625
 TWO_D_SKIP_UNTIL = dtime(9, 45)
 TWO_D_EXIT_STYLE = "2d_pack"
 TWO_D_COOL_SEC = 15 * 60
-# Placeholder Handle for every other live letter (not 5B / 2A / 1A / 2D). Gene stays
+# Placeholder Handle for every other live letter (not 5B / 2A / 1A / 2D / 2B / 2C). Gene stays
 # nearest ≥85% same TF. Tactics only — specialize later.
 PH_EXIT_STYLE = "ph_pack"
 PH_RVOL_MIN = 2.0
@@ -450,6 +469,20 @@ def _is_2a_1m(strategy: str, tf: str = "1m") -> bool:
     return token.startswith("2A") and "1M" in token
 
 
+def _is_2b_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("2B") and "1M" in token
+
+
+def _is_2c_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("2C") and "1M" in token
+
+
 def _is_1a_1m(strategy: str, tf: str = "1m") -> bool:
     if room3_recipes.normalize_tf(tf) != "1m":
         return False
@@ -492,6 +525,14 @@ def _5b_open_chop(session_state: Any = None) -> bool:
 
 def _2a_open_chop(session_state: Any = None) -> bool:
     return _rth_before(session_state, TWO_A_SKIP_UNTIL)
+
+
+def _2b_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, TWO_B_SKIP_UNTIL)
+
+
+def _2c_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, TWO_C_SKIP_UNTIL)
 
 
 def _ph_open_chop(session_state: Any = None) -> bool:
@@ -549,6 +590,12 @@ def _pack_mark_stop_cool(session_state: Any, ticker: str, lot: dict[str, Any]) -
     style = str(lot.get("exit_style") or "")
     if _is_2a_1m(strat, tf) or style == TWO_A_EXIT_STYLE:
         _2a_mark_stop_cool(session_state, ticker)
+        return
+    if _is_2b_1m(strat, tf) or style == TWO_B_EXIT_STYLE:
+        _2b_mark_stop_cool(session_state, ticker)
+        return
+    if _is_2c_1m(strat, tf) or style == TWO_C_EXIT_STYLE:
+        _2c_mark_stop_cool(session_state, ticker)
         return
     if _is_2d_1m(strat, tf) or style == TWO_D_EXIT_STYLE:
         _2d_mark_stop_cool(session_state, ticker)
@@ -617,6 +664,82 @@ def _2a_used_today(session_state: Any, ticker: str) -> bool:
 
 def _2a_mark_used(session_state: Any, ticker: str) -> None:
     _5b_bag_set(session_state, "room3_2a_used_day", ticker, _5b_day_key(session_state))
+
+
+def _2b_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_2b_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _2b_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=TWO_B_COOL_SEC)
+    _5b_bag_set(session_state, "room3_2b_cool_until", ticker, until.isoformat())
+
+
+def _2b_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_2b_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _2b_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_2b_used_day", ticker, _5b_day_key(session_state))
+
+
+def _2c_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_2c_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _2c_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=TWO_C_COOL_SEC)
+    _5b_bag_set(session_state, "room3_2c_cool_until", ticker, until.isoformat())
+
+
+def _2c_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_2c_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _2c_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_2c_used_day", ticker, _5b_day_key(session_state))
 
 
 def _1a_cool_until(session_state: Any, ticker: str) -> datetime | None:
@@ -810,6 +933,32 @@ def _2a_gene_ok(slices: list[dict[str, Any]]) -> bool:
     return True
 
 
+def _2b_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """9-bar window still up ≥10%, last bar range ≥2%. No RVOL/green — that is 2A."""
+    if len(slices) < 3:
+        return False
+    if _window_velocity_pct(slices, 9) < TWO_B_VEL9_PCT:
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < TWO_B_BAR_RANGE_PCT:
+        return False
+    return True
+
+
+def _2c_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Slower than 2B: 5-bar ≥4%, 9-bar ≥4%, last bar range ≥3%. No RVOL."""
+    if len(slices) < 3:
+        return False
+    if _window_velocity_pct(slices, 5) < TWO_C_VEL5_PCT:
+        return False
+    if _window_velocity_pct(slices, 9) < TWO_C_VEL9_PCT:
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < TWO_C_BAR_RANGE_PCT:
+        return False
+    return True
+
+
 def _2d_gene_ok(slices: list[dict[str, Any]]) -> bool:
     """Hunt extra — not a new gene. Fat green bar + RVOL ≥3. Wallpaper 2D does not fire."""
     if len(slices) < 2:
@@ -884,7 +1033,7 @@ def _5b_tape_rvol(slices: list[dict[str, Any]]) -> float:
 
 
 def _5b_climax_ok(slices: list[dict[str, Any]]) -> bool:
-    """Prior 1m dumps ≥4% on ≥2× volume; this bar holds the low and closes green."""
+    """Prior 1m dumps ≥6% on ≥2× volume; this bar holds the low and closes green."""
     if len(slices) < 2:
         return False
     prior, last = slices[-2], slices[-1]
@@ -951,6 +1100,28 @@ def _2a_pack_exits(
     stop_px, _, stop_frac = _5b_pack_exits(slices, fill, 0.0)
     px = float(fill or 0)
     tgt_px = px * (1.0 + TWO_A_TARGET_FRAC) if px > 0 else 0.0
+    return stop_px, tgt_px, stop_frac
+
+
+def _2b_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    stop_px, _, stop_frac = _5b_pack_exits(slices, fill, 0.0)
+    px = float(fill or 0)
+    tgt_px = px * (1.0 + TWO_B_TARGET_FRAC) if px > 0 else 0.0
+    return stop_px, tgt_px, stop_frac
+
+
+def _2c_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    stop_px, _, stop_frac = _5b_pack_exits(slices, fill, 0.0)
+    px = float(fill or 0)
+    tgt_px = px * (1.0 + TWO_C_TARGET_FRAC) if px > 0 else 0.0
     return stop_px, tgt_px, stop_frac
 
 
@@ -1023,6 +1194,8 @@ def _5b_lot_exit(lot: dict[str, Any]) -> bool:
         FIVE_B_EXIT_STYLE,
         FIVE_B_EXIT_STYLE_LEGACY,
         TWO_A_EXIT_STYLE,
+        TWO_B_EXIT_STYLE,
+        TWO_C_EXIT_STYLE,
         TWO_D_EXIT_STYLE,
         PH_EXIT_STYLE,
         *ONE_A_EXIT_STYLES,
@@ -1033,6 +1206,8 @@ def _5b_lot_exit(lot: dict[str, Any]) -> bool:
     return (
         _is_5b_1m(strat, tf)
         or _is_2a_1m(strat, tf)
+        or _is_2b_1m(strat, tf)
+        or _is_2c_1m(strat, tf)
         or _is_1a_1m(strat, tf)
         or _is_2d_1m(strat, tf)
     )
@@ -1286,6 +1461,32 @@ def _try_queue_child_entry(
                 stamped["exit_stop_px"] = stop_px
                 stamped["exit_tgt_px"] = tgt_px
                 _2a_mark_used(session_state, ticker)
+            elif _is_2b_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _2b_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = TWO_B_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = TWO_B_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _2b_mark_used(session_state, ticker)
+            elif _is_2c_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _2c_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = TWO_C_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = TWO_C_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _2c_mark_used(session_state, ticker)
             elif _is_1a_1m(strategy, tf):
                 handle = str(line.get("1a_handle") or _1a_classify(slices) or "violent")
                 stop_px, tgt_px, stop_frac = _1a_pack_exits(slices, last_px, handle)
@@ -1386,6 +1587,10 @@ def _5b_should_exit(
     else:
         if style == TWO_A_EXIT_STYLE:
             tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + TWO_A_TARGET_FRAC))
+        elif style == TWO_B_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + TWO_B_TARGET_FRAC))
+        elif style == TWO_C_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + TWO_C_TARGET_FRAC))
         elif style == TWO_D_EXIT_STYLE:
             tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + TWO_D_TARGET_FRAC))
         elif style == ONE_A_EXIT_MILD:
@@ -1511,7 +1716,7 @@ def _enter_on_print(
     structural_move_pct: float,
     session_state: Any = None,
 ) -> bool:
-    """Placeholder Handle waits a dip. 5B / 2A / 1A / 2D have their own shot. No 1m pop-now."""
+    """Placeholder Handle waits a dip. 5B / 2A / 1A / 2D / 2B / 2C have their own shot. No 1m pop-now."""
     return False
 
 
@@ -1556,7 +1761,7 @@ def _5b_entry_ready(
     if not _5b_climax_ok(slices):
         return False, "5B · wait dump-then-hold"
     if _5b_tape_rvol(slices) < FIVE_B_RVOL_MIN:
-        return False, "5B · wait RVOL ≥2"
+        return False, "5B · wait RVOL ≥3"
     line["trigger_phase"] = "ready"
     return True, "5B · climax · RVOL · enter now"
 
@@ -1612,6 +1817,112 @@ def _2a_entry_ready(
             return True, "2A · dip-reclaim · enter now"
         return False, "2A · waiting green reclaim"
     return False, "2A · waiting trigger"
+
+
+def _2b_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _2b_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"2B · cool {mins}m after stop"
+    if _2b_open_chop(session_state):
+        return False, "2B · skip 9:30–9:45"
+    if _2b_used_today(session_state, ticker):
+        return False, "2B · first of day already used"
+    phase = str(line.get("trigger_phase") or "")
+    hunting = phase in ("wait_dip", "wait_reclaim", "ready")
+    if not hunting and not _2b_gene_ok(slices):
+        _reset_entry_trigger(line)
+        return False, "2B · wait 9-bar up tape"
+    last = slices[-1] if slices else {}
+    last_c = float(last.get("c") or last_px)
+    last_l = float(last.get("l") or last_c)
+    last_o = float(last.get("o") or last_c)
+    prior = slices[-2] if len(slices) >= 2 else last
+    prior_h = float(prior.get("h") or prior.get("c") or 0)
+    if not line.get("family_armed_px"):
+        line["family_armed_px"] = last_px
+        line["family_armed_high"] = float(last.get("h") or last_px)
+        line["trigger_phase"] = "wait_dip"
+    armed_px = float(line.get("family_armed_px") or last_px)
+    phase = str(line.get("trigger_phase") or "wait_dip")
+    if phase == "ready":
+        return True, "2B · dip-reclaim · enter now"
+    if phase == "wait_dip":
+        if last_l <= armed_px * (1.0 - TWO_B_DIP_FRAC) or last_c < armed_px:
+            line["trigger_phase"] = "wait_reclaim"
+            line["pullback_low"] = last_l
+            return False, "2B · 2% dip · waiting reclaim"
+        return False, "2B · waiting 2% pullback"
+    if phase == "wait_reclaim":
+        pb = min(float(line.get("pullback_low") or last_l), last_l)
+        line["pullback_low"] = pb
+        green = last_c > last_o
+        if last_c > pb and (prior_h <= 0 or last_c >= prior_h) and green:
+            line["trigger_phase"] = "ready"
+            return True, "2B · dip-reclaim · enter now"
+        return False, "2B · waiting green reclaim"
+    return False, "2B · waiting trigger"
+
+
+def _2c_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _2c_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"2C · cool {mins}m after stop"
+    if _2c_open_chop(session_state):
+        return False, "2C · skip 9:30–10:00"
+    if _2c_used_today(session_state, ticker):
+        return False, "2C · first of day already used"
+    phase = str(line.get("trigger_phase") or "")
+    hunting = phase in ("wait_dip", "wait_reclaim", "ready")
+    if not hunting and not _2c_gene_ok(slices):
+        _reset_entry_trigger(line)
+        return False, "2C · wait slower up tape"
+    last = slices[-1] if slices else {}
+    last_c = float(last.get("c") or last_px)
+    last_l = float(last.get("l") or last_c)
+    last_o = float(last.get("o") or last_c)
+    prior = slices[-2] if len(slices) >= 2 else last
+    prior_h = float(prior.get("h") or prior.get("c") or 0)
+    if not line.get("family_armed_px"):
+        line["family_armed_px"] = last_px
+        line["family_armed_high"] = float(last.get("h") or last_px)
+        line["trigger_phase"] = "wait_dip"
+    armed_px = float(line.get("family_armed_px") or last_px)
+    phase = str(line.get("trigger_phase") or "wait_dip")
+    if phase == "ready":
+        return True, "2C · dip-reclaim · enter now"
+    if phase == "wait_dip":
+        if last_l <= armed_px * (1.0 - TWO_C_DIP_FRAC) or last_c < armed_px:
+            line["trigger_phase"] = "wait_reclaim"
+            line["pullback_low"] = last_l
+            return False, "2C · 1% dip · waiting reclaim"
+        return False, "2C · waiting 1% pullback"
+    if phase == "wait_reclaim":
+        pb = min(float(line.get("pullback_low") or last_l), last_l)
+        line["pullback_low"] = pb
+        green = last_c > last_o
+        if last_c > pb and (prior_h <= 0 or last_c >= prior_h) and green:
+            line["trigger_phase"] = "ready"
+            return True, "2C · dip-reclaim · enter now"
+        return False, "2C · waiting green reclaim"
+    return False, "2C · waiting trigger"
 
 
 def _2d_entry_ready(
@@ -1720,7 +2031,7 @@ def _ph_entry_ready(
     structural: float,
     session_state: Any = None,
 ) -> tuple[bool, str]:
-    """Shared Handle for letters that are not 5B / 2A / 1A / 2D. Detect is still ≥85% same TF."""
+    """Shared Handle for letters that are not 5B / 2A / 1A / 2D / 2B / 2C. Detect is still ≥85% same TF."""
     ticker = str(line.get("ticker") or "").upper()
     tf_n = room3_recipes.normalize_tf(tf)
     cool = _ph_cool_until(session_state, ticker, strategy)
@@ -1806,6 +2117,10 @@ def _entry_trigger_ready(
         return _5b_entry_ready(line, slices, last_px=last_px, session_state=session_state)
     if _is_2a_1m(strategy, tf):
         return _2a_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_2b_1m(strategy, tf):
+        return _2b_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_2c_1m(strategy, tf):
+        return _2c_entry_ready(line, slices, last_px=last_px, session_state=session_state)
     if _is_1a_1m(strategy, tf):
         return _1a_entry_ready(line, slices, last_px=last_px, session_state=session_state)
     if _is_2d_1m(strategy, tf):
