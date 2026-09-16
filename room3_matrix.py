@@ -94,11 +94,14 @@ TWO_D_TARGET_FRAC = 0.0625
 TWO_D_SKIP_UNTIL = dtime(9, 45)
 TWO_D_EXIT_STYLE = "2d_pack"
 TWO_D_COOL_SEC = 15 * 60
-# Placeholder Handle for every other live letter (not 5B / 2A / 1A / 2D / 2B / 2C). Gene stays
-# nearest ≥85% same TF. Tactics only — specialize later.
+# Placeholder Handle for every other live letter (not 5B / 2A / 1A / 2D / 2B / 2C).
+# Gene stays nearest ≥85% same TF. Tactics only — specialize later.
+# Remaining 1m: no RVOL gate (that starved 2C). 5m/15m hold after a small dip.
 PH_EXIT_STYLE = "ph_pack"
-PH_RVOL_MIN = 2.0
+PH_RVOL_MIN = 0.0
 PH_DIP_FRAC_1M = 0.01
+PH_DIP_FRAC_5M = 0.006
+PH_DIP_FRAC_15M = 0.008
 PH_SKIP_UNTIL = dtime(9, 45)
 PH_COOL_SEC = 15 * 60
 MIN_SLICES = {"1m": 5, "5m": 4, "15m": 3}
@@ -606,7 +609,7 @@ def _pack_mark_stop_cool(session_state: Any, ticker: str, lot: dict[str, Any]) -
     if _is_5b_1m(strat, tf) or style in (FIVE_B_EXIT_STYLE, FIVE_B_EXIT_STYLE_LEGACY):
         _5b_mark_stop_cool(session_state, ticker)
         return
-    if style == PH_EXIT_STYLE and room3_recipes.normalize_tf(tf) == "1m":
+    if style == PH_EXIT_STYLE:
         _ph_mark_stop_cool(session_state, ticker, strat)
 
 
@@ -2043,8 +2046,8 @@ def _ph_entry_ready(
         return False, f"{strategy} · skip 9:30–9:45"
     if _ph_used_today(session_state, ticker, strategy):
         return False, f"{strategy} · first of day already used"
-    if tf_n == "1m" and _5b_tape_rvol(slices) < PH_RVOL_MIN:
-        return False, f"{strategy} · wait RVOL ≥2"
+    if tf_n == "1m" and PH_RVOL_MIN > 0 and _5b_tape_rvol(slices) < PH_RVOL_MIN:
+        return False, f"{strategy} · wait RVOL ≥{PH_RVOL_MIN:g}"
     last = slices[-1] if slices else {}
     last_c = float(last.get("c") or last_px)
     last_l = float(last.get("l") or last_c)
@@ -2061,11 +2064,12 @@ def _ph_entry_ready(
         return False, "late · move already gone · skip"
     armed_px = float(line.get("family_armed_px") or last_px)
     phase = str(line.get("trigger_phase") or "wait_dip")
-    dip_frac = (
-        PH_DIP_FRAC_1M
-        if tf_n == "1m"
-        else (0.012 if tf_n == "15m" else 0.008)
-    )
+    if tf_n == "15m":
+        dip_frac = PH_DIP_FRAC_15M
+    elif tf_n == "5m":
+        dip_frac = PH_DIP_FRAC_5M
+    else:
+        dip_frac = PH_DIP_FRAC_1M
     if phase == "ready":
         return True, f"{strategy} · dip-reclaim · enter now"
     if phase == "wait_dip":
@@ -2077,17 +2081,15 @@ def _ph_entry_ready(
     if phase == "wait_reclaim":
         pb = min(float(line.get("pullback_low") or last_l), last_l)
         line["pullback_low"] = pb
-        if tf_n == "15m":
+        if tf_n in ("5m", "15m"):
             if last_c > pb and last_c >= armed_px * 0.997:
                 line["trigger_phase"] = "ready"
-                return True, f"{strategy} · 15m hold after pullback"
+                return True, f"{strategy} · {tf_n} hold after pullback"
             return False, f"{strategy} · waiting hold after dip"
         green = last_c > last_o
-        if tf_n == "1m" and not green:
+        if not green:
             return False, f"{strategy} · waiting green reclaim"
         if last_c > pb and (prior_h <= 0 or last_c >= prior_h):
-            if tf_n == "1m" and not green:
-                return False, f"{strategy} · waiting green reclaim"
             line["trigger_phase"] = "ready"
             return True, f"{strategy} · dip-reclaim · enter now"
         return False, f"{strategy} · waiting reclaim after dip"

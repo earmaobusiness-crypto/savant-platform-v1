@@ -45,7 +45,8 @@ def test_other_1m_placeholder_waits_dip():
         session_state=ss,
     )
     assert ready is False
-    assert "pullback" in note or "RVOL" in note
+    assert "pullback" in note
+    assert "RVOL" not in note
     assert m._enter_on_print("5B (1M)", "1m", "5", 33.0) is False
     assert m._enter_on_print("3A (1M)", "1m", "3", 8.0) is False
 

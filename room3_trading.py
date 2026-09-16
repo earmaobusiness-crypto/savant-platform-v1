@@ -4922,8 +4922,9 @@ def _render_execution_posture(mode: str) -> None:
             f"**2C (1M)** slower than 2B (5-bar ≥4%, 9-bar ≥4%, last bar range ≥3%, "
             f"no RVOL gate), skip 9:30–10:00 ET, first shot, 1% dip then green reclaim, "
             f"10% target · "
-            f"other letters: placeholder Handle (1m/5m skip 9:30–9:45, 1m RVOL ≥2, "
-            f"first of that letter that day, wait a dip, lookback-low stop floor 2%, "
+            f"other letters: placeholder Handle (1m/5m skip 9:30–9:45, no 1m RVOL gate, "
+            f"first of that letter that day, 1m waits a 1% dip then green reclaim, "
+            f"5m/15m hold after a small dip, lookback-low stop floor 2%, "
             f"half pack target) — not specialized yet · "
             f"arm engine to fire Alpaca orders."
         )
