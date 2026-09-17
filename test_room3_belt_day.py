@@ -78,6 +78,36 @@ def test_watch_book_for_disk_drops_slices():
     assert slim["lines"]["FTFT:1m"]["ticker"] == "FTFT"
 
 
+def test_adding_a_belt_name_keeps_existing_match():
+    import room3_watcher as w
+
+    book = w.set_filter_universe(w.empty_book(), ["FTFT"])
+    book["lines"]["FTFT:1m"]["match_pct"] = 91
+    book["lines"]["FTFT:1m"]["slices"] = [{"c": 1.0}]
+    book["lines"]["FTFT:1m"]["nearest_strategy"] = "2D (1M)"
+    added = w.set_filter_universe(book, ["FTFT", "TNON"])
+    assert added["lines"]["FTFT:1m"]["match_pct"] == 91
+    assert added["lines"]["FTFT:1m"]["slices"] == [{"c": 1.0}]
+    assert "TNON:1m" in added["lines"]
+    assert int(added["lines"]["TNON:1m"].get("match_pct") or 0) == 0
+
+
+def test_empty_tape_does_not_blank_existing_match():
+    import room3_matrix as m
+
+    line = {
+        "ticker": "FTFT",
+        "timeframe": "1m",
+        "match_pct": 91,
+        "slices": [],
+        "nearest_strategy": "2D (1M)",
+        "nearest_layout": "2",
+    }
+    m.maybe_queue_matrix_signals({}, line, {"layouts": []}, {}, engine_armed=False)
+    assert line["match_pct"] == 91
+    assert line["nearest_strategy"] == "2D (1M)"
+
+
 def test_dash_close_is_not_reviewable():
     assert t._row_has_frozen_identity(
         {"ticker": "PDSB", "timeframe": "—", "strategy": "Alpaca"}

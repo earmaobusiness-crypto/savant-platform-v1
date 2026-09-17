@@ -5021,7 +5021,19 @@ def ingest_filter_universe(tickers: list[str] | None) -> None:
     """
     init_room3_session_state()
     names = [str(t).strip().upper() for t in (tickers or []) if str(t).strip()]
-    st.session_state.room3_filter_universe = names[: room3_watcher.MAX_NAMES]
+    names = names[: room3_watcher.MAX_NAMES]
+    cur = [
+        str(t).strip().upper()
+        for t in (st.session_state.get("room3_filter_universe") or [])
+        if str(t).strip()
+    ]
+    book = st.session_state.get("room3_watch_book") or {}
+    if names == cur:
+        if names and room3_watcher.maps_cover_universe(book, names):
+            return
+        if not names and not (book.get("lines") or {}):
+            return
+    st.session_state.room3_filter_universe = names
     st.session_state.room3_watch_book = room3_watcher.set_filter_universe(
         st.session_state.get("room3_watch_book") or room3_watcher.empty_book(),
         st.session_state.room3_filter_universe,
@@ -5208,7 +5220,7 @@ def _hydrate_screener_from_disk() -> None:
         q_belt = str(st.query_params.get("belt") or "")
     except Exception:
         q_belt = ""
-    if q_belt:
+    if q_belt and not uni:
         from_url = list(room3_filters.parse_screener_paste(q_belt).get("tickers") or [])
         if from_url:
             uni = from_url
@@ -5300,19 +5312,28 @@ def _persist_screener_to_disk() -> None:
     room3_screener.save_screener_snapshot(operator)
 
 
-def _sync_belt_query(names: list[str] | None) -> None:
-    """Keep tickers in the URL so a Streamlit remount can restore the belt."""
+def _sync_belt_query(names: list[str] | None) -> bool:
+    """Keep tickers in the URL so a Streamlit remount can restore the belt.
+
+    Returns True when the URL changed (Streamlit already schedules a rerun).
+    """
     wanted = ",".join(list(names or [])[: room3_watcher.MAX_NAMES])
     try:
         current = str(st.query_params.get("belt") or "")
         if current == wanted:
-            return
+            return False
         if wanted:
             st.query_params["belt"] = wanted
         elif "belt" in st.query_params:
             del st.query_params["belt"]
+        return True
     except Exception:
-        pass
+        return False
+
+
+def _belt_ui_refresh(names: list[str] | None) -> None:
+    """Keep live maps in session. Writing belt= remounts Streamlit and zeros Match%."""
+    st.rerun()
 
 
 def _screener_rules_for_scan() -> dict:
@@ -5995,9 +6016,7 @@ def _render_rth_filter_attach() -> None:
             "source": "manual",
         }
         st.session_state.room3_belt_flash = "Belt cleared."
-        _persist_screener_to_disk()
-        _sync_belt_query([])
-        st.rerun()
+        _belt_ui_refresh([])
 
     if drop:
         parsed = room3_filters.parse_screener_paste(raw)
@@ -6036,9 +6055,7 @@ def _render_rth_filter_attach() -> None:
             if skipped:
                 bits.append("cap — not added: " + ", ".join(skipped[:8]))
             st.session_state.room3_belt_flash = " · ".join(bits)
-            _persist_screener_to_disk()
-            _sync_belt_query(merged)
-            st.rerun()
+            _belt_ui_refresh(merged)
 
     if belt:
         st.caption("On belt now — × to drop one name (maps keep going if that name is still in a trade):")
@@ -6055,9 +6072,7 @@ def _render_rth_filter_attach() -> None:
                     last["at"] = datetime.now(ET).strftime("%H:%M:%S ET")
                     st.session_state.room3_screener_last = last
                     st.session_state.room3_belt_flash = f"Removed {t} · {len(remaining)} left"
-                    _persist_screener_to_disk()
-                    _sync_belt_query(remaining)
-                    st.rerun()
+                    _belt_ui_refresh(remaining)
 
     leftover = []
     seen = {str(x).upper() for x in belt}

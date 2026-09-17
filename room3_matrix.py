@@ -2818,7 +2818,12 @@ def maybe_queue_matrix_signals(
     import room3_watcher
 
     match = score_line_against_repertoire(line, repertoire)
-    line["match_pct"] = int(match.get("spatial_match_pct") or 0)
+    new_pct = int(match.get("spatial_match_pct") or 0)
+    prior_pct = int(line.get("match_pct") or 0)
+    # Empty tape (belt add / remount) must not blank Kind / Match% on names that already scored.
+    if not (line.get("slices") or []) and prior_pct > 0 and new_pct <= 0:
+        return
+    line["match_pct"] = new_pct
     layout_id = str(match.get("nearest_layout_id") or "—")
     line["nearest_layout"] = layout_id
     tf = str(line.get("timeframe") or "1m")

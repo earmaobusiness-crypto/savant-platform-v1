@@ -60,6 +60,13 @@ def _book():
     return book
 
 
+def test_maps_cover_universe_skips_when_three_tfs_exist():
+    book = w.empty_book()
+    w.ensure_ticker_maps(book, "MEDS")
+    assert w.maps_cover_universe(book, ["MEDS"]) is True
+    assert w.maps_cover_universe(book, ["MEDS", "RETO"]) is False
+
+
 def test_unfilled_5m_does_not_own_seat():
     book = _book()
     one = book["lines"][w.line_key("MEDS", "1m")]

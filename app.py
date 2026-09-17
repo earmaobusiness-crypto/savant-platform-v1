@@ -1,4 +1,3 @@
-import yfinance as yf
 import os
 import re
 import statistics
@@ -26,10 +25,44 @@ try:
 except ModuleNotFoundError:  # wrong interpreter / incomplete env — don't kill Room 3
     Groq = None  # type: ignore[misc, assignment]
 
+ROOM1_LABEL = "🏛️ Room 1: Real-Time Front Desk"
+ROOM2_LABEL = "🔮 Room 2: Forensic Pattern Lab"
+ROOM3_LABEL = "⚡ Room 3: Live / Paper Trading"
+ROOM1_SHORT = "🏛️ R1"
+ROOM2_SHORT = "🔮 R2"
+ROOM3_SHORT = "⚡ R3"
+ROOM_SHORT_MAP = {
+    ROOM1_SHORT: ROOM1_LABEL,
+    ROOM2_SHORT: ROOM2_LABEL,
+    ROOM3_SHORT: ROOM3_LABEL,
+}
+_HUB_CODE_TO_LABEL = {"1": ROOM1_LABEL, "2": ROOM2_LABEL, "3": ROOM3_LABEL}
+_HUB_LABEL_TO_CODE = {label: code for code, label in _HUB_CODE_TO_LABEL.items()}
+
+
+def _hub_code_from_query() -> str:
+    """hub=3 on the URL — skip Room 1/2 vault boot so Room 3 reconnects don't wait on it."""
+    try:
+        code = str(st.query_params.get("hub") or "").strip()
+    except Exception:
+        return ""
+    return code if code in _HUB_CODE_TO_LABEL else ""
+
+
+def _yf():
+    """Room 1 only — don't load Yahoo on a Room 3 boot."""
+    import yfinance as yf
+
+    return yf
+
+
 if "layout_master_matrix_index" not in st.session_state:
     st.session_state.layout_master_matrix_index = []
-core_quantum.hydrate_layout_library_from_vault()
-self_surgery.hydrate_repair_bay_from_cloud()
+# Room 3 reads the matrix through room3_bridge (cached). Vault + Repair Bay
+# hydrates here are Room 1/2 — they were adding 20s+15s to every Room 3 comeback.
+if _hub_code_from_query() != "3":
+    core_quantum.hydrate_layout_library_from_vault()
+    self_surgery.hydrate_repair_bay_from_cloud()
 
 if "r2_good_ticker" not in st.session_state:
     st.session_state.r2_good_ticker = ""
@@ -44,20 +77,6 @@ if "quantum_terminal_output" not in st.session_state:
     st.session_state.quantum_terminal_output = (
         "📡 [DATALINK: ENGINE_IDLE] TERMINAL ENGINE ONLINE. WAITING FOR DEPLOY SIGNAL..."
     )
-
-ROOM1_LABEL = "🏛️ Room 1: Real-Time Front Desk"
-ROOM2_LABEL = "🔮 Room 2: Forensic Pattern Lab"
-ROOM3_LABEL = "⚡ Room 3: Live / Paper Trading"
-ROOM1_SHORT = "🏛️ R1"
-ROOM2_SHORT = "🔮 R2"
-ROOM3_SHORT = "⚡ R3"
-ROOM_SHORT_MAP = {
-    ROOM1_SHORT: ROOM1_LABEL,
-    ROOM2_SHORT: ROOM2_LABEL,
-    ROOM3_SHORT: ROOM3_LABEL,
-}
-_HUB_CODE_TO_LABEL = {"1": ROOM1_LABEL, "2": ROOM2_LABEL, "3": ROOM3_LABEL}
-_HUB_LABEL_TO_CODE = {label: code for code, label in _HUB_CODE_TO_LABEL.items()}
 
 SEC_HEADERS = {"User-Agent": "SavantApprentice earmaobusiness@gmail.com"}
 SECTOR_ETFS = [
@@ -1256,7 +1275,7 @@ def _room1_yf_quote_bundle(symbol: str) -> dict:
     if not clean:
         return empty
     try:
-        ytk = yf.Ticker(clean)
+        ytk = _yf().Ticker(clean)
         try:
             info = ytk.info or {}
         except Exception:
@@ -1447,7 +1466,7 @@ def _fetch_news_wire(ticker: str) -> list[dict]:
     items: list[dict] = []
     clean = str(ticker or "").strip().upper()
     try:
-        for idx, row in enumerate((yf.Ticker(clean).news or [])[:15]):
+        for idx, row in enumerate((_yf().Ticker(clean).news or [])[:15]):
             title = str(row.get("title") or "").strip()
             url = str(row.get("link") or "").strip()
             source = str(row.get("publisher") or row.get("publisherName") or "").strip()
@@ -2303,7 +2322,7 @@ def _fetch_sector_rotation() -> str:
     flows: list[tuple[str, str, float]] = []
     for sym, label in SECTOR_ETFS:
         try:
-            info = yf.Ticker(sym).info or {}
+            info = _yf().Ticker(sym).info or {}
             chg = info.get("regularMarketChangePercent")
             if chg is None and info.get("regularMarketPreviousClose"):
                 price = info.get("regularMarketPrice", info.get("currentPrice", 0.0)) or 0.0
@@ -2344,7 +2363,7 @@ def _pearson_correlation(series_a: list[float], series_b: list[float]) -> float:
 
 def _price_velocity_array(symbol: str, periods: int = 20) -> list[float]:
     try:
-        hist = yf.Ticker(symbol).history(period="2mo", interval="1d")
+        hist = _yf().Ticker(symbol).history(period="2mo", interval="1d")
         if hist is None or len(hist) < periods + 1:
             return []
         closes = [float(x) for x in hist["Close"].dropna().tolist()]
@@ -2403,7 +2422,7 @@ def _compute_volatility_engine(
 ) -> tuple[str, bool]:
     institutional_accumulation_detected = False
     try:
-        hist = yf.Ticker(ticker).history(period="1mo", interval="1d")
+        hist = _yf().Ticker(ticker).history(period="1mo", interval="1d")
         if hist is None or len(hist) < 10:
             return "VOL:INSUFFICIENT_HIST|VOLMOM:NORMAL|INST_ACCUM:FALSE", False
         closes = [float(x) for x in hist["Close"].dropna().tolist()]
@@ -2481,7 +2500,7 @@ def _build_data_payload_string(
 def _room1_session_regime_hint(ticker: str, price: float, day_high: float, day_low: float) -> str:
     """Light intraday shape tag for Rule A trend — does not change response format."""
     try:
-        hist = yf.Ticker(ticker).history(period="1d", interval="5m")
+        hist = _yf().Ticker(ticker).history(period="1d", interval="5m")
         if hist is None or len(hist) < 8:
             return "NA"
         closes = [float(x) for x in hist["Close"].dropna().tolist()]

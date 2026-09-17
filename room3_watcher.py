@@ -237,6 +237,19 @@ def set_filter_universe(book: dict[str, Any], tickers: list[str] | None) -> dict
     return book
 
 
+def maps_cover_universe(book: dict[str, Any] | None, names: list[str]) -> bool:
+    """True when every belt name already has 1m/5m/15m lines — skip a no-op ingest."""
+    lines = (book or {}).get("lines") or {}
+    for raw in names or []:
+        t = str(raw or "").strip().upper()
+        if not t:
+            continue
+        for tf in TIMEFRAMES:
+            if line_key(t, tf) not in lines:
+                return False
+    return True
+
+
 def ensure_maps(book: dict[str, Any], keep_tickers: list[str] | None = None) -> dict[str, Any]:
     """Open 1m/5m/15m lines as soon as names land — don't wait for a heartbeat."""
     if keep_tickers is not None:
@@ -765,6 +778,8 @@ def tick_watcher(
     for key, line in list((book.get("lines") or {}).items()):
         if line.get("state") == "flat_day":
             continue
+        if line.get("seeded") and not (line.get("slices") or []):
+            line["seeded"] = False
         keep_set = set(book.get("keep_tickers") or [])
         if (
             not line.get("in_filter")

@@ -21,6 +21,8 @@ from typing import Any
 import requests
 
 REPERTOIRE_CACHE_TTL_SEC = 45
+VAULT_ROWS_MEM_TTL_SEC = 120
+VAULT_FETCH_TIMEOUT_SEC = 8
 
 ROOM2_OBSERVE_KEYS = (
     "layout_master_matrix_index",
@@ -322,34 +324,69 @@ def _aggregate_rows_into_layouts(rows: list[dict[str, Any]]) -> list[dict[str, A
     return out[:LAYOUT_CAP]
 
 
+_VAULT_ROWS_MEM: list[dict[str, Any]] | None = None
+_VAULT_ROWS_AT = 0.0
+_VAULT_ROWS_TTL = VAULT_ROWS_MEM_TTL_SEC
+
+
+def _reset_vault_rows_mem() -> None:
+    """Tests / process boot."""
+    global _VAULT_ROWS_MEM, _VAULT_ROWS_AT, _VAULT_ROWS_TTL
+    _VAULT_ROWS_MEM = None
+    _VAULT_ROWS_AT = 0.0
+    _VAULT_ROWS_TTL = VAULT_ROWS_MEM_TTL_SEC
+
+
+def _vault_rows_from_cache_file() -> list[dict[str, Any]]:
+    try:
+        if not CACHE_PATH.is_file():
+            return []
+        cache = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    rows = [r for r in (cache.get("patterns") or []) if isinstance(r, dict)]
+    return rows
+
+
 def _fetch_vault_rows() -> list[dict[str, Any]]:
+    """One vault gulp per process window. Reconnects reuse RAM; slow net falls back to disk."""
+    global _VAULT_ROWS_MEM, _VAULT_ROWS_AT, _VAULT_ROWS_TTL
+    now = time.time()
+    if _VAULT_ROWS_MEM is not None and (now - _VAULT_ROWS_AT) < _VAULT_ROWS_TTL:
+        return _VAULT_ROWS_MEM
     secrets = _load_secrets()
     headers = _supabase_headers(secrets)
     url = secrets.get("SUPABASE_URL", "").rstrip("/")
-    if not headers or not url:
-        return []
-    table = secrets.get("SUPABASE_PATTERN_TABLE") or "forensic_patterns"
-    select = (
-        "macro_weather_layout,ticker,timeframe_resolution,master_signature_json,"
-        "metric_envelopes_json,structural_move_pct,execution_strategy,layout_match_pct,"
-        "bar_count,vault_track,state"
-    )
-    try:
-        resp = requests.get(
-            f"{url}/rest/v1/{table}"
-            f"?select={select}"
-            "&macro_weather_layout=not.is.null"
-            "&or=(state.is.null,state.eq.active,state.eq.incubation)"
-            f"&order=timestamp.desc&limit={VAULT_FETCH_LIMIT}",
-            headers=headers,
-            timeout=45,
+    rows: list[dict[str, Any]] = []
+    if headers and url:
+        table = secrets.get("SUPABASE_PATTERN_TABLE") or "forensic_patterns"
+        select = (
+            "macro_weather_layout,ticker,timeframe_resolution,master_signature_json,"
+            "metric_envelopes_json,structural_move_pct,execution_strategy,layout_match_pct,"
+            "bar_count,vault_track,state"
         )
-        if not resp.ok:
-            return []
-        body = resp.json()
-        return body if isinstance(body, list) else []
-    except Exception:
-        return []
+        try:
+            resp = requests.get(
+                f"{url}/rest/v1/{table}"
+                f"?select={select}"
+                "&macro_weather_layout=not.is.null"
+                "&or=(state.is.null,state.eq.active,state.eq.incubation)"
+                f"&order=timestamp.desc&limit={VAULT_FETCH_LIMIT}",
+                headers=headers,
+                timeout=VAULT_FETCH_TIMEOUT_SEC,
+            )
+            if resp.ok:
+                body = resp.json()
+                if isinstance(body, list):
+                    rows = body
+        except Exception:
+            rows = []
+    if not rows:
+        rows = _vault_rows_from_cache_file()
+    _VAULT_ROWS_MEM = rows
+    _VAULT_ROWS_AT = now
+    _VAULT_ROWS_TTL = VAULT_ROWS_MEM_TTL_SEC if rows else 20
+    return rows
 
 
 def _layouts_from_session_vectors(session_state: Any) -> list[dict[str, Any]]:
