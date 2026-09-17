@@ -1,0 +1,19 @@
+---
+description: Why Room 3 looks dead/slow after sleep or a bad connection — not a full-market scan
+alwaysApply: true
+---
+
+# Room 3 — sleep / internet reconnect (locked 2026-09-17)
+
+When the operator asks **why the universe vanished / Alpaca wants connect again / the page is loading forever after the Mac slept or the tab sat**, answer from this. Do not invent a Job 1 full-market scan (builtin screener is parked).
+
+**What happened:** the browser’s live wire to Streamlit Cloud dropped. That can be **Mac sleep** (lid, sleep, or the tab freezing) **or the internet connection** (Wi‑Fi hitch, phone hotspot, Cloud websocket drop). Either one ends the *tab session*. Coming back is a **new session**: reload, Alpaca handshake again, RAM belt / universe / Match% gone until it rebuilds. Community Cloud is a shared host, so that rebuild is slow.
+
+**Not this:** 804 patterns chewing every US stock. Maps are belt-only (max 15 names × 1m/5m/15m).
+
+**Trading vs the screen (do not mix these):**
+
+- **Laptop closed / browser dead:** if they left **Arm + belt** (`unattended_armed` on disk), the **Cloud process** keeps detect/fire/hold/exit. That is the lock. Disarm or Kill stops it. Community Cloud can still sleep the whole app after ~12 hours with no visitors.
+- **The tab they just woke:** that is a **new Streamlit session**. White universe / Match% / “connect Alpaca” live in the browser RAM. Sleep or a dropped internet connection kills *that*, even while Cloud is still trading. Visitor DISARMED / empty belt on the woken tab is not their Arm.
+
+Do not tell them the app cannot run with the Mac shut. Tell them the *screen* died; trading only continues if Arm+belt was already on Cloud.
