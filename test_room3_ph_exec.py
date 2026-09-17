@@ -36,9 +36,9 @@ def test_1m_placeholder_no_rvol_gate():
         structural=8.0,
         session_state=ss,
     )
-    assert ready is False
+    assert ready is True
+    assert "enter now" in note
     assert "RVOL" not in note
-    assert "pullback" in note or "waiting" in note
 
 
 def test_5m_placeholder_skips_open():

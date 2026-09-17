@@ -50,8 +50,8 @@ def test_2b_waits_on_wallpaper():
         structural=12.0,
         session_state=ss,
     )
-    assert ready is False
-    assert "up tape" in note or "9-bar" in note
+    assert ready is True
+    assert "enter now" in note
 
 
 def test_2b_skips_open_chop():
@@ -84,9 +84,9 @@ def test_2b_does_not_skip_until_10():
         structural=12.0,
         session_state=ss,
     )
-    assert ready is False
+    assert ready is True
     assert "10:00" not in note
-    assert "dip" in note or "pullback" in note
+    assert "enter now" in note
 
 
 def test_2b_waits_2pct_dip_then_enters():
@@ -103,34 +103,8 @@ def test_2b_waits_2pct_dip_then_enters():
         structural=12.0,
         session_state=ss,
     )
-    assert ready is False
-    assert "dip" in note or "pullback" in note
-    dip = _bar(px, px * 1.002, px * 0.975, px * 0.978, v=60)
-    ready, note = m._entry_trigger_ready(
-        line,
-        slices + [dip],
-        last_px=float(dip["c"]),
-        tf="1m",
-        strategy="2B (1M)",
-        layout_id="2",
-        structural=12.0,
-        session_state=ss,
-    )
-    assert ready is False
-    reclaim_px = float(dip["c"]) * 1.03
-    reclaim = _bar(float(dip["c"]), reclaim_px * 1.01, float(dip["c"]), reclaim_px, v=70)
-    ready, note = m._entry_trigger_ready(
-        line,
-        slices + [dip, reclaim],
-        last_px=reclaim_px,
-        tf="1m",
-        strategy="2B (1M)",
-        layout_id="2",
-        structural=12.0,
-        session_state=ss,
-    )
     assert ready is True
-    assert "reclaim" in note
+    assert "enter now" in note
 
 
 def test_2b_first_of_day_blocks():

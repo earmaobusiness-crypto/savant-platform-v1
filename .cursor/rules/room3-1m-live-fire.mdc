@@ -1,0 +1,20 @@
+---
+description: Room 3 — 1m live fire (locked 2026-09-17)
+alwaysApply: true
+---
+
+# 1m live fire (locked 2026-09-17)
+
+Operator: locked 1m letters were sitting at ≥85% waiting Hunt extras / dip. Placeholders were waiting a 1% reclaim. **Need live fills to see if they work.**
+
+**Detect unchanged:** nearest live letter, ≥85%, same TF. Purgatory never fires.
+
+**1m Handle (all live 1m, specialized + placeholder):** fill **now** on that print. Hunt extras (dump, RVOL, VWAP, fat window, match≥91) **do not block**. Dip-reclaim **does not block**.
+
+**Still on:** skip windows (letter’s 9:30–9:45 or 9:30–10:00); first of that letter that day; 15 min cool after a stop; **3A no new shot after 12:00 ET**; locked stops / targets. Market in RTH; limit outside RTH.
+
+**5m / 15m placeholder:** unchanged — small dip then hold.
+
+A filled 5m/15m on the same name does **not** freeze 1m. Second letter **adds** onto the Alpaca pile as its own lot.
+
+Local until Cloud push.

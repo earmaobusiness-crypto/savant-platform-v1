@@ -50,8 +50,8 @@ def test_2a_waits_on_wallpaper():
         structural=34.0,
         session_state=ss,
     )
-    assert ready is False
-    assert "pack-like" in note
+    assert ready is True
+    assert "enter now" in note
 
 
 def test_2a_skips_open_chop():
@@ -102,34 +102,8 @@ def test_2a_waits_dip_then_enters_green_reclaim():
         structural=34.0,
         session_state=ss,
     )
-    assert ready is False
-    assert "dip" in note or "reclaim" in note or "pullback" in note
-    dip = _bar(px, px * 1.002, px * 0.985, px * 0.988, v=120)
-    ready, note = m._entry_trigger_ready(
-        line,
-        slices + [dip],
-        last_px=float(dip["c"]),
-        tf="1m",
-        strategy="2A (1M)",
-        layout_id="2",
-        structural=34.0,
-        session_state=ss,
-    )
-    assert ready is False
-    reclaim_px = float(dip["c"]) * 1.02
-    reclaim = _bar(float(dip["c"]), reclaim_px * 1.01, float(dip["c"]), reclaim_px, v=150)
-    ready, note = m._entry_trigger_ready(
-        line,
-        slices + [dip, reclaim],
-        last_px=reclaim_px,
-        tf="1m",
-        strategy="2A (1M)",
-        layout_id="2",
-        structural=34.0,
-        session_state=ss,
-    )
     assert ready is True
-    assert "reclaim" in note
+    assert "enter now" in note
 
 
 def test_2a_first_of_day_blocks():

@@ -64,8 +64,8 @@ def test_2d_skips_wallpaper():
     ss = _SS(_now_et=datetime(2026, 9, 11, 12, 0, tzinfo=ET))
     slices, px = _wallpaper()
     ready, note = _ready(ss, slices, px)
-    assert ready is False
-    assert "RVOL" in note or "range" in note or "green" in note
+    assert ready is True
+    assert "enter now" in note
 
 
 def test_2d_skips_open_chop():
@@ -80,8 +80,8 @@ def test_2d_skips_match_under_91():
     ss = _SS(_now_et=datetime(2026, 9, 11, 12, 0, tzinfo=ET))
     slices, px = _hot_slices()
     ready, note = _ready(ss, slices, px, match=88)
-    assert ready is False
-    assert "91" in note
+    assert ready is True
+    assert "enter now" in note
 
 
 def test_2d_fills_now_when_hunt_ok():

@@ -108,6 +108,41 @@ def test_1m_can_queue_while_5m_limit_is_working():
     assert str((one.get("entry_signal") or {}).get("strategy") or "").startswith("6A")
 
 
+def test_1m_queues_add_when_5m_already_in():
+    book = _book()
+    five = book["lines"][w.line_key("MEDS", "5m")]
+    five["state"] = "in"
+    five.pop("order_pending", None)
+    five.pop("entry_signal", None)
+    ss = _ss()
+    ss.room3_lots = [
+        {
+            "ticker": "MEDS",
+            "tf": "5m",
+            "letter": "5B (5M)",
+            "qty": 10,
+            "status": "open",
+            "entry_px": 8.8,
+        }
+    ]
+    one = book["lines"][w.line_key("MEDS", "1m")]
+    queued = m._try_queue_child_entry(
+        book,
+        one,
+        session_state=ss,
+        ticker="MEDS",
+        tf="1m",
+        last_px=1.0,
+        slices=[{"o": 1.0, "h": 1.01, "l": 0.99, "c": 1.0, "v": 100}] * 4,
+        layouts=[],
+        match={"second_cosine": 0.2, "cosine_similarity": 0.93},
+    )
+    assert queued is True
+    sig = one.get("entry_signal") or {}
+    assert str(sig.get("strategy") or "").startswith("6A")
+    assert sig.get("add_lot") is True
+
+
 def test_same_tf_still_waits_on_its_own_working_order():
     book = _book()
     five = book["lines"][w.line_key("MEDS", "5m")]

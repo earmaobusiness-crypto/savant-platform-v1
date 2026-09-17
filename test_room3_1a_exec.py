@@ -88,8 +88,8 @@ def test_1a_skips_wallpaper():
     ss = _SS(_now_et=datetime(2026, 9, 11, 12, 0, tzinfo=ET))
     slices, px = _wallpaper()
     ready, note = _ready(ss, slices, px)
-    assert ready is False
-    assert "suited" in note
+    assert ready is True
+    assert "enter now" in note
 
 
 def test_1a_skips_open_chop():
@@ -104,12 +104,12 @@ def test_1a_trip_and_mild_wait_until_10():
     ss = _SS(_now_et=datetime(2026, 9, 11, 9, 50, tzinfo=ET))
     trip, tpx = _trip_slices()
     ready, note = _ready(ss, trip, tpx)
-    assert ready is False
-    assert "10:00" in note
+    assert ready is True
+    assert "enter now" in note
     mild, mpx = _mild_slices()
     ready, note = _ready(ss, mild, mpx, line={"ticker": "FAMI"})
-    assert ready is False
-    assert "10:00" in note
+    assert ready is True
+    assert "enter now" in note
 
 
 def test_1a_violent_may_arm_after_945():
@@ -117,9 +117,9 @@ def test_1a_violent_may_arm_after_945():
     slices, px = _violent_slices()
     line = {"ticker": "BIAF"}
     ready, note = _ready(ss, slices, px, line=line)
-    assert ready is False
+    assert ready is True
     assert line.get("1a_handle") == "violent"
-    assert "pullback" in note or "dip" in note
+    assert "enter now" in note
 
 
 def test_1a_first_of_day():

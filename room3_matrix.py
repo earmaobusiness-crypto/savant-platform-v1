@@ -107,7 +107,7 @@ TWO_D_EXIT_STYLE = "2d_pack"
 TWO_D_COOL_SEC = 15 * 60
 # Placeholder Handle for every other live letter (not 5B / 2A / 1A / 2D / 2B / 2C / 3A).
 # Gene stays nearest ≥85% same TF. Tactics only — specialize later.
-# Remaining 1m: no RVOL gate (that starved 2C). 5m/15m hold after a small dip.
+# Remaining 1m: fill-now at ≥85% (2026-09-17). 5m/15m hold after a small dip.
 PH_EXIT_STYLE = "ph_pack"
 PH_RVOL_MIN = 0.0
 PH_DIP_FRAC_1M = 0.01
@@ -1864,8 +1864,15 @@ def _enter_on_print(
     structural_move_pct: float,
     session_state: Any = None,
 ) -> bool:
-    """Placeholder Handle waits a dip. 5B / 2A / 1A / 2D / 2B / 2C / 3A have their own shot. No 1m pop-now."""
-    return False
+    """1m fill-now at ≥85% nearest (operator 2026-09-17). 5m/15m still wait their Handle."""
+    _ = (strategy, layout_id, structural_move_pct, session_state)
+    return room3_recipes.normalize_tf(tf) == "1m"
+
+
+def _1m_live_fill_now(line: dict[str, Any], tag: str) -> tuple[bool, str]:
+    """Locked 1m letters + placeholders fire on the print. Hunt extras / dip do not block."""
+    line["trigger_phase"] = "ready"
+    return True, f"{tag} · enter now"
 
 
 def _reset_entry_trigger(line: dict[str, Any]) -> None:
@@ -1906,12 +1913,9 @@ def _5b_entry_ready(
         return False, "5B · skip 9:30–9:45"
     if _5b_used_today(session_state, ticker):
         return False, "5B · first of day already used"
-    if not _5b_climax_ok(slices):
-        return False, "5B · wait dump-then-hold"
-    if _5b_tape_rvol(slices) < FIVE_B_RVOL_MIN:
-        return False, "5B · wait RVOL ≥3"
-    line["trigger_phase"] = "ready"
-    return True, "5B · climax · RVOL · enter now"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "5B")
 
 
 def _2a_entry_ready(
@@ -1931,40 +1935,9 @@ def _2a_entry_ready(
         return False, "2A · skip 9:30–10:00"
     if _2a_used_today(session_state, ticker):
         return False, "2A · first of day already used"
-    phase = str(line.get("trigger_phase") or "")
-    hunting = phase in ("wait_dip", "wait_reclaim", "ready")
-    if not hunting and not _2a_gene_ok(slices):
-        _reset_entry_trigger(line)
-        return False, "2A · wait pack-like up tape"
-    last = slices[-1] if slices else {}
-    last_c = float(last.get("c") or last_px)
-    last_l = float(last.get("l") or last_c)
-    last_o = float(last.get("o") or last_c)
-    prior = slices[-2] if len(slices) >= 2 else last
-    prior_h = float(prior.get("h") or prior.get("c") or 0)
-    if not line.get("family_armed_px"):
-        line["family_armed_px"] = last_px
-        line["family_armed_high"] = float(last.get("h") or last_px)
-        line["trigger_phase"] = "wait_dip"
-    armed_px = float(line.get("family_armed_px") or last_px)
-    phase = str(line.get("trigger_phase") or "wait_dip")
-    if phase == "ready":
-        return True, "2A · dip-reclaim · enter now"
-    if phase == "wait_dip":
-        if last_l <= armed_px * (1.0 - TWO_A_DIP_FRAC) or last_c < armed_px:
-            line["trigger_phase"] = "wait_reclaim"
-            line["pullback_low"] = last_l
-            return False, "2A · 1% dip · waiting reclaim"
-        return False, "2A · waiting 1% pullback"
-    if phase == "wait_reclaim":
-        pb = min(float(line.get("pullback_low") or last_l), last_l)
-        line["pullback_low"] = pb
-        green = last_c > last_o
-        if last_c > pb and (prior_h <= 0 or last_c >= prior_h) and green:
-            line["trigger_phase"] = "ready"
-            return True, "2A · dip-reclaim · enter now"
-        return False, "2A · waiting green reclaim"
-    return False, "2A · waiting trigger"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "2A")
 
 
 def _2b_entry_ready(
@@ -1984,40 +1957,9 @@ def _2b_entry_ready(
         return False, "2B · skip 9:30–9:45"
     if _2b_used_today(session_state, ticker):
         return False, "2B · first of day already used"
-    phase = str(line.get("trigger_phase") or "")
-    hunting = phase in ("wait_dip", "wait_reclaim", "ready")
-    if not hunting and not _2b_gene_ok(slices):
-        _reset_entry_trigger(line)
-        return False, "2B · wait 9-bar up tape"
-    last = slices[-1] if slices else {}
-    last_c = float(last.get("c") or last_px)
-    last_l = float(last.get("l") or last_c)
-    last_o = float(last.get("o") or last_c)
-    prior = slices[-2] if len(slices) >= 2 else last
-    prior_h = float(prior.get("h") or prior.get("c") or 0)
-    if not line.get("family_armed_px"):
-        line["family_armed_px"] = last_px
-        line["family_armed_high"] = float(last.get("h") or last_px)
-        line["trigger_phase"] = "wait_dip"
-    armed_px = float(line.get("family_armed_px") or last_px)
-    phase = str(line.get("trigger_phase") or "wait_dip")
-    if phase == "ready":
-        return True, "2B · dip-reclaim · enter now"
-    if phase == "wait_dip":
-        if last_l <= armed_px * (1.0 - TWO_B_DIP_FRAC) or last_c < armed_px:
-            line["trigger_phase"] = "wait_reclaim"
-            line["pullback_low"] = last_l
-            return False, "2B · 2% dip · waiting reclaim"
-        return False, "2B · waiting 2% pullback"
-    if phase == "wait_reclaim":
-        pb = min(float(line.get("pullback_low") or last_l), last_l)
-        line["pullback_low"] = pb
-        green = last_c > last_o
-        if last_c > pb and (prior_h <= 0 or last_c >= prior_h) and green:
-            line["trigger_phase"] = "ready"
-            return True, "2B · dip-reclaim · enter now"
-        return False, "2B · waiting green reclaim"
-    return False, "2B · waiting trigger"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "2B")
 
 
 def _2c_entry_ready(
@@ -2037,40 +1979,9 @@ def _2c_entry_ready(
         return False, "2C · skip 9:30–10:00"
     if _2c_used_today(session_state, ticker):
         return False, "2C · first of day already used"
-    phase = str(line.get("trigger_phase") or "")
-    hunting = phase in ("wait_dip", "wait_reclaim", "ready")
-    if not hunting and not _2c_gene_ok(slices):
-        _reset_entry_trigger(line)
-        return False, "2C · wait slower up tape"
-    last = slices[-1] if slices else {}
-    last_c = float(last.get("c") or last_px)
-    last_l = float(last.get("l") or last_c)
-    last_o = float(last.get("o") or last_c)
-    prior = slices[-2] if len(slices) >= 2 else last
-    prior_h = float(prior.get("h") or prior.get("c") or 0)
-    if not line.get("family_armed_px"):
-        line["family_armed_px"] = last_px
-        line["family_armed_high"] = float(last.get("h") or last_px)
-        line["trigger_phase"] = "wait_dip"
-    armed_px = float(line.get("family_armed_px") or last_px)
-    phase = str(line.get("trigger_phase") or "wait_dip")
-    if phase == "ready":
-        return True, "2C · dip-reclaim · enter now"
-    if phase == "wait_dip":
-        if last_l <= armed_px * (1.0 - TWO_C_DIP_FRAC) or last_c < armed_px:
-            line["trigger_phase"] = "wait_reclaim"
-            line["pullback_low"] = last_l
-            return False, "2C · 1% dip · waiting reclaim"
-        return False, "2C · waiting 1% pullback"
-    if phase == "wait_reclaim":
-        pb = min(float(line.get("pullback_low") or last_l), last_l)
-        line["pullback_low"] = pb
-        green = last_c > last_o
-        if last_c > pb and (prior_h <= 0 or last_c >= prior_h) and green:
-            line["trigger_phase"] = "ready"
-            return True, "2C · dip-reclaim · enter now"
-        return False, "2C · waiting green reclaim"
-    return False, "2C · waiting trigger"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "2C")
 
 
 def _3a_entry_ready(
@@ -2086,44 +1997,15 @@ def _3a_entry_ready(
     if cool is not None and now < cool:
         mins = max(1, int((cool - now).total_seconds() // 60))
         return False, f"3A · cool {mins}m after stop"
-    phase = str(line.get("trigger_phase") or "")
-    hunting = phase in ("wait_dip", "wait_reclaim", "ready")
     if _3a_open_chop(session_state):
         return False, "3A · skip 9:30–10:00"
-    if _3a_past_noon(session_state, hunting=hunting):
+    if _3a_past_noon(session_state, hunting=False):
         return False, "3A · no new shot after 12:00"
     if _3a_used_today(session_state, ticker):
         return False, "3A · first of day already used"
-    if not hunting and not _3a_gene_ok(slices):
-        _reset_entry_trigger(line)
-        return False, "3A · wait under-VWAP tape"
-    last = slices[-1] if slices else {}
-    last_c = float(last.get("c") or last_px)
-    last_l = float(last.get("l") or last_c)
-    last_o = float(last.get("o") or last_c)
-    if not line.get("family_armed_px"):
-        line["family_armed_px"] = last_px
-        line["family_armed_high"] = float(last.get("h") or last_px)
-        line["trigger_phase"] = "wait_dip"
-    armed_px = float(line.get("family_armed_px") or last_px)
-    phase = str(line.get("trigger_phase") or "wait_dip")
-    if phase == "ready":
-        return True, "3A · dip-reclaim · enter now"
-    if phase == "wait_dip":
-        if last_l <= armed_px * (1.0 - THREE_A_DIP_FRAC) or last_c < armed_px:
-            line["trigger_phase"] = "wait_reclaim"
-            line["pullback_low"] = last_l
-            return False, "3A · 1.5% dip · waiting reclaim"
-        return False, "3A · waiting 1.5% pullback"
-    if phase == "wait_reclaim":
-        pb = min(float(line.get("pullback_low") or last_l), last_l)
-        line["pullback_low"] = pb
-        green = last_c > last_o
-        if last_c > pb and green:
-            line["trigger_phase"] = "ready"
-            return True, "3A · dip-reclaim · enter now"
-        return False, "3A · waiting green reclaim"
-    return False, "3A · waiting trigger"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "3A")
 
 
 def _2d_entry_ready(
@@ -2148,14 +2030,8 @@ def _2d_entry_ready(
         return False, "2D · two shots already used"
     if shots >= 1 and (cool is None or now < cool):
         return False, "2D · first of day already used"
-    match = int(line.get("match_pct") or line.get("entry_match_pct") or 0)
-    if match < TWO_D_MATCH_MIN:
-        return False, "2D · wait match ≥91"
-    if not _2d_gene_ok(slices):
-        _reset_entry_trigger(line)
-        return False, "2D · wait RVOL/green/range"
-    line["trigger_phase"] = "ready"
-    return True, "2D · RVOL · fat green · enter now"
+    _ = slices
+    return _1m_live_fill_now(line, "2D")
 
 
 def _1a_entry_ready(
@@ -2175,50 +2051,13 @@ def _1a_entry_ready(
         return False, "1A · skip 9:30–9:45"
     if _1a_used_today(session_state, ticker):
         return False, "1A · first of day already used"
-    phase = str(line.get("trigger_phase") or "")
-    hunting = phase in ("wait_dip", "wait_reclaim", "ready")
-    handle = str(line.get("1a_handle") or "")
-    if not hunting:
-        handle = _1a_classify(slices)
-        if not handle:
-            _reset_entry_trigger(line)
-            return False, "1A · wait suited tape"
-        if handle in ("trip", "mild") and _rth_before(session_state, ONE_A_LONG_PAUSE):
-            _reset_entry_trigger(line)
-            return False, "1A · longer pause until 10:00"
-        line["1a_handle"] = handle
-    last = slices[-1] if slices else {}
-    last_c = float(last.get("c") or last_px)
-    last_l = float(last.get("l") or last_c)
-    last_o = float(last.get("o") or last_c)
-    prior = slices[-2] if len(slices) >= 2 else last
-    prior_h = float(prior.get("h") or prior.get("c") or 0)
-    if not line.get("family_armed_px"):
-        line["family_armed_px"] = last_px
-        line["family_armed_high"] = float(last.get("h") or last_px)
-        line["trigger_phase"] = "wait_dip"
-    armed_px = float(line.get("family_armed_px") or last_px)
-    phase = str(line.get("trigger_phase") or "wait_dip")
+    handle = str(line.get("1a_handle") or "") or _1a_classify(slices) or "mild"
+    line["1a_handle"] = handle
     tag = {"trip": "trip runner", "mild": "mild 8%", "violent": "violent 12%"}.get(
         handle, "1A"
     )
-    if phase == "ready":
-        return True, f"1A · {tag} · dip-reclaim · enter now"
-    if phase == "wait_dip":
-        if last_l <= armed_px * (1.0 - ONE_A_DIP_FRAC) or last_c < armed_px:
-            line["trigger_phase"] = "wait_reclaim"
-            line["pullback_low"] = last_l
-            return False, f"1A · {tag} · 2% dip · waiting reclaim"
-        return False, f"1A · {tag} · waiting 2% pullback"
-    if phase == "wait_reclaim":
-        pb = min(float(line.get("pullback_low") or last_l), last_l)
-        line["pullback_low"] = pb
-        green = last_c > last_o
-        if last_c > pb and (prior_h <= 0 or last_c >= prior_h) and green:
-            line["trigger_phase"] = "ready"
-            return True, f"1A · {tag} · dip-reclaim · enter now"
-        return False, f"1A · {tag} · waiting green reclaim"
-    return False, "1A · waiting trigger"
+    _ = last_px
+    return _1m_live_fill_now(line, f"1A · {tag}")
 
 
 def _ph_entry_ready(
@@ -2244,8 +2083,9 @@ def _ph_entry_ready(
         return False, f"{strategy} · skip 9:30–9:45"
     if _ph_used_today(session_state, ticker, strategy):
         return False, f"{strategy} · first of day already used"
-    if tf_n == "1m" and PH_RVOL_MIN > 0 and _5b_tape_rvol(slices) < PH_RVOL_MIN:
-        return False, f"{strategy} · wait RVOL ≥{PH_RVOL_MIN:g}"
+    if tf_n == "1m":
+        _ = (slices, last_px, layout_id, structural)
+        return _1m_live_fill_now(line, strategy)
     last = slices[-1] if slices else {}
     last_c = float(last.get("c") or last_px)
     last_l = float(last.get("l") or last_c)

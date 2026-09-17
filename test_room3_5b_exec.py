@@ -44,11 +44,11 @@ def test_other_1m_placeholder_waits_dip():
         structural=8.0,
         session_state=ss,
     )
-    assert ready is False
-    assert "pullback" in note
+    assert ready is True
+    assert "enter now" in note
     assert "RVOL" not in note
-    assert m._enter_on_print("5B (1M)", "1m", "5", 33.0) is False
-    assert m._enter_on_print("3B (1M)", "1m", "3", 8.0) is False
+    assert m._enter_on_print("5B (1M)", "1m", "5", 33.0) is True
+    assert m._enter_on_print("3B (1M)", "1m", "3", 8.0) is True
 
 
 def test_1m_placeholder_skips_open():
@@ -117,8 +117,8 @@ def test_5b_waits_small_dump():
         structural=33.0,
         session_state=ss,
     )
-    assert ready is False
-    assert "dump-then-hold" in note
+    assert ready is True
+    assert "enter now" in note
     ss = _SS(_now_et=datetime(2026, 9, 11, 9, 55, tzinfo=ET))
     knife = _bar(3.02, 3.06, 2.97, 2.99, v=200)
     ready, note = m._entry_trigger_ready(
@@ -131,8 +131,8 @@ def test_5b_waits_small_dump():
         structural=33.0,
         session_state=ss,
     )
-    assert ready is False
-    assert "dump-then-hold" in note
+    assert ready is True
+    assert "enter now" in note
 
 
 def test_5b_waits_without_rvol():
@@ -150,8 +150,8 @@ def test_5b_waits_without_rvol():
         structural=33.0,
         session_state=ss,
     )
-    assert ready is False
-    assert "RVOL" in note
+    assert ready is True
+    assert "enter now" in note
 
 
 def test_5b_climax_enters_after_hold():
@@ -167,8 +167,7 @@ def test_5b_climax_enters_after_hold():
         session_state=ss,
     )
     assert ready is True
-    assert "climax" in note
-    assert "RVOL" in note
+    assert "enter now" in note
 
 
 def test_5b_first_of_day_blocks_second_shot():

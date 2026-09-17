@@ -289,6 +289,8 @@ def order_style_for(
     Outside RTH the broker still forces a limit.
     """
     tf = normalize_tf(timeframe)
+    if tf == "1m":
+        return "market"
     blob = f"{strategy} {layout_id}".lower()
     patient = (
         "vwap",
@@ -322,13 +324,7 @@ def order_style_for(
         return "limit"
     if any(k in blob for k in pop):
         return "market"
-    token = str(strategy or "").strip().upper().replace(" ", "")
-    if tf == "1m" and token.startswith("2D") and "1M" in token:
-        return "market"
-    if tf == "1m" and token.startswith("3A") and "1M" in token:
-        return "limit"
-    if tf == "1m" and abs(float(structural_move_pct or 0)) < 4.0:
-        return "market"
+    _ = structural_move_pct
     return "limit"
 
 
