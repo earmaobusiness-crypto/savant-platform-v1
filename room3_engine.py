@@ -386,6 +386,7 @@ class lots:
         is_2c = token.startswith("2C") and "1M" in token and (not tf or tf == "1m")
         is_1a = token.startswith("1A") and "1M" in token and (not tf or tf == "1m")
         is_2d = token.startswith("2D") and "1M" in token and (not tf or tf == "1m")
+        is_3a = token.startswith("3A") and "1M" in token and (not tf or tf == "1m")
         pack_style = (
             style
             in (
@@ -394,6 +395,7 @@ class lots:
                 "2a_pack_half",
                 "2b_pack",
                 "2c_pack",
+                "3a_pack",
                 "2d_pack",
                 "ph_pack",
                 "1a_mild",
@@ -406,14 +408,18 @@ class lots:
             or is_2c
             or is_1a
             or is_2d
+            or is_3a
         )
         if frac is not None or pack_style:
             try:
                 frac_f = float(frac if frac is not None else 0.02)
             except (TypeError, ValueError):
                 frac_f = 0.02
-            frac_f = max(frac_f, 0.02)
+            frac_f = max(frac_f, 0.035 if is_3a else 0.02)
             row["exit_style"] = style or (
+                "3a_pack"
+                if is_3a
+                else (
                 "2d_pack"
                 if is_2d
                 else (
@@ -428,6 +434,7 @@ class lots:
                             else ("1a_violent" if is_1a else "5b_pack_half")
                         )
                     )
+                )
                 )
             )
             row["exit_r_frac"] = frac_f
@@ -454,6 +461,8 @@ class lots:
                     row["exit_tgt_px"] = fill * (1.0 + frac_f)
                 elif is_2d:
                     row["exit_tgt_px"] = fill * (1.0 + 0.0625)
+                elif is_3a:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.08)
                 elif is_2b:
                     row["exit_tgt_px"] = fill * (1.0 + 0.06)
                 elif is_2c:
@@ -497,6 +506,14 @@ class lots:
                     bag = dict(session_state.get("room3_2c_used_day") or {})
                     bag[ticker] = day
                     session_state.room3_2c_used_day = bag
+                except Exception:
+                    pass
+            if is_3a:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_3a_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_3a_used_day = bag
                 except Exception:
                     pass
             if is_1a:

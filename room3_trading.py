@@ -1763,6 +1763,9 @@ def _pending_has_row(pending: list, row: dict) -> bool:
 
 
 REVIEW_EXPIRE_HOUR_ET = 9
+# One-batch only: Wednesday 2026-09-16 unvoted cards skip Thursday 9:00 AM ET
+# and drop with Thursday's batch at Friday 9:00 AM ET. Later sessions stay +1 morning.
+REVIEW_EXTRA_HOLD_SESSION = "2026-09-16"
 
 
 def _trade_exit_dt(row: dict) -> datetime | None:
@@ -1789,7 +1792,8 @@ def _review_hold_until(row: dict) -> datetime:
         d = datetime.strptime(day, "%Y-%m-%d").date()
     except ValueError:
         d = datetime.now(ET).date()
-    nxt = d + timedelta(days=1)
+    extra = 1 if day == REVIEW_EXTRA_HOLD_SESSION else 0
+    nxt = d + timedelta(days=1 + extra)
     return datetime.combine(nxt, dt_time(REVIEW_EXPIRE_HOUR_ET, 0)).replace(tzinfo=ET)
 
 
@@ -1798,6 +1802,41 @@ def _within_review_hold(row: dict) -> bool:
     if str(row.get("operator_vote") or "").strip():
         return False
     return datetime.now(ET) < _review_hold_until(row)
+
+
+def _review_extra_hold_drop() -> datetime:
+    """Friday 9:00 AM ET 2026-09-18 — when the Wednesday-16 extra hold ends."""
+    d = datetime.strptime(REVIEW_EXTRA_HOLD_SESSION, "%Y-%m-%d").date() + timedelta(days=2)
+    return datetime.combine(d, dt_time(REVIEW_EXPIRE_HOUR_ET, 0)).replace(tzinfo=ET)
+
+
+def _review_extra_hold_active() -> bool:
+    """Caption-only: extra-day sentence vanishes after Friday 9:00 AM ET."""
+    return datetime.now(ET) < _review_extra_hold_drop()
+
+
+def _review_expire_caption() -> str:
+    """House clock is 9:00 AM ET next morning. One dated extra day for 2026-09-16 only."""
+    base = (
+        "Unvoted stays until 9:00 AM ET the next morning, then drops with no DNA. "
+        "✓/✗ on a held card still learns Hunt / Handle / matrix the same way."
+    )
+    if not _review_extra_hold_active():
+        return base
+    return (
+        base
+        + " Wednesday 2026-09-16 cards skip Thursday 9:00 AM and drop with Thursday’s batch "
+        "at 9:00 AM ET Friday."
+    )
+
+
+def _review_extra_hold_log_sentence() -> str:
+    if not _review_extra_hold_active():
+        return ""
+    return (
+        "Wednesday 2026-09-16 cards skip Thursday 9:00 AM and drop "
+        "with Thursday’s batch Friday 9:00 AM. "
+    )
 
 
 def _row_matches_voided_session(row: dict) -> bool:
@@ -1866,7 +1905,8 @@ def _stamp_review_void(row: dict) -> None:
 
 
 def _sync_pending_from_closed_history() -> None:
-    """Closed fills belong in Operator review until ✓/✗, or 9:00 AM ET the next morning."""
+    """Closed fills belong in Operator review until ✓/✗, or 9:00 AM ET the next morning
+    (Wednesday 2026-09-16 cards: Friday 9:00 AM with Thursday's batch)."""
     now_iso = datetime.now(timezone.utc).isoformat()
     pending = [
         p
@@ -3194,7 +3234,8 @@ def _render_trade_history() -> None:
         "(history stays under All-time). If you don't vote, this tape rolls at the next session day; "
         "the review pile keeps the unvoted close until 9:00 AM ET the next morning, then drops it "
         "(log and P/L stay; no DNA). "
-        "A finished session is filed into Session history and leaves this tape."
+        + _review_extra_hold_log_sentence()
+        + "A finished session is filed into Session history and leaves this tape."
     )
     pending_ids = {
         str(r.get("id") or "")
@@ -3877,6 +3918,7 @@ def _render_strategy_health_strip() -> None:
 def _render_operator_review_panel() -> None:
     st.markdown("### Operator review")
     _relabel_unlabeled_closes_from_lots()
+    _sync_pending_from_closed_history()
     st.caption(
         "✓ Good / ✗ Bad are about this lot (ticker · TF · strategy frozen at close). "
         "Good reaffirms the gene; extras sit in Purgatoria until the same extra shows 3 times. "
@@ -3884,10 +3926,10 @@ def _render_operator_review_panel() -> None:
         "it does not change size and does not delete the letter. "
         "Hunt (the detectors) waits for 2 Bads on two names before getting more cautious. "
         "Green = profit · red = loss. Closes with no TF / strategy are dropped from this pile "
-        "(log and P/L stay). Unvoted stays until 9:00 AM ET the next morning, then drops with no DNA. "
-        "Revert is Strategy health → DNA versions."
+        "(log and P/L stay). "
+        + _review_expire_caption()
+        + " Revert is Strategy health → DNA versions."
     )
-    _sync_pending_from_closed_history()
     pending = st.session_state.room3_pending_reviews or []
     if not pending:
         st.caption("No closed trades waiting for your vote.")
@@ -4911,6 +4953,9 @@ def _render_execution_posture(mode: str) -> None:
             f"**2C (1M)** slower than 2B (5-bar ≥4%, 9-bar ≥4%, last bar range ≥3%, "
             f"no RVOL gate), skip 9:30–10:00 ET, first shot, 1% dip then green reclaim, "
             f"10% target · "
+            f"**3A (1M)** under VWAP + RVOL ≥1.5 + last bar ≥1.5% (skip 9:30–10:00 ET, "
+            f"no new shot after 12:00), first shot, 1.5% dip then green reclaim, "
+            f"lookback-low stop floor 3.5%, 8% target · "
             f"other letters: placeholder Handle (1m/5m skip 9:30–9:45, no 1m RVOL gate, "
             f"first of that letter that day, 1m waits a 1% dip then green reclaim, "
             f"5m/15m hold after a small dip, lookback-low stop floor 2%, "

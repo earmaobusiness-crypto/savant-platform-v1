@@ -11,4 +11,6 @@ alwaysApply: true
 
 **Tactics** = **entries and exits** for that letter. Concrete default per strategy, fluid enough to maneuver. Handle lives here (limit vs market, wait-pullback, stop, target, first-of-day, RVOL gate). Changing tactics is **repair**, not a new letter. If Hunt changes so far it is no longer that letter, **retire** it; salvage packs go to Purgatory / a live match — not bolted onto the dead name.
 
+**Fluidity (locked 2026-09-17):** same letter = same gene. Names that print it are the same species, not copies. Most of the DNA matches; this ticker-day still has a temperament (hot vs calm, this dip vs that). Handle reads *this* tape and deals with it. That is not a new letter, not a per-stock strategy, and not “treat every 3A fill identical.” A name whose detect is actually a different gene is another pack (join a live letter or sit in Purgatory) — do not bolt it onto this letter.
+
 Do not call trip-size / stored structural% a win rate or a live mean.

@@ -325,6 +325,8 @@ def order_style_for(
     token = str(strategy or "").strip().upper().replace(" ", "")
     if tf == "1m" and token.startswith("2D") and "1M" in token:
         return "market"
+    if tf == "1m" and token.startswith("3A") and "1M" in token:
+        return "limit"
     if tf == "1m" and abs(float(structural_move_pct or 0)) < 4.0:
         return "market"
     return "limit"

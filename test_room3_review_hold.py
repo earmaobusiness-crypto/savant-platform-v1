@@ -21,9 +21,28 @@ def test_unvoted_expires_next_morning_9am():
 
 
 def test_same_session_still_held_before_9am():
+    row = {"session_date": "2026-09-17", "exit_time": "12:02:07"}
+    until = t._review_hold_until(row)
+    assert until == datetime(2026, 9, 18, 9, 0, tzinfo=ET)
+
+
+def test_wednesday_16_batch_holds_one_extra_morning():
     row = {"session_date": "2026-09-16", "exit_time": "12:02:07"}
     until = t._review_hold_until(row)
-    assert until == datetime(2026, 9, 17, 9, 0, tzinfo=ET)
+    assert until == datetime(2026, 9, 18, 9, 0, tzinfo=ET)
+    assert until == t._review_extra_hold_drop()
+
+
+def test_thursday_17_drops_with_wednesday_16_friday_morning():
+    row = {"session_date": "2026-09-17", "exit_time": "15:59:00"}
+    until = t._review_hold_until(row)
+    assert until == datetime(2026, 9, 18, 9, 0, tzinfo=ET)
+
+
+def test_friday_18_back_to_normal_next_morning():
+    row = {"session_date": "2026-09-18", "exit_time": "12:00:00"}
+    until = t._review_hold_until(row)
+    assert until == datetime(2026, 9, 19, 9, 0, tzinfo=ET)
 
 
 def test_voted_row_is_not_held():
