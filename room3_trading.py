@@ -4033,7 +4033,7 @@ def _maybe_reconnect_alpaca() -> None:
     creds = room3_alpaca.load_alpaca_credentials(paper=True)
     if not (creds.get("key") and creds.get("secret")):
         return
-    result = _sync_alpaca_account_into_session(paper=True)
+    result = _sync_alpaca_account_into_session(paper=True, include_fills=False)
     if not result.get("ok"):
         return
     equity = float(result.get("equity") or 0)
@@ -4683,7 +4683,7 @@ Close **IB Gateway** first if it’s logged into the same account.
             st.caption(msg)
 
 
-def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
+def _sync_alpaca_account_into_session(*, paper: bool = True, include_fills: bool = True) -> dict:
     """Broker truth — equity, open positions, closed fills, day P/L from Alpaca."""
     result = room3_alpaca.probe_alpaca_connection(paper=paper)
     if not result.get("ok"):
@@ -4711,18 +4711,20 @@ def _sync_alpaca_account_into_session(*, paper: bool = True) -> dict:
     room3_lots.reconcile_to_broker(
         st.session_state, st.session_state.room3_open_positions
     )
-    # Closed fills across lookback (Friday+) stay in history / Session history.
-    dbg = room3_alpaca.fetch_closed_trades_today_debug(paper=paper)
-    closed = dbg.get("closed") or []
-    _merge_broker_closed_trades(closed)
-    st.session_state.room3_broker_closed_sync = {
-        "fill_events": int(dbg.get("fill_events") or 0),
-        "closed_count": int(dbg.get("closed_count") or 0),
-        "today_closed_count": int(dbg.get("today_closed_count") or 0),
-        "error": str(dbg.get("error") or ""),
-        "session_day": str(dbg.get("session_day") or ""),
-        "at": datetime.now(ET).strftime("%H:%M:%S ET"),
-    }
+    # 14-day fill pagination is slow. Handshake / Cloud UI must not wait on it.
+    # The pulse thread still pulls fills; this path can skip them so the page paints.
+    if include_fills:
+        dbg = room3_alpaca.fetch_closed_trades_today_debug(paper=paper)
+        closed = dbg.get("closed") or []
+        _merge_broker_closed_trades(closed)
+        st.session_state.room3_broker_closed_sync = {
+            "fill_events": int(dbg.get("fill_events") or 0),
+            "closed_count": int(dbg.get("closed_count") or 0),
+            "today_closed_count": int(dbg.get("today_closed_count") or 0),
+            "error": str(dbg.get("error") or ""),
+            "session_day": str(dbg.get("session_day") or ""),
+            "at": datetime.now(ET).strftime("%H:%M:%S ET"),
+        }
     st.session_state.room3_broker_day_pl = float(result.get("day_pl") or 0)
     st.session_state.room3_broker_day_pl_pct = float(result.get("day_pl_pct") or 0)
     st.session_state.room3_last_broker_sync = datetime.now(ET).strftime("%H:%M:%S ET")
@@ -5700,8 +5702,7 @@ def _room3_screener_fragment() -> None:
         st.caption(f"Screener error · {result.get('error')}")
 
 
-@st.fragment(run_every=timedelta(seconds=15))
-def _room3_heartbeat_fragment() -> None:
+def _room3_heartbeat_tick() -> None:
     """Unattended pulse — broker truth + watcher eyes (per-letter cadence inside)."""
     if not _broker_is_connected():
         st.caption("Heartbeat idle · broker disconnected")
@@ -5711,8 +5712,6 @@ def _room3_heartbeat_fragment() -> None:
     _clear_dead_entry_locks()
     _relabel_unlabeled_closes_from_lots()
     if room3_pulse.worker_owns_execution():
-        paper = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER) != ROOM3_MODE_LIVE
-        _maybe_sync_alpaca(paper=paper, min_interval=30.0)
         book = st.session_state.get("room3_watch_book") or room3_watcher.empty_book()
         window = room3_engine.detect_session_window()
         new_ok = _session_trading_allowed()
@@ -5928,6 +5927,19 @@ def _room3_heartbeat_fragment() -> None:
         st.caption("No TF maps open yet.")
 
 
+@st.fragment(run_every=timedelta(seconds=15))
+def _room3_heartbeat_local_fragment() -> None:
+    _room3_heartbeat_tick()
+
+
+def _room3_heartbeat_fragment() -> None:
+    """Cloud: one paint of the pulse caption. The 15s loop is the worker thread, not Streamlit."""
+    if room3_engine.is_cloud_host():
+        _room3_heartbeat_tick()
+        return
+    _room3_heartbeat_local_fragment()
+
+
 def _render_watch_book_panel() -> None:
     st.markdown("### Eyes · watch book")
     _render_rth_filter_attach()
@@ -6138,7 +6150,10 @@ def _render_trading_workspace(mode: str) -> None:
         if frame_open:
             st.markdown("</div>", unsafe_allow_html=True)
         return
-    if str(st.session_state.get("room3_broker") or "") == "alpaca":
+    if (
+        str(st.session_state.get("room3_broker") or "") == "alpaca"
+        and not room3_pulse.worker_owns_execution()
+    ):
         _maybe_sync_alpaca(paper=(mode != ROOM3_MODE_LIVE), min_interval=30.0)
     _render_live_dashboard(mode)
     _render_execution_posture(mode)
