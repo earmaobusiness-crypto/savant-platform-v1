@@ -3358,7 +3358,6 @@ def _render_trade_history() -> None:
                     st.rerun()
 
 
-@st.fragment
 def _render_live_dashboard(mode: str) -> None:
     """Live-now strip — account moves with P/L; tradable cap sets today's firepower."""
     # Keep equity curve/account current before reading stats
@@ -4812,7 +4811,6 @@ def _log_alpaca_order_fill(result: dict) -> None:
     # Tape rows come from Alpaca FIFO / lot closes — not from a PENDING_NEW stub.
 
 
-@st.fragment
 def _render_execution_posture(mode: str) -> None:
     """Auto matrix path — filters/session → signal → Alpaca entry/exit. You supervise."""
     lane = "PAPER" if mode == ROOM3_MODE_PAPER else "LIVE"
@@ -5324,21 +5322,9 @@ def _sync_belt_query(names: list[str] | None) -> bool:
         return False
 
 
-def _soft_rerun() -> None:
-    """Rerun this widget block only. A second full-page rerun is the gray overlay."""
-    fn = getattr(st, "rerun", None)
-    if not callable(fn):
-        return
-    try:
-        fn(scope="fragment")
-    except TypeError:
-        return
-
-
 def _belt_ui_refresh(names: list[str] | None) -> None:
-    """Keep live maps in session. Do not remount the whole Room 3 page."""
+    """Maps stay in session. Do not remount the whole Room 3 page."""
     _ = names
-    _soft_rerun()
 
 
 def _screener_rules_for_scan() -> dict:
@@ -5960,9 +5946,12 @@ def _render_watch_book_panel() -> None:
         )
 
 
-@st.fragment
 def _render_rth_filter_attach() -> None:
     """Job 1 feed — paste tickers. Built-in Yahoo screener is parked (flag off)."""
+    # Guard: Streamlit crashes if this mounts twice in one run (duplicate element key).
+    if st.session_state.get("_room3_belt_mounted"):
+        return
+    st.session_state._room3_belt_mounted = True
     st.markdown("#### Belt · drop tickers")
     trading_now = _session_trading_allowed()
     window = room3_engine.detect_session_window()
@@ -6058,6 +6047,11 @@ def _render_rth_filter_attach() -> None:
                 bits.append("cap — not added: " + ", ".join(skipped[:8]))
             st.session_state.room3_belt_flash = " · ".join(bits)
             _belt_ui_refresh(merged)
+
+    belt = list(st.session_state.get("room3_filter_universe") or [])
+    extra_flash = st.session_state.pop("room3_belt_flash", None)
+    if extra_flash:
+        st.success(extra_flash)
 
     if belt:
         st.caption("On belt now — × to drop one name (maps keep going if that name is still in a trade):")
