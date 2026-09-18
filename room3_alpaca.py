@@ -232,17 +232,24 @@ def _trading_client(paper: bool = True):
     )
 
 
+_SDK_POOL = None
+
+
+def _sdk_pool():
+    global _SDK_POOL
+    if _SDK_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _SDK_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="alpaca-sdk")
+    return _SDK_POOL
+
+
 def _sdk_call(fn, *, timeout_sec: float = 8.0, default=None):
     """Alpaca SDK calls have no timeout — cap them so Room 3 can still paint."""
-    from concurrent.futures import ThreadPoolExecutor
-
-    pool = ThreadPoolExecutor(max_workers=1)
     try:
-        return pool.submit(fn).result(timeout=float(timeout_sec))
+        return _sdk_pool().submit(fn).result(timeout=float(timeout_sec))
     except Exception:
         return default
-    finally:
-        pool.shutdown(wait=False)
 
 
 def probe_alpaca_connection(paper: bool = True) -> dict[str, Any]:

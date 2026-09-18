@@ -329,8 +329,10 @@ def init_room3_session_state() -> None:
         _maybe_overnight_belt_clear()
         _void_session_reviews_no_learn()
         _reject_review_pile_once()
-        for day_key in _FILE_SESSION_DATES:
-            _file_session_day(day_key)
+        if not st.session_state.get("_room3_filed_once"):
+            for day_key in _FILE_SESSION_DATES:
+                _file_session_day(day_key)
+            st.session_state._room3_filed_once = True
     finally:
         st.session_state._room3_init_inflight = False
 

@@ -21,6 +21,7 @@ import room3_watcher
 
 ET = ZoneInfo("America/New_York")
 PULSE_SEC = 15
+FILL_PULSE_SEC = 60.0
 
 OPERATOR_KEYS = (
     "room3_engine_armed",
@@ -329,7 +330,16 @@ def _open_syms(ss: Any) -> set[str]:
     return out
 
 
-def _sync_alpaca(ss: PulseState, *, paper: bool) -> dict[str, Any]:
+def _fills_due(ss: PulseState) -> bool:
+    last = float(ss.get("_fills_mono") or 0)
+    now = time.monotonic()
+    if not last:
+        ss._fills_mono = now
+        return False
+    return (now - last) >= FILL_PULSE_SEC
+
+
+def _sync_alpaca(ss: PulseState, *, paper: bool, include_fills: bool = True) -> dict[str, Any]:
     result = room3_alpaca.probe_alpaca_connection(paper=paper)
     if not result.get("ok"):
         ss.room3_broker_truth = False
@@ -349,6 +359,10 @@ def _sync_alpaca(ss: PulseState, *, paper: bool) -> dict[str, Any]:
     room3_engine.lots.heal_lots_from_watch(
         ss, ss.get("room3_watch_book"), ss.room3_open_positions
     )
+    if not include_fills:
+        now_s = datetime.now(ET).strftime("%H:%M:%S ET")
+        ss.room3_last_broker_sync = now_s
+        return result
     dbg = room3_alpaca.fetch_closed_trades_today_debug(paper=paper)
     hist = list(ss.get("room3_trade_history") or [])
     seen = {str(r.get("id") or "") for r in hist if isinstance(r, dict)}
@@ -374,6 +388,7 @@ def _sync_alpaca(ss: PulseState, *, paper: bool) -> dict[str, Any]:
         "session_day": str(dbg.get("session_day") or ""),
         "at": now_s,
     }
+    ss._fills_mono = time.monotonic()
     return result
 
 
@@ -537,7 +552,7 @@ def run_pulse(ss: PulseState) -> str:
         ss.room3_worker_note = note
         persist_bag(ss)
         return note
-    synced = _sync_alpaca(ss, paper=paper)
+    synced = _sync_alpaca(ss, paper=paper, include_fills=_fills_due(ss))
     if not synced.get("ok"):
         ss.room3_worker_note = "broker disconnected"
         return ss.room3_worker_note
@@ -618,7 +633,7 @@ def _loop() -> None:
                     if unattended_armed_from_disk():
                         run_pulse(ss)
                     else:
-                        _sync_alpaca(ss, paper=paper)
+                        _sync_alpaca(ss, paper=paper, include_fills=False)
                         if _open_syms(ss):
                             ss.room3_worker_note = _flatten_open(ss, paper=paper)
                             persist_bag(ss)
