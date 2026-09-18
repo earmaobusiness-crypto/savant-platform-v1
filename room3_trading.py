@@ -4026,19 +4026,20 @@ def _broker_is_connected() -> bool:
 
 def _maybe_reconnect_alpaca() -> None:
     """After a Streamlit remount, secrets are still there — don't make the operator re-click."""
-    if st.session_state.get("room3_alpaca_autoprobed"):
-        return
-    st.session_state.room3_alpaca_autoprobed = True
     if str(st.session_state.get("room3_broker") or "alpaca") != "alpaca":
         return
     if str(st.session_state.get("room3_alpaca_status") or "") == "connected":
         return
+    if st.session_state.get("room3_alpaca_autoprobed"):
+        return
     creds = room3_alpaca.load_alpaca_credentials(paper=True)
     if not (creds.get("key") and creds.get("secret")):
+        st.session_state.room3_alpaca_autoprobed = True
         return
     result = _sync_alpaca_account_into_session(
         paper=True, include_fills=False, include_positions=False
     )
+    st.session_state.room3_alpaca_autoprobed = True
     if not result.get("ok"):
         return
     equity = float(result.get("equity") or 0)
@@ -4492,7 +4493,9 @@ def _render_alpaca_connection_panel(mode: str) -> None:
     with b2:
         if st.button("Check connection", key="room3_alpaca_check", type="primary", use_container_width=True):
             st.session_state.room3_alpaca_status = "waiting"
-            result = _sync_alpaca_account_into_session(paper=True)
+            result = _sync_alpaca_account_into_session(
+                paper=True, include_fills=False, include_positions=True
+            )
             if result.get("ok"):
                 equity = float(result.get("equity") or 0)
                 cash = float(result.get("cash") or 0)
@@ -5713,10 +5716,14 @@ def _room3_screener_fragment() -> None:
 
 def _room3_heartbeat_tick() -> None:
     """Unattended pulse — broker truth + watcher eyes (per-letter cadence inside)."""
+    before = str(st.session_state.get("room3_alpaca_status") or "")
+    room3_pulse.sync_operator_into_worker(st.session_state)
+    after = str(st.session_state.get("room3_alpaca_status") or "")
+    if before != "connected" and after == "connected":
+        st.rerun()
     if not _broker_is_connected():
         st.caption("Heartbeat idle · broker disconnected")
         return
-    room3_pulse.sync_operator_into_worker(st.session_state)
     room3_pulse.stamp_belt_and_maps(st.session_state)
     _clear_dead_entry_locks()
     _relabel_unlabeled_closes_from_lots()
@@ -5942,10 +5949,7 @@ def _room3_heartbeat_local_fragment() -> None:
 
 
 def _room3_heartbeat_fragment() -> None:
-    """Cloud: one paint of the pulse caption. The 15s loop is the worker thread, not Streamlit."""
-    if room3_engine.is_cloud_host():
-        _room3_heartbeat_tick()
-        return
+    """15s caption only — worker owns detect/fire. Needed so a late Alpaca handshake paints."""
     _room3_heartbeat_local_fragment()
 
 
@@ -6154,8 +6158,10 @@ def _render_trading_workspace(mode: str) -> None:
         frame_open = True
     _render_broker_connection_panel(mode)
     _render_broker_status_card(mode)
+    room3_pulse.sync_operator_into_worker(st.session_state)
     if not _broker_is_connected():
         st.caption("Trading panels unlock after the broker connects.")
+        _room3_heartbeat_fragment()
         if frame_open:
             st.markdown("</div>", unsafe_allow_html=True)
         return

@@ -590,7 +590,7 @@ def ensure_layout_library(session_state: Any, *, allow_network: bool = True) -> 
     return len(merged)
 
 
-def matrix_repertoire(session_state: Any) -> dict[str, Any]:
+def matrix_repertoire(session_state: Any, *, allow_network: bool = True) -> dict[str, Any]:
     """Full collective repertoire — all layout buckets from vault + session."""
     try:
         cache = _session_get(session_state, "room3_repertoire_cache") or {}
@@ -603,16 +603,21 @@ def matrix_repertoire(session_state: Any) -> dict[str, Any]:
     except Exception:
         cache = {}
 
-    vault_rows = _fetch_vault_rows()
+    cutoff = _centroid_cutoff_utc()
+    vault_rows = (
+        _fetch_vault_rows() if allow_network else _vault_rows_from_cache_file(cutoff)
+    )
     vault_layouts = _aggregate_rows_into_layouts(vault_rows)
     session_layouts = _layouts_from_session_vectors(session_state)
     cache_layouts = _layouts_from_local_cache()
     layouts = _merge_layout_libraries(session_layouts, vault_layouts, cache_layouts)
     if not layouts:
-        ensure_layout_library(session_state)
+        ensure_layout_library(session_state, allow_network=allow_network)
         layouts = _merge_layout_libraries(
             _layouts_from_session_vectors(session_state),
-            _aggregate_rows_into_layouts(_fetch_vault_rows()),
+            _aggregate_rows_into_layouts(
+                vault_rows if not allow_network else _fetch_vault_rows()
+            ),
             _layouts_from_local_cache(),
         )
 
@@ -706,7 +711,7 @@ def matrix_repertoire(session_state: Any) -> dict[str, Any]:
 
 def matrix_snapshot(session_state: Any) -> dict[str, Any]:
     """Safe peek — never throws if Room 2 state is missing or reshaped."""
-    rep = matrix_repertoire(session_state)
+    rep = matrix_repertoire(session_state, allow_network=False)
     return {
         "layout_count": rep.get("layout_count", 0),
         "deploy_count": rep.get("deploy_count", 0),
