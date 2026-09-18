@@ -1242,6 +1242,7 @@ def _lock_tradable_from_operator() -> None:
     if amt > 0:
         st.session_state.room3_tradable_session_used = amt
         st.session_state.room3_tradable_session_day = _trading_day_key()
+    room3_pulse.mark_unattended(st.session_state)
     _persist_screener_to_disk()
 
 
@@ -1260,6 +1261,11 @@ def _set_tradable_pct(pct: float, equity: float) -> None:
     )
     _lock_tradable_from_operator()
     _refresh_book_ticket_sizes()
+
+
+def _click_tradable_pct(pct: int) -> None:
+    equity = float(st.session_state.get("room3_account_equity") or 0)
+    _set_tradable_pct(float(pct), equity)
 
 
 def _apply_custom_tradable() -> None:
@@ -3352,6 +3358,7 @@ def _render_trade_history() -> None:
                     st.rerun()
 
 
+@st.fragment
 def _render_live_dashboard(mode: str) -> None:
     """Live-now strip — account moves with P/L; tradable cap sets today's firepower."""
     # Keep equity curve/account current before reading stats
@@ -3384,14 +3391,14 @@ def _render_live_dashboard(mode: str) -> None:
         p1, p2, p3, p4, p5 = st.columns([1, 1, 1, 1, 2])
         for col, preset in zip((p1, p2, p3, p4), (25, 50, 75, 100)):
             with col:
-                if st.button(
+                st.button(
                     f"{preset}%",
                     key=f"room3_tradable_pct_{preset}",
                     use_container_width=True,
                     type="primary" if abs(pct - preset) < 0.5 else "secondary",
-                ):
-                    _set_tradable_pct(preset, equity)
-                    st.rerun()
+                    on_click=_click_tradable_pct,
+                    args=(preset,),
+                )
         with p5:
             c_in, c_btn = st.columns([2.2, 1])
             with c_in:
@@ -3408,9 +3415,12 @@ def _render_live_dashboard(mode: str) -> None:
                     label_visibility="collapsed",
                 )
             with c_btn:
-                if st.button("Set $", key="room3_tradable_set_btn", use_container_width=True):
-                    _apply_custom_tradable()
-                    st.rerun()
+                st.button(
+                    "Set $",
+                    key="room3_tradable_set_btn",
+                    use_container_width=True,
+                    on_click=_apply_custom_tradable,
+                )
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
@@ -4802,6 +4812,7 @@ def _log_alpaca_order_fill(result: dict) -> None:
     # Tape rows come from Alpaca FIFO / lot closes — not from a PENDING_NEW stub.
 
 
+@st.fragment
 def _render_execution_posture(mode: str) -> None:
     """Auto matrix path — filters/session → signal → Alpaca entry/exit. You supervise."""
     lane = "PAPER" if mode == ROOM3_MODE_PAPER else "LIVE"
@@ -4840,8 +4851,8 @@ def _render_execution_posture(mode: str) -> None:
             key="room3_toggle_engine_armed",
             help="On Cloud: Arm + belt keeps trading if you close the laptop. Disarm or Kill stops that.",
         )
-        room3_pulse.mark_unattended(st.session_state)
         if bool(st.session_state.room3_engine_armed) != bool(armed):
+            room3_pulse.mark_unattended(st.session_state)
             _persist_screener_to_disk()
     with c2:
         st.session_state.room3_pause_entries = st.toggle(
@@ -4857,8 +4868,8 @@ def _render_execution_posture(mode: str) -> None:
             key="room3_toggle_kill_flat",
             help="Wipes the belt, disarms, flattens open paper, and stops laptop-closed trading.",
         )
-        room3_pulse.mark_unattended(st.session_state)
         if bool(st.session_state.room3_kill_flat) != bool(flat):
+            room3_pulse.mark_unattended(st.session_state)
             _persist_screener_to_disk()
     if st.session_state.room3_kill_flat and not st.session_state.get("room3_kill_did_flat"):
         st.session_state.room3_kill_did_flat = True
@@ -5313,9 +5324,21 @@ def _sync_belt_query(names: list[str] | None) -> bool:
         return False
 
 
+def _soft_rerun() -> None:
+    """Rerun this widget block only. A second full-page rerun is the gray overlay."""
+    fn = getattr(st, "rerun", None)
+    if not callable(fn):
+        return
+    try:
+        fn(scope="fragment")
+    except TypeError:
+        return
+
+
 def _belt_ui_refresh(names: list[str] | None) -> None:
-    """Keep live maps in session. Writing belt= remounts Streamlit and zeros Match%."""
-    st.rerun()
+    """Keep live maps in session. Do not remount the whole Room 3 page."""
+    _ = names
+    _soft_rerun()
 
 
 def _screener_rules_for_scan() -> dict:
@@ -5937,12 +5960,9 @@ def _render_watch_book_panel() -> None:
         )
 
 
+@st.fragment
 def _render_rth_filter_attach() -> None:
     """Job 1 feed — paste tickers. Built-in Yahoo screener is parked (flag off)."""
-    # Guard: Streamlit crashes if this mounts twice in one run (duplicate element key).
-    if st.session_state.get("_room3_belt_mounted"):
-        return
-    st.session_state._room3_belt_mounted = True
     st.markdown("#### Belt · drop tickers")
     trading_now = _session_trading_allowed()
     window = room3_engine.detect_session_window()
