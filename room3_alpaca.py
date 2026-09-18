@@ -232,6 +232,19 @@ def _trading_client(paper: bool = True):
     )
 
 
+def _sdk_call(fn, *, timeout_sec: float = 8.0, default=None):
+    """Alpaca SDK calls have no timeout — cap them so Room 3 can still paint."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(fn).result(timeout=float(timeout_sec))
+    except Exception:
+        return default
+    finally:
+        pool.shutdown(wait=False)
+
+
 def probe_alpaca_connection(paper: bool = True) -> dict[str, Any]:
     """One-shot account read to verify keys work."""
     creds = load_alpaca_credentials(paper=paper)
@@ -254,7 +267,13 @@ def probe_alpaca_connection(paper: bool = True) -> dict[str, Any]:
 
     try:
         client = _trading_client(paper=paper)
-        account = client.get_account()
+        account = _sdk_call(client.get_account, timeout_sec=8.0)
+        if account is None:
+            return {
+                "ok": False,
+                "error": "Alpaca account read timed out",
+                "endpoint": creds.get("endpoint"),
+            }
         equity = float(getattr(account, "equity", 0) or 0)
         last_equity = float(getattr(account, "last_equity", 0) or 0)
         cash = float(getattr(account, "cash", 0) or 0)
@@ -289,7 +308,8 @@ def fetch_open_positions(paper: bool = True) -> list[dict[str, Any]]:
         return []
     try:
         rows = []
-        for p in client.get_all_positions() or []:
+        positions = _sdk_call(client.get_all_positions, timeout_sec=8.0, default=[]) or []
+        for p in positions:
             qty = float(getattr(p, "qty", 0) or 0)
             if abs(qty) < 1e-9:
                 continue

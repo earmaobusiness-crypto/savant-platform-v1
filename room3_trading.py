@@ -316,12 +316,13 @@ def init_room3_session_state() -> None:
         if not st.session_state.get("room3_layout_hydrated_once"):
             import room3_bridge
 
-            room3_bridge.ensure_layout_library(st.session_state)
+            room3_bridge.ensure_layout_library(st.session_state, allow_network=False)
             st.session_state.pop("room3_repertoire_cache", None)
             st.session_state.room3_layout_hydrated_once = True
         _maybe_roll_trading_session()
         _maybe_reconnect_alpaca()
-        _maybe_flatten_on_cloud_process_boot()
+        if not room3_engine.is_cloud_host():
+            _maybe_flatten_on_cloud_process_boot()
         room3_pulse.ensure_worker()
         room3_pulse.sync_operator_into_worker(st.session_state)
         room3_pulse.stamp_belt_and_maps(st.session_state)
@@ -4033,7 +4034,9 @@ def _maybe_reconnect_alpaca() -> None:
     creds = room3_alpaca.load_alpaca_credentials(paper=True)
     if not (creds.get("key") and creds.get("secret")):
         return
-    result = _sync_alpaca_account_into_session(paper=True, include_fills=False)
+    result = _sync_alpaca_account_into_session(
+        paper=True, include_fills=False, include_positions=False
+    )
     if not result.get("ok"):
         return
     equity = float(result.get("equity") or 0)
@@ -4354,7 +4357,7 @@ def _maybe_flatten_on_cloud_process_boot() -> None:
         _PROCESS_GAP_FLATTEN_DONE = True
         return
     paper = True
-    synced = _sync_alpaca_account_into_session(paper=paper)
+    synced = _sync_alpaca_account_into_session(paper=paper, include_fills=False)
     if not synced.get("ok"):
         return
     positions = list(st.session_state.get("room3_open_positions") or [])
@@ -4683,7 +4686,9 @@ Close **IB Gateway** first if it’s logged into the same account.
             st.caption(msg)
 
 
-def _sync_alpaca_account_into_session(*, paper: bool = True, include_fills: bool = True) -> dict:
+def _sync_alpaca_account_into_session(
+    *, paper: bool = True, include_fills: bool = True, include_positions: bool = True
+) -> dict:
     """Broker truth — equity, open positions, closed fills, day P/L from Alpaca."""
     result = room3_alpaca.probe_alpaca_connection(paper=paper)
     if not result.get("ok"):
@@ -4703,14 +4708,15 @@ def _sync_alpaca_account_into_session(*, paper: bool = True, include_fills: bool
         f"{result.get('account_number') or 'paper'} · ${equity:,.2f}"
     )
     # Open = still open at broker. Flat account ⇒ empty open table.
-    st.session_state.room3_open_positions = [
-        p
-        for p in (room3_alpaca.fetch_open_positions(paper=paper) or [])
-        if isinstance(p, dict) and abs(float(p.get("qty") or 0)) >= 1e-9
-    ]
-    room3_lots.reconcile_to_broker(
-        st.session_state, st.session_state.room3_open_positions
-    )
+    if include_positions:
+        st.session_state.room3_open_positions = [
+            p
+            for p in (room3_alpaca.fetch_open_positions(paper=paper) or [])
+            if isinstance(p, dict) and abs(float(p.get("qty") or 0)) >= 1e-9
+        ]
+        room3_lots.reconcile_to_broker(
+            st.session_state, st.session_state.room3_open_positions
+        )
     # 14-day fill pagination is slow. Handshake / Cloud UI must not wait on it.
     # The pulse thread still pulls fills; this path can skip them so the page paints.
     if include_fills:
@@ -4729,11 +4735,12 @@ def _sync_alpaca_account_into_session(*, paper: bool = True, include_fills: bool
     st.session_state.room3_broker_day_pl_pct = float(result.get("day_pl_pct") or 0)
     st.session_state.room3_last_broker_sync = datetime.now(ET).strftime("%H:%M:%S ET")
     st.session_state.pop("room3_positions_pinned_empty", None)
-    _reconcile_watch_book_with_broker()
-    _clear_dead_entry_locks()
-    # After adopt: leftover rows have a letter/TF to copy. Alpaca itself has neither.
-    _stamp_position_timeframes()
-    _relabel_unlabeled_closes_from_lots()
+    if include_positions:
+        _reconcile_watch_book_with_broker()
+        _clear_dead_entry_locks()
+        # After adopt: leftover rows have a letter/TF to copy. Alpaca itself has neither.
+        _stamp_position_timeframes()
+        _relabel_unlabeled_closes_from_lots()
     return result
 
 

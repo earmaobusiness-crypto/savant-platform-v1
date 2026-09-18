@@ -232,7 +232,11 @@ st.set_page_config(
 
 st.markdown("""
     <style>
-        #MainMenu, footer, header {visibility: hidden;}
+        #MainMenu, footer {visibility: hidden;}
+        header { visibility: hidden; }
+        header [data-testid="stStatusWidget"] {
+            visibility: visible !important;
+        }
         [data-testid="stSidebar"] {
             background-color: #0B0B0B !important;
             border-right: 1px solid #2A2A2A !important;

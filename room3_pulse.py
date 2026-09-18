@@ -601,13 +601,28 @@ def run_pulse(ss: PulseState) -> str:
     return note
 
 
+_BOOT_PULSE_DONE = False
+
+
 def _loop() -> None:
+    global _BOOT_PULSE_DONE
     while True:
         ss = bag()
         try:
             with _LOCK:
                 belt = bool(ss.get("room3_filter_universe"))
-                if (
+                boot = not _BOOT_PULSE_DONE
+                if boot:
+                    _BOOT_PULSE_DONE = True
+                    paper = str(ss.get("room3_execution_mode") or "paper") != "live"
+                    if unattended_armed_from_disk():
+                        run_pulse(ss)
+                    else:
+                        _sync_alpaca(ss, paper=paper)
+                        if _open_syms(ss):
+                            ss.room3_worker_note = _flatten_open(ss, paper=paper)
+                            persist_bag(ss)
+                elif (
                     ss.get("room3_unattended_armed")
                     or ss.get("room3_engine_armed")
                     or _open_syms(ss)

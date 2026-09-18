@@ -566,12 +566,15 @@ def _deploy_registry(session_state: Any, vault_rows: list[dict[str, Any]] | None
     return []
 
 
-def ensure_layout_library(session_state: Any) -> int:
+def ensure_layout_library(session_state: Any, *, allow_network: bool = True) -> int:
     """
     Always hydrate the full collective layout library from vault + session.
     Many pattern saves → few layout buckets (Layout 1–4, etc.).
     """
-    vault_rows = _fetch_vault_rows()
+    cutoff = _centroid_cutoff_utc()
+    vault_rows = (
+        _fetch_vault_rows() if allow_network else _vault_rows_from_cache_file(cutoff)
+    )
     vault_layouts = _aggregate_rows_into_layouts(vault_rows)
     session_layouts = _layouts_from_session_vectors(session_state)
     cache_layouts = _layouts_from_local_cache()
