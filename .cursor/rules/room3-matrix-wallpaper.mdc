@@ -1,14 +1,14 @@
 ---
-description: Matrix wallpaper / IDF weighting — first version is in match_spatial
+description: Matrix match — median/MAD z, weighted cosine (locked 2026-09-17)
 alwaysApply: true
 ---
 
-# Room 3 — wallpaper (distinctive DNA)
+# Room 3 — live match vs Room 2 layouts
 
-**Built (first version):** `match_spatial` downweights DNA dimensions that look the same across almost every saved layout (low spread = wallpaper) and upweights high-spread / distinctive traits. Size still also cuts when two strategies are almost equally close. **Same-TF only** — a 1m watch never nearest-neighbors or stamps a 15m recipe (the letter’s `(15M)` / `(5M)` / `(1M)` wins over a stale vault clock). A 15m watch never borrows 1m DNA.
+**Velocity:** live session velocity is **(last − first) / first**, same as Room 2 / precursor.
 
-**Not done:** True corpus IDF from a large pattern library; operator-facing wallpaper diagnostics.
+**Match:** `match_spatial` z-scores against the current same-TF library using **median + MAD** (not mean/std). Z is hard-clipped to **±5**. Dead (near-zero MAD) dims stay z=0. **No raw-vector fallback.** Score is **weighted cosine** (weighted dot / weighted L2) with static `FEATURE_MATCH_WEIGHTS` — velocity slots 0–2 and volume slots 3–4 lead; VWAP/Pearson sit back; SEC weight 0. Size still cuts when two strategies are almost equally close. **Same-TF only.**
 
-**Not done:** True corpus IDF from a large pattern library; operator-facing wallpaper diagnostics.
+**Handle on layouts:** each vault-sourced layout bucket gets `handle_execution` at hydrate. DNA vectors are not mutated. Supabase stays read-only.
 
-**Related:** Room 3 maps use strategy recipes (lookback + sensors); Job 1 Yahoo screener is parked (`BUILTIN_SCREENER_ENABLED = False`).
+**Related:** Job 1 Yahoo screener is parked (`BUILTIN_SCREENER_ENABLED = False`).

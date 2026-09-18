@@ -15,14 +15,17 @@ import json
 import os
 import time
 from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
 REPERTOIRE_CACHE_TTL_SEC = 45
 VAULT_ROWS_MEM_TTL_SEC = 120
 VAULT_FETCH_TIMEOUT_SEC = 8
+CENTROID_WINDOW_SEC = 604800
 
 ROOM2_OBSERVE_KEYS = (
     "layout_master_matrix_index",
@@ -183,6 +186,54 @@ def _average_vectors(vectors: list[list[float]]) -> list[float]:
     return out
 
 
+def _centroid_cutoff_utc() -> datetime:
+    return datetime.now(timezone.utc) - timedelta(seconds=CENTROID_WINDOW_SEC)
+
+
+def _centroid_cutoff_iso(cutoff: datetime | None = None) -> str:
+    ts = cutoff if cutoff is not None else _centroid_cutoff_utc()
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    ts = ts.astimezone(timezone.utc).replace(microsecond=0)
+    return ts.isoformat().replace("+00:00", "Z")
+
+
+def _parse_row_timestamp(raw: Any) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        ts = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
+def _row_in_centroid_window(row: dict[str, Any], cutoff: datetime) -> bool:
+    ts = _parse_row_timestamp(
+        row.get("timestamp") if isinstance(row, dict) else None
+    )
+    if ts is None:
+        return False
+    return ts >= cutoff
+
+
+def _filter_rows_to_centroid_window(
+    rows: list[dict[str, Any]],
+    cutoff: datetime | None = None,
+) -> list[dict[str, Any]]:
+    cut = cutoff if cutoff is not None else _centroid_cutoff_utc()
+    return [
+        r
+        for r in (rows or [])
+        if isinstance(r, dict) and _row_in_centroid_window(r, cut)
+    ]
+
+
 def _normalize_tf(raw: str) -> str:
     """Map vault strings (15-Minute, 1A (5M)) and watcher keys (1m) to 1m/5m/15m."""
     t = str(raw or "").lower().replace("-", "").replace(" ", "")
@@ -243,6 +294,7 @@ def _layout_entry(
     if purgatory:
         return None
     bkey = bucket_key or f"{layout_id}|{strategy}|{tf_norm}"
+    cutoff = _centroid_cutoff_utc()
     entry = {
         "layout_id": layout_id,
         "bucket_key": bkey,
@@ -253,8 +305,11 @@ def _layout_entry(
         "structural_move_pct": float(structural_move_pct or 0.0),
         "strategy": str(strategy or ""),
         "pattern_count": int(pattern_count or 0),
+        "window_start": _centroid_cutoff_iso(cutoff),
+        "window_hours": int(CENTROID_WINDOW_SEC // 3600),
         "vector_source": source or "unknown",
-        "tradeable": bool(vector) and not purgatory,
+        "tradeable": bool(vector) and not purgatory and int(pattern_count or 0) > 0,
+        # Handle is attached at hydrate. Vault DNA vectors are not rewritten.
     }
     try:
         import room3_recipes
@@ -268,9 +323,11 @@ def _aggregate_rows_into_layouts(rows: list[dict[str, Any]]) -> list[dict[str, A
     """
     Collapse pattern saves into layout + strategy + timeframe buckets.
     Many stocks → Layout 1 / 1A (5M) / 5m is its own DNA bucket, separate from 1B (1M), etc.
+    Only in-window saves (timestamp >= now−168h UTC) count. Empty window → starve.
     """
+    windowed = _filter_rows_to_centroid_window(rows)
     buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
+    for row in windowed:
         if not isinstance(row, dict):
             continue
         key = _bucket_key_from_row(row)
@@ -337,7 +394,9 @@ def _reset_vault_rows_mem() -> None:
     _VAULT_ROWS_TTL = VAULT_ROWS_MEM_TTL_SEC
 
 
-def _vault_rows_from_cache_file() -> list[dict[str, Any]]:
+def _vault_rows_from_cache_file(
+    cutoff: datetime | None = None,
+) -> list[dict[str, Any]]:
     try:
         if not CACHE_PATH.is_file():
             return []
@@ -345,7 +404,7 @@ def _vault_rows_from_cache_file() -> list[dict[str, Any]]:
     except Exception:
         return []
     rows = [r for r in (cache.get("patterns") or []) if isinstance(r, dict)]
-    return rows
+    return _filter_rows_to_centroid_window(rows, cutoff)
 
 
 def _fetch_vault_rows() -> list[dict[str, Any]]:
@@ -354,6 +413,8 @@ def _fetch_vault_rows() -> list[dict[str, Any]]:
     now = time.time()
     if _VAULT_ROWS_MEM is not None and (now - _VAULT_ROWS_AT) < _VAULT_ROWS_TTL:
         return _VAULT_ROWS_MEM
+    cutoff = _centroid_cutoff_utc()
+    cutoff_iso = _centroid_cutoff_iso(cutoff)
     secrets = _load_secrets()
     headers = _supabase_headers(secrets)
     url = secrets.get("SUPABASE_URL", "").rstrip("/")
@@ -363,7 +424,7 @@ def _fetch_vault_rows() -> list[dict[str, Any]]:
         select = (
             "macro_weather_layout,ticker,timeframe_resolution,master_signature_json,"
             "metric_envelopes_json,structural_move_pct,execution_strategy,layout_match_pct,"
-            "bar_count,vault_track,state"
+            "bar_count,vault_track,state,timestamp"
         )
         try:
             resp = requests.get(
@@ -371,6 +432,7 @@ def _fetch_vault_rows() -> list[dict[str, Any]]:
                 f"?select={select}"
                 "&macro_weather_layout=not.is.null"
                 "&or=(state.is.null,state.eq.active,state.eq.incubation)"
+                f"&timestamp=gte.{quote(cutoff_iso, safe='')}"
                 f"&order=timestamp.desc&limit={VAULT_FETCH_LIMIT}",
                 headers=headers,
                 timeout=VAULT_FETCH_TIMEOUT_SEC,
@@ -378,11 +440,11 @@ def _fetch_vault_rows() -> list[dict[str, Any]]:
             if resp.ok:
                 body = resp.json()
                 if isinstance(body, list):
-                    rows = body
+                    rows = _filter_rows_to_centroid_window(body, cutoff)
         except Exception:
             rows = []
     if not rows:
-        rows = _vault_rows_from_cache_file()
+        rows = _vault_rows_from_cache_file(cutoff)
     _VAULT_ROWS_MEM = rows
     _VAULT_ROWS_AT = now
     _VAULT_ROWS_TTL = VAULT_ROWS_MEM_TTL_SEC if rows else 20
@@ -396,6 +458,10 @@ def _layouts_from_session_vectors(session_state: Any) -> list[dict[str, Any]]:
         return out
     for entry in raw:
         if not isinstance(entry, dict):
+            continue
+        if int(entry.get("window_hours") or 0) != int(CENTROID_WINDOW_SEC // 3600):
+            continue
+        if int(entry.get("pattern_count") or 0) <= 0:
             continue
         layout_id = str(entry.get("layout_id") or entry.get("macro_weather_layout") or "").strip()
         vec = entry.get("vector") or _parse_signature_from_row(entry)
@@ -417,14 +483,7 @@ def _layouts_from_session_vectors(session_state: Any) -> list[dict[str, Any]]:
 
 
 def _layouts_from_local_cache() -> list[dict[str, Any]]:
-    try:
-        if not CACHE_PATH.is_file():
-            return []
-        cache = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    rows = [r for r in (cache.get("patterns") or []) if isinstance(r, dict)]
-    return _aggregate_rows_into_layouts(rows)
+    return _aggregate_rows_into_layouts(_vault_rows_from_cache_file())
 
 
 def _layouts_from_supabase() -> list[dict[str, Any]]:
@@ -451,6 +510,8 @@ def _merge_layout_libraries(*parts: list[dict[str, Any]]) -> list[dict[str, Any]
                 continue
             prev = merged.get(bkey)
             if not prev:
+                if str(entry.get("vector_source") or "") == "session":
+                    continue
                 merged[bkey] = entry
                 continue
             prev_rank = rank.get(str(prev.get("vector_source") or ""), 0)

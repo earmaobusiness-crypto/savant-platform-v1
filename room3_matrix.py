@@ -158,7 +158,8 @@ def size_explain(session_state: Any | None = None) -> str:
         "instead of sitting in 15m. "
         "Weaker match uses less of its slot. "
         "Uniqueness still cuts size when two strategies are almost equally close. "
-        "Chart-wallpaper downweight is not in this formula yet. "
+        "Match uses median/MAD z-scores (clip ±5) then weighted cosine "
+        "(velocity + volume dims lead). "
         "Watch-book Size $ is the planned amount, not a fill."
     )
 
@@ -167,6 +168,21 @@ SIZE_EXPLAIN = (
     "Trading today opens 50% 15m / 30% 5m / 20% 1m. "
     "Leftover is fluid: extra fills and a still-moving 15m collect idle cash "
     "from buckets that are not hot. A hot 5m/1m keeps its pot and can pull quiet 15m leftover."
+)
+
+
+ADAPTIVE_STD_FLOOR = 1e-6
+ZSCORE_CLIP = 5.0
+# Static DNA weights: velocity (0–2) and volume (3–4) lead. VWAP/Pearson sit back. SEC slot is dead live.
+FEATURE_MATCH_WEIGHTS: tuple[float, ...] = (
+    1.6,  # 0 session velocity
+    1.4,  # 1 peak bar
+    1.2,  # 2 mean bar
+    1.5,  # 3 log volume σ
+    1.3,  # 4 volume z
+    0.5,  # 5 last-vs-mean close
+    0.0,  # 6 SEC / FinBERT — live is always 0
+    0.4,  # 7 Pearson
 )
 
 
@@ -182,30 +198,76 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float], weights: list[floa
     return max(0.0, min(1.0, dot / (norm_a * norm_b)))
 
 
-def _wallpaper_weights(layouts: list[dict[str, Any]], dim: int) -> list[float]:
-    """
-    Downweight dimensions that look the same in almost every saved pattern
-    (wallpaper). Distinct / high-spread traits weigh more.
-    """
-    rows: list[list[float]] = []
-    for entry in layouts or []:
-        stored = entry.get("vector") or []
-        if not stored or len(stored) != dim:
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(x) for x in values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2:
+        return ordered[mid]
+    return 0.5 * (ordered[mid - 1] + ordered[mid])
+
+
+def _adaptive_feature_moments(
+    vectors: list[list[float]], dim: int
+) -> tuple[list[float], list[float]]:
+    """Live-library median + MAD per DNA dim. Near-zero MAD → dim is dropped (z=0)."""
+    centers = [0.0] * dim
+    scales = [1.0] * dim
+    if dim <= 0:
+        return centers, scales
+    cols: list[list[float]] = [[] for _ in range(dim)]
+    for raw in vectors:
+        if not raw or len(raw) != dim:
             continue
-        rows.append([float(x) for x in stored])
-    if len(rows) < 3:
-        return [1.0] * dim
-    n = float(len(rows))
+        for i, x in enumerate(raw):
+            cols[i].append(float(x))
+    if not cols or len(cols[0]) < 2:
+        return centers, scales
+    out_c: list[float] = []
+    out_s: list[float] = []
+    for vals in cols:
+        med = _median(vals)
+        mad = _median([abs(x - med) for x in vals])
+        out_c.append(med)
+        out_s.append(mad if mad >= ADAPTIVE_STD_FLOOR else 0.0)
+    return out_c, out_s
+
+
+def _zscore_vec(
+    vec: list[float], centers: list[float], scales: list[float]
+) -> list[float]:
+    out: list[float] = []
+    clip = float(ZSCORE_CLIP)
+    for x, center, scale in zip(vec, centers, scales):
+        if scale <= 0:
+            out.append(0.0)
+            continue
+        z = (float(x) - center) / scale
+        if z > clip:
+            z = clip
+        elif z < -clip:
+            z = -clip
+        out.append(z)
+    return out
+
+
+def _wallpaper_weights(layouts: list[dict[str, Any]], dim: int) -> list[float]:
+    """Inverse-std from the live library. Dead (zero-std) dims get weight 0."""
+    vectors = [
+        [float(x) for x in (e.get("vector") or [])]
+        for e in (layouts or [])
+        if (e.get("vector") or []) and len(e.get("vector") or []) == dim
+    ]
+    _centers, scales = _adaptive_feature_moments(vectors, dim)
     weights: list[float] = []
-    for i in range(dim):
-        vals = [r[i] for r in rows]
-        mean = sum(vals) / n
-        var = sum((x - mean) ** 2 for x in vals) / n
-        std = math.sqrt(var)
-        # High spread → distinctive. Near-zero spread → wallpaper.
-        w = math.log(1.0 + (std / (abs(mean) + 0.12)))
-        weights.append(max(0.20, min(2.4, 0.35 + w * 1.8)))
-    return weights
+    for scale in scales:
+        if scale <= 0:
+            weights.append(0.0)
+        else:
+            weights.append(max(0.20, min(2.4, 1.0 / scale)))
+    return weights if weights else [1.0] * dim
 
 
 def _pearson_r(values: list[float]) -> float:
@@ -234,7 +296,7 @@ def build_live_feature_vector(line: dict[str, Any]) -> list[float] | None:
     if not closes:
         return None
 
-    session_velocity = sum(rets) * 100.0
+    session_velocity = ((closes[-1] - closes[0]) / closes[0] * 100.0) if closes[0] else 0.0
     peak_bar = max(abs(r) for r in rets) * 100.0
     mean_bar = (sum(abs(r) for r in rets) / len(rets)) * 100.0
 
@@ -298,12 +360,26 @@ def match_spatial(
         if watch_tf and strat and not room3_recipes.strategy_tf_agrees(strat, watch_tf):
             continue
         usable.append(e)
-    weights = _wallpaper_weights(usable, len(snapshot_vec))
+    dim = len(snapshot_vec)
+    lib_vecs = [
+        [float(x) for x in (e.get("vector") or [])]
+        for e in usable
+        if (e.get("vector") or []) and len(e.get("vector") or []) == dim
+    ]
+    centers, scales = _adaptive_feature_moments(lib_vecs, dim)
+    query_z = _zscore_vec([float(x) for x in snapshot_vec], centers, scales)
+    dim_w = list(FEATURE_MATCH_WEIGHTS)
+    if len(dim_w) < dim:
+        dim_w = dim_w + [0.4] * (dim - len(dim_w))
+    elif len(dim_w) > dim:
+        dim_w = dim_w[:dim]
 
     ranked_hits: list[dict[str, Any]] = []
     for entry in usable:
         stored = [float(x) for x in (entry.get("vector") or [])]
-        cos = cosine_similarity(snapshot_vec, stored, weights)
+        cand_z = _zscore_vec(stored, centers, scales)
+        # Weighted cosine = weighted dot / (weighted L2 × weighted L2). Match% stays 0–100.
+        cos = cosine_similarity(query_z, cand_z, dim_w)
         entry_tf = _layout_dna_tf(entry)
         ranked_hits.append(
             {

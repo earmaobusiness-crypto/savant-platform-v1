@@ -368,13 +368,107 @@ def cadence_for(
     return {"pulse_seconds": int(pulse), "extra_refresh_seconds": int(extras)}
 
 
+def _letter_head(strategy: str) -> str:
+    raw = str(strategy or "").strip().upper()
+    return raw.split("(")[0].strip().replace(" ", "")
+
+
+def handle_execution_for(
+    strategy: str = "",
+    timeframe: str = "5m",
+    *,
+    layout_id: str = "",
+    structural_move_pct: float = 0.0,
+) -> dict[str, Any]:
+    """
+    Live Handle stamped onto a vault layout bucket. DNA vector is unchanged.
+    1m fill-now (2026-09-17). 5m/15m placeholder still dip-hold.
+    """
+    _ = layout_id
+    tf = normalize_tf(timeframe)
+    head = _letter_head(strategy)
+    specialized_1m = frozenset({"5B", "2A", "1A", "2D", "2B", "2C", "3A"})
+    base: dict[str, Any] = {
+        "tf": tf,
+        "letter": str(strategy or "").strip() or head,
+        "first_of_day": True,
+        "cool_sec": 15 * 60,
+        "stop": "lookback_low",
+        "stop_floor_pct": 2.0,
+        "source": "room3_handle",
+        "vault_dna_mutated": False,
+    }
+    if tf == "1m":
+        base.update(
+            {
+                "entry": "fill_now",
+                "order_style_rth": "market",
+                "order_style_outside_rth": "limit",
+                "skip_until": "09:45",
+            }
+        )
+        if head in ("2A", "2C", "3A", "1A"):
+            base["skip_until"] = "10:00"
+        if head == "5B":
+            base["target_pct"] = 16.5
+        elif head == "2A":
+            base["target_pct"] = 10.0
+        elif head == "1A":
+            base["target_pct"] = "trip_12_trail / violent_12 / mild_8"
+        elif head == "2D":
+            base["target_pct"] = 6.25
+            base["second_shot_after_stop"] = True
+        elif head == "2B":
+            base["target_pct"] = 6.0
+        elif head == "2C":
+            base["target_pct"] = 10.0
+        elif head == "3A":
+            base["target_pct"] = 8.0
+            base["stop_floor_pct"] = 3.5
+            base["no_new_after"] = "12:00"
+        else:
+            move = abs(float(structural_move_pct or 0))
+            base["target_pct"] = round(move * 0.5, 4) if move > 0 else 0.0
+            base["specialized"] = False
+        if head in specialized_1m:
+            base["specialized"] = True
+        return base
+    dip = 0.006 if tf == "5m" else 0.008
+    if tf == "5m":
+        base["skip_until"] = "09:45"
+    else:
+        base["skip_until"] = ""
+    move = abs(float(structural_move_pct or 0))
+    base.update(
+        {
+            "entry": "dip_hold",
+            "dip_frac": dip,
+            "order_style_rth": "limit",
+            "order_style_outside_rth": "limit",
+            "target_pct": round(move * 0.5, 4) if move > 0 else 0.0,
+            "specialized": False,
+        }
+    )
+    return base
+
+
 def attach_recipe(layout_entry: dict[str, Any]) -> dict[str, Any]:
     entry = dict(layout_entry or {})
+    tf = str(entry.get("timeframe_norm") or entry.get("timeframe_resolution") or "5m")
+    strat = str(entry.get("strategy") or "")
+    layout = str(entry.get("layout_id") or "")
+    move = float(entry.get("structural_move_pct") or 0)
     entry["recipe"] = recipe_for(
-        str(entry.get("strategy") or ""),
-        str(entry.get("timeframe_norm") or entry.get("timeframe_resolution") or "5m"),
-        layout_id=str(entry.get("layout_id") or ""),
-        structural_move_pct=float(entry.get("structural_move_pct") or 0),
+        strat,
+        tf,
+        layout_id=layout,
+        structural_move_pct=move,
+    )
+    entry["handle_execution"] = handle_execution_for(
+        strat,
+        tf,
+        layout_id=layout,
+        structural_move_pct=move,
     )
     return entry
 
