@@ -399,6 +399,7 @@ def handle_execution_for(
         "vault_dna_mutated": False,
     }
     if tf == "1m":
+        base["stop_cap_pct"] = 3.5
         base.update(
             {
                 "entry": "fill_now",
@@ -414,16 +415,16 @@ def handle_execution_for(
         elif head == "2A":
             base["target_pct"] = 10.0
         elif head == "1A":
-            base["target_pct"] = "trip_12_trail / violent_12 / mild_8"
+            base["target_pct"] = "trip_12_trail_12 / violent_12 / mild_8"
         elif head == "2D":
-            base["target_pct"] = 6.25
+            base["target_pct"] = 6.5
             base["second_shot_after_stop"] = True
         elif head == "2B":
             base["target_pct"] = 6.0
         elif head == "2C":
             base["target_pct"] = 10.0
         elif head == "3A":
-            base["target_pct"] = 8.0
+            base["target_pct"] = 9.0
             base["stop_floor_pct"] = 3.5
             base["no_new_after"] = "12:00"
         else:
@@ -439,16 +440,25 @@ def handle_execution_for(
     else:
         base["skip_until"] = ""
     move = abs(float(structural_move_pct or 0))
+    if tf == "15m":
+        tgt = 12.0
+    elif tf == "5m":
+        tgt = round(move * 0.75, 4) if move > 0 else 0.0
+    else:
+        tgt = round(move * 0.5, 4) if move > 0 else 0.0
     base.update(
         {
             "entry": "dip_hold",
             "dip_frac": dip,
             "order_style_rth": "limit",
             "order_style_outside_rth": "limit",
-            "target_pct": round(move * 0.5, 4) if move > 0 else 0.0,
+            "target_pct": tgt,
             "specialized": False,
         }
     )
+    if tf == "5m":
+        base["trail_after_target_pct"] = 8.0
+        base["exit"] = "trail_8_after_target"
     return base
 
 

@@ -309,3 +309,52 @@ def test_append_lot_stamps_5b_pack_exit():
     assert abs(row["exit_stop_px"] - 2.851) < 1e-6
     assert row.get("entry_ts")
     assert ss.room3_5b_used_day["FTFT"]
+
+
+def test_5m_pack_target_is_75_structural():
+    bars = [_bar(1.0, 1.01, 0.99, 1.0)] * 4
+    stop, tgt, _frac = m._ph_pack_exits(bars, 1.00, 12.0, "5m")
+    assert abs(tgt - 1.09) < 1e-6
+    clip = m._ph_pack_exits(bars, 1.00, 12.0, "15m")[1]
+    assert abs(clip - 1.12) < 1e-6
+
+
+def test_5m_trails_8_after_target_no_hard_clip():
+    lot = {
+        "strategy": "6A (5M)",
+        "tf": "5m",
+        "exit_style": m.PH_5M_EXIT_STYLE,
+        "entry_px": 1.00,
+        "exit_stop_px": 0.98,
+        "exit_tgt_px": 1.09,
+        "structural_move_pct": 12.0,
+    }
+    ss = _SS(_now_et=datetime(2026, 9, 11, 12, 0, tzinfo=ET))
+    still = m._lot_should_exit(
+        lot,
+        cur_match=90,
+        last_px=1.10,
+        patience=True,
+        bar={"h": 1.12, "l": 1.08, "c": 1.10},
+        session_state=ss,
+    )
+    assert still == ""
+    assert lot.get("exit_runner_on") is True
+    hold = m._lot_should_exit(
+        lot,
+        cur_match=90,
+        last_px=1.05,
+        patience=True,
+        bar={"h": 1.12, "l": 1.05, "c": 1.05},
+        session_state=ss,
+    )
+    assert hold == ""  # 8% off 1.12 is 1.0304
+    why = m._lot_should_exit(
+        lot,
+        cur_match=90,
+        last_px=1.02,
+        patience=True,
+        bar={"h": 1.12, "l": 1.02, "c": 1.02},
+        session_state=ss,
+    )
+    assert why.startswith("runner")

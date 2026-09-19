@@ -107,3 +107,29 @@ def test_5m_placeholder_handle_is_dip_hold():
     assert spec["entry"] == "dip_hold"
     assert spec["skip_until"] == "09:45"
     assert abs(float(spec["dip_frac"]) - 0.006) < 1e-9
+    assert abs(float(spec["target_pct"]) - 9.0) < 1e-9
+    assert abs(float(spec["trail_after_target_pct"]) - 8.0) < 1e-9
+    fifteen = r.handle_execution_for("1D (15M)", "15m", structural_move_pct=12.0)
+    assert abs(float(fifteen["target_pct"]) - 12.0) < 1e-9
+    assert "trail_after_target_pct" not in fifteen
+
+
+def test_operator_clips_locked_2026_09_19():
+    assert abs(m.TWO_D_TARGET_FRAC - 0.065) < 1e-9
+    assert abs(m.THREE_A_TARGET_FRAC - 0.09) < 1e-9
+    assert abs(m.TWO_B_TARGET_FRAC - 0.06) < 1e-9
+    assert abs(m.TWO_C_TARGET_FRAC - 0.10) < 1e-9
+    assert abs(m.ONE_A_TRIP_TRAIL_FRAC - 0.12) < 1e-9
+    assert abs(m.PH_5M_STRUCT_FRAC - 0.75) < 1e-9
+    assert abs(m.PH_5M_TRAIL_FRAC - 0.08) < 1e-9
+    assert abs(m.PH_15M_TARGET_FRAC - 0.12) < 1e-9
+    d2 = r.handle_execution_for("2D (1M)", "1m")
+    a3 = r.handle_execution_for("3A (1M)", "1m")
+    b2 = r.handle_execution_for("2B (1M)", "1m")
+    c2 = r.handle_execution_for("2C (1M)", "1m")
+    a1 = r.handle_execution_for("1A (1M)", "1m")
+    assert abs(float(d2["target_pct"]) - 6.5) < 1e-9
+    assert abs(float(a3["target_pct"]) - 9.0) < 1e-9
+    assert abs(float(b2["target_pct"]) - 6.0) < 1e-9
+    assert abs(float(c2["target_pct"]) - 10.0) < 1e-9
+    assert "trail_12" in str(a1["target_pct"])

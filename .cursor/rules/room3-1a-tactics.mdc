@@ -7,7 +7,7 @@ alwaysApply: true
 
 Detect is still **1A nearest, ≥85%, same TF**. Do not treat every 85% print as a 1A shot. One letter, three Handles — pick **one** from the live tape. Wallpaper 1A does not fire.
 
-**Trip** (extra-violent, longer pause): 20-bar window still up **≥25%**, last bar **green** and range **≥5%**, **RVOL ≥2**. Skip **9:30–10:00 ET**. **2% dip** then green reclaim. Lookback-low stop (floor 2%). After **+12%**, trail **5%** off the high (do not clip the trip at 12%).
+**Trip** (extra-violent, longer pause): 20-bar window still up **≥25%**, last bar **green** and range **≥5%**, **RVOL ≥2**. Skip **9:30–10:00 ET**. **2% dip** then green reclaim. Lookback-low stop (floor 2%, **cap 3.5% max loss**). After **+12%**, trail **12%** off the high (operator 2026-09-19). Do not clip the trip at 12%.
 
 **Violent:** window **≥20%**, last bar range **≥3%**, **RVOL ≥2**, and not trip. Skip **9:30–9:45**. Same dip. **12% target**.
 

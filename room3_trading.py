@@ -4962,9 +4962,10 @@ def _render_execution_posture(mode: str) -> None:
             f"**1m live fire:** nearest ≥85% same TF fills now (market in RTH) — Hunt extras "
             f"and dip-wait do not block. Skip windows / first-of-day / cool / 3A noon still apply. "
             f"Stops and targets stay: **5B** lookback-low floor 2% · half pack ~16.5% · "
-            f"**2A** 10% · **1A** trip/violent/mild exits · **2D** 6.25% (second shot after stop) · "
-            f"**2B** 6% · **2C** 10% · **3A** floor 3.5% / 8% (no new after 12:00). "
-            f"Placeholder 1m same fill-now; 5m/15m still hold after a small dip · "
+            f"**2A** 10% · **1A** trip trail 12% off high after +12% / violent 12 / mild 8 · **2D** 6.5% (second shot after stop) · "
+            f"**2B** 6% · **2C** 10% · **3A** floor 3.5% / 9% (no new after 12:00). "
+            f"Placeholder 1m same fill-now; **5m** 75% structural then trail 8% off high · "
+            f"**15m** 12% target (hard clip) · "
             f"arm engine to fire Alpaca orders."
         )
 

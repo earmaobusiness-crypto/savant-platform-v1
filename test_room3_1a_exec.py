@@ -184,8 +184,12 @@ def test_1a_trip_runs_past_12_then_trails():
     )
     assert still == ""
     assert lot.get("exit_runner_on") is True
+    hold = m._lot_should_exit(
+        lot, cur_match=90, last_px=1.04, patience=True, bar={"h": 1.14, "l": 1.04, "c": 1.04}, session_state=ss
+    )
+    assert hold == ""  # 12% trail off 1.14 is 1.0032
     why = m._lot_should_exit(
-        lot, cur_match=90, last_px=1.05, patience=True, bar={"h": 1.14, "l": 1.04, "c": 1.05}, session_state=ss
+        lot, cur_match=90, last_px=0.99, patience=True, bar={"h": 1.14, "l": 0.99, "c": 0.99}, session_state=ss
     )
     assert why.startswith("runner")
 

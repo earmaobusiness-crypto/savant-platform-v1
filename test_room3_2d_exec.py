@@ -1,4 +1,4 @@
-"""2D (1M) Hunt extra + fill-now / 6.25% pack exit."""
+"""2D (1M) Hunt extra + fill-now / 6.5% pack exit."""
 
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -123,7 +123,7 @@ def test_2d_no_third_shot():
     assert "done" in note or "two" in note
 
 
-def test_2d_pack_target_625():
+def test_2d_pack_target_65():
     lot = {
         "strategy": "2D (1M)",
         "tf": "1m",
@@ -131,7 +131,7 @@ def test_2d_pack_target_625():
         "exit_style": m.TWO_D_EXIT_STYLE,
         "entry_px": 1.00,
         "exit_stop_px": 0.90,
-        "exit_tgt_px": 1.0625,
+        "exit_tgt_px": 1.065,
         "entry_ts": "2026-09-11T12:00:00-04:00",
     }
     ss = _SS(_now_et=datetime(2026, 9, 11, 12, 20, tzinfo=ET))
@@ -170,13 +170,36 @@ def test_append_lot_stamps_2d_pack_exit_without_using_day():
             "exit_style": m.TWO_D_EXIT_STYLE,
             "exit_r_frac": 0.02,
             "exit_stop_px": 0.90,
-            "exit_tgt_px": 1.0625,
+            "exit_tgt_px": 1.065,
         },
     )
     assert row["exit_style"] == m.TWO_D_EXIT_STYLE
-    assert abs(float(row["exit_tgt_px"]) - 1.0625) < 1e-6
+    assert abs(float(row["exit_tgt_px"]) - 1.065) < 1e-6
+    assert abs(float(row["exit_stop_px"]) - 0.965) < 1e-6
+    assert abs(float(row["exit_r_frac"]) - 0.035) < 1e-6
     assert not (ss.get("room3_2d_used_day") or {}).get("SPWR")
 
 
 def test_2d_order_style_is_market_in_rth():
     assert room3_recipes.order_style_for("2D (1M)", "1m", structural_move_pct=18.0) == "market"
+
+
+def test_1m_deep_lookback_capped_at_35():
+    px = 1.00
+    dump = [_bar(1.00, 1.01, 0.88, 1.00, v=100)] * 5
+    stop, tgt, frac = m._2d_pack_exits(dump, px)
+    assert abs(tgt - 1.065) < 1e-6
+    assert abs(stop - 0.965) < 1e-6
+    assert abs(frac - 0.035) < 1e-6
+    stop_a, _, frac_a = m._1a_pack_exits(dump, px, "mild")
+    assert abs(stop_a - 0.965) < 1e-6
+    assert abs(frac_a - 0.035) < 1e-6
+    stop_c, _, frac_c = m._2c_pack_exits(dump, px)
+    assert abs(stop_c - 0.965) < 1e-6
+    stop_3, _, frac_3 = m._3a_pack_exits(dump, px)
+    assert abs(stop_3 - 0.965) < 1e-6
+    stop_ph, _, frac_ph = m._ph_pack_exits(dump, px, 20.0, "1m")
+    assert abs(stop_ph - 0.965) < 1e-6
+    assert abs(frac_ph - 0.035) < 1e-6
+    stop_5m, _, frac_5m = m._ph_pack_exits(dump, px, 20.0, "5m")
+    assert stop_5m < 0.965 - 1e-9

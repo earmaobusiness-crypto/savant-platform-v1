@@ -398,6 +398,7 @@ class lots:
                 "3a_pack",
                 "2d_pack",
                 "ph_pack",
+                "ph_5m_trail",
                 "1a_mild",
                 "1a_violent",
                 "1a_trip",
@@ -416,6 +417,18 @@ class lots:
             except (TypeError, ValueError):
                 frac_f = 0.02
             frac_f = max(frac_f, 0.035 if is_3a else 0.02)
+            one_m = (not tf or tf == "1m") and (
+                pack_style
+                or is_5b
+                or is_2a
+                or is_2b
+                or is_2c
+                or is_1a
+                or is_2d
+                or is_3a
+            )
+            if one_m:
+                frac_f = min(frac_f, 0.035)
             row["exit_style"] = style or (
                 "3a_pack"
                 if is_3a
@@ -453,6 +466,14 @@ class lots:
                     row["exit_stop_px"] = stop_f
                 else:
                     row["exit_stop_px"] = fill * (1.0 - frac_f)
+                if one_m:
+                    cap_px = fill * (1.0 - 0.035)
+                    if float(row.get("exit_stop_px") or 0) < cap_px:
+                        row["exit_stop_px"] = cap_px
+                    row["exit_r_frac"] = max(
+                        0.0,
+                        (fill - float(row.get("exit_stop_px") or 0)) / fill,
+                    )
                 if str(row["exit_style"]) == "1a_trip":
                     row["exit_tgt_px"] = 0.0
                 elif tgt_f > 0:
@@ -460,17 +481,25 @@ class lots:
                 elif str(row["exit_style"]) == "5b_range_1r":
                     row["exit_tgt_px"] = fill * (1.0 + frac_f)
                 elif is_2d:
-                    row["exit_tgt_px"] = fill * (1.0 + 0.0625)
+                    row["exit_tgt_px"] = fill * (1.0 + 0.065)
                 elif is_3a:
-                    row["exit_tgt_px"] = fill * (1.0 + 0.08)
+                    row["exit_tgt_px"] = fill * (1.0 + 0.09)
                 elif is_2b:
                     row["exit_tgt_px"] = fill * (1.0 + 0.06)
                 elif is_2c:
                     row["exit_tgt_px"] = fill * (1.0 + 0.10)
                 else:
                     struct = abs(float(row.get("structural_move_pct") or 0))
+                    share = (
+                        0.75
+                        if (tf == "5m" or str(row.get("exit_style") or "") == "ph_5m_trail")
+                        else 0.5
+                    )
                     fallback = 0.10 if is_2a else (0.12 if is_1a else 0.165)
-                    tgt_frac = (struct / 100.0 * 0.5) if struct > 0 else fallback
+                    if tf == "15m":
+                        tgt_frac = 0.12
+                    else:
+                        tgt_frac = (struct / 100.0 * share) if struct > 0 else fallback
                     row["exit_tgt_px"] = fill * (1.0 + max(tgt_frac, 0.02))
             row["entry_ts"] = str(
                 payload.get("entry_ts")
@@ -532,7 +561,7 @@ class lots:
                         row["exit_high_px"] = float(payload.get("exit_high_px"))
                     except (TypeError, ValueError):
                         pass
-            if str(row.get("exit_style") or "") == "ph_pack":
+            if str(row.get("exit_style") or "") in ("ph_pack", "ph_5m_trail"):
                 try:
                     day = datetime.now(ET).strftime("%Y-%m-%d")
                     bag = dict(session_state.get("room3_ph_used_day") or {})

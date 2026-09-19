@@ -20,6 +20,9 @@ MATCH_THRESHOLD_PCT = 85
 CHILD_READY_PCT = 84  # show a strategy sub-lane; fire still waits for MATCH_THRESHOLD
 EXIT_MATCH_FLOOR_PCT = 65
 STOP_LOSS_PCT = 2.5
+# 1m lookback-low cannot sit deeper than this from fill (operator 2026-09-19).
+# Floor (2% / 3A 3.5%) still blocks a tighter-than-floor stop. Targets unchanged.
+ONE_M_STOP_CAP_PCT = 3.5
 # 5B (1M) execution — DNA still detects; this is the shot.
 # Belt replay (Yahoo 1m, 2026-09-02..11): dump ≥6% + RVOL≥3, first of day,
 # lookback-low stop, half of ~33% pack structural. Not a next-ticket promise.
@@ -69,7 +72,7 @@ TWO_C_COOL_SEC = 15 * 60
 THREE_A_RVOL_MIN = 1.5
 THREE_A_BAR_RANGE_PCT = 1.5
 THREE_A_DIP_FRAC = 0.015
-THREE_A_TARGET_FRAC = 0.08
+THREE_A_TARGET_FRAC = 0.09
 THREE_A_STOP_FLOOR_PCT = 3.5
 THREE_A_SKIP_UNTIL = dtime(10, 0)
 THREE_A_UNTIL = dtime(12, 0)
@@ -88,7 +91,7 @@ ONE_A_VIOLENT_TARGET_FRAC = 0.12
 ONE_A_TRIP_VEL20 = 25.0
 ONE_A_TRIP_RNG_PCT = 5.0
 ONE_A_TRIP_ARM_FRAC = 0.12
-ONE_A_TRIP_TRAIL_FRAC = 0.05
+ONE_A_TRIP_TRAIL_FRAC = 0.12
 ONE_A_SKIP_UNTIL = dtime(9, 45)
 ONE_A_LONG_PAUSE = dtime(10, 0)  # trip + mild wait past the open
 ONE_A_COOL_SEC = 15 * 60
@@ -101,7 +104,7 @@ ONE_A_EXIT_STYLES = (ONE_A_EXIT_MILD, ONE_A_EXIT_VIOLENT, ONE_A_EXIT_TRIP)
 TWO_D_RVOL_MIN = 3.0
 TWO_D_BAR_RANGE_PCT = 3.0
 TWO_D_MATCH_MIN = 91
-TWO_D_TARGET_FRAC = 0.0625
+TWO_D_TARGET_FRAC = 0.065
 TWO_D_SKIP_UNTIL = dtime(9, 45)
 TWO_D_EXIT_STYLE = "2d_pack"
 TWO_D_COOL_SEC = 15 * 60
@@ -109,10 +112,14 @@ TWO_D_COOL_SEC = 15 * 60
 # Gene stays nearest ≥85% same TF. Tactics only — specialize later.
 # Remaining 1m: fill-now at ≥85% (2026-09-17). 5m/15m hold after a small dip.
 PH_EXIT_STYLE = "ph_pack"
+PH_5M_EXIT_STYLE = "ph_5m_trail"
 PH_RVOL_MIN = 0.0
 PH_DIP_FRAC_1M = 0.01
 PH_DIP_FRAC_5M = 0.006
 PH_DIP_FRAC_15M = 0.008
+PH_5M_STRUCT_FRAC = 0.75  # was half; operator 2026-09-19
+PH_5M_TRAIL_FRAC = 0.08  # after tagging the 75% structural target
+PH_15M_TARGET_FRAC = 0.12  # operator 2026-09-19 — locked 12% clip, not half structural
 PH_SKIP_UNTIL = dtime(9, 45)
 PH_COOL_SEC = 15 * 60
 MIN_SLICES = {"1m": 5, "5m": 4, "15m": 3}
@@ -724,7 +731,7 @@ def _pack_mark_stop_cool(session_state: Any, ticker: str, lot: dict[str, Any]) -
     if _is_5b_1m(strat, tf) or style in (FIVE_B_EXIT_STYLE, FIVE_B_EXIT_STYLE_LEGACY):
         _5b_mark_stop_cool(session_state, ticker)
         return
-    if style == PH_EXIT_STYLE:
+    if style in (PH_EXIT_STYLE, PH_5M_EXIT_STYLE):
         _ph_mark_stop_cool(session_state, ticker, strat)
 
 
@@ -1258,24 +1265,52 @@ def _5b_target_frac(structural_move_pct: float = 0.0) -> float:
     return FIVE_B_TARGET_FRAC
 
 
+def _lookback_stop_px(
+    px: float,
+    slices: list[dict[str, Any]],
+    n: int,
+    floor_pct: float,
+    *,
+    cap_pct: float | None = ONE_M_STOP_CAP_PCT,
+) -> tuple[float, float]:
+    """Lookback-low: not tighter than floor, not deeper than cap (1m max loss)."""
+    if px <= 0:
+        return 0.0, floor_pct / 100.0
+    floor = px * (1.0 - floor_pct / 100.0)
+    win = slices[-n:] if slices else []
+    lows = [float(s.get("l") or 0) for s in win if float(s.get("l") or 0) > 0]
+    lo_win = min(lows) if lows else floor
+    stop_px = lo_win if lo_win > 0 and lo_win < px else floor
+    if stop_px > floor:
+        stop_px = floor
+    if cap_pct is not None and cap_pct > 0:
+        cap = px * (1.0 - cap_pct / 100.0)
+        if stop_px < cap:
+            stop_px = cap
+    if stop_px >= px:
+        stop_px = floor
+        if cap_pct is not None and cap_pct > 0:
+            stop_px = max(stop_px, px * (1.0 - cap_pct / 100.0))
+    stop_frac = (px - stop_px) / px if px > 0 else floor_pct / 100.0
+    stop_frac = max(stop_frac, floor_pct / 100.0)
+    if cap_pct is not None and cap_pct > 0:
+        stop_frac = min(stop_frac, cap_pct / 100.0)
+    return stop_px, stop_frac
+
+
 def _5b_pack_exits(
     slices: list[dict[str, Any]],
     fill: float,
     structural_move_pct: float = 0.0,
 ) -> tuple[float, float, float]:
-    """Lookback-low stop (floor 2%), half-structural target. Prices for a long."""
+    """Lookback-low stop (floor 2%, cap 3.5%), half-structural target. Prices for a long."""
     px = float(fill or 0)
     if px <= 0:
         return 0.0, 0.0, FIVE_B_STOP_FLOOR_PCT / 100.0
-    win = slices[-FIVE_B_LOOKBACK_BARS:] if slices else []
-    lows = [float(s.get("l") or 0) for s in win if float(s.get("l") or 0) > 0]
-    lo_win = min(lows) if lows else px * (1.0 - FIVE_B_STOP_FLOOR_PCT / 100.0)
-    floor = px * (1.0 - FIVE_B_STOP_FLOOR_PCT / 100.0)
-    stop_px = min(lo_win, floor) if lo_win < px else floor
-    if stop_px >= px:
-        stop_px = floor
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, FIVE_B_STOP_FLOOR_PCT
+    )
     tgt_px = px * (1.0 + _5b_target_frac(structural_move_pct))
-    stop_frac = max((px - stop_px) / px, FIVE_B_STOP_FLOOR_PCT / 100.0)
     return stop_px, tgt_px, stop_frac
 
 
@@ -1321,15 +1356,10 @@ def _3a_pack_exits(
     floor_pct = THREE_A_STOP_FLOOR_PCT / 100.0
     if px <= 0:
         return 0.0, 0.0, floor_pct
-    win = slices[-FIVE_B_LOOKBACK_BARS:] if slices else []
-    lows = [float(s.get("l") or 0) for s in win if float(s.get("l") or 0) > 0]
-    floor = px * (1.0 - floor_pct)
-    lo_win = min(lows) if lows else floor
-    stop_px = min(lo_win, floor) if lo_win < px else floor
-    if stop_px >= px:
-        stop_px = floor
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, THREE_A_STOP_FLOOR_PCT
+    )
     tgt_px = px * (1.0 + THREE_A_TARGET_FRAC)
-    stop_frac = max((px - stop_px) / px, floor_pct)
     return stop_px, tgt_px, stop_frac
 
 
@@ -1367,6 +1397,16 @@ def _1a_pack_exits(
     return stop_px, px * (1.0 + frac), stop_frac
 
 
+def _ph_target_frac(structural_move_pct: float = 0.0, tf: str = "1m") -> float:
+    tf_n = room3_recipes.normalize_tf(tf)
+    if tf_n == "15m":
+        return PH_15M_TARGET_FRAC
+    move = abs(float(structural_move_pct or 0))
+    if tf_n == "5m" and move > 0:
+        return max(move / 100.0 * PH_5M_STRUCT_FRAC, FIVE_B_STOP_FLOOR_PCT / 100.0)
+    return _5b_target_frac(structural_move_pct)
+
+
 def _ph_lookback(tf: str) -> int:
     tf_n = room3_recipes.normalize_tf(tf)
     if tf_n == "1m":
@@ -1384,15 +1424,11 @@ def _ph_pack_exits(
     n = _ph_lookback(tf)
     if px <= 0:
         return 0.0, 0.0, FIVE_B_STOP_FLOOR_PCT / 100.0
-    win = slices[-n:] if slices else []
-    lows = [float(s.get("l") or 0) for s in win if float(s.get("l") or 0) > 0]
-    floor = px * (1.0 - FIVE_B_STOP_FLOOR_PCT / 100.0)
-    lo_win = min(lows) if lows else floor
-    stop_px = min(lo_win, floor) if lo_win < px else floor
-    if stop_px >= px:
-        stop_px = floor
-    tgt_px = px * (1.0 + _5b_target_frac(structural_move_pct))
-    stop_frac = max((px - stop_px) / px, FIVE_B_STOP_FLOOR_PCT / 100.0)
+    cap = ONE_M_STOP_CAP_PCT if room3_recipes.normalize_tf(tf) == "1m" else None
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, n, FIVE_B_STOP_FLOOR_PCT, cap_pct=cap
+    )
+    tgt_px = px * (1.0 + _ph_target_frac(structural_move_pct, tf))
     return stop_px, tgt_px, stop_frac
 
 
@@ -1407,6 +1443,7 @@ def _5b_lot_exit(lot: dict[str, Any]) -> bool:
         THREE_A_EXIT_STYLE,
         TWO_D_EXIT_STYLE,
         PH_EXIT_STYLE,
+        PH_5M_EXIT_STYLE,
         *ONE_A_EXIT_STYLES,
     ):
         return True
@@ -1741,11 +1778,16 @@ def _try_queue_child_entry(
                 stop_px, tgt_px, stop_frac = _ph_pack_exits(
                     slices, last_px, structural, tf
                 )
-                sig["exit_style"] = PH_EXIT_STYLE
+                ph_style = (
+                    PH_5M_EXIT_STYLE
+                    if room3_recipes.normalize_tf(tf) == "5m"
+                    else PH_EXIT_STYLE
+                )
+                sig["exit_style"] = ph_style
                 sig["exit_r_frac"] = stop_frac
                 sig["exit_stop_px"] = stop_px
                 sig["exit_tgt_px"] = tgt_px
-                stamped["exit_style"] = PH_EXIT_STYLE
+                stamped["exit_style"] = ph_style
                 stamped["exit_r_frac"] = stop_frac
                 stamped["exit_stop_px"] = stop_px
                 stamped["exit_tgt_px"] = tgt_px
@@ -1824,19 +1866,40 @@ def _5b_should_exit(
         elif style == ONE_A_EXIT_TRIP:
             tgt_px = 0.0
         else:
+            tf_lot = room3_recipes.normalize_tf(str(lot.get("tf") or lot.get("timeframe") or ""))
             tgt_px = float(
                 lot.get("exit_tgt_px")
-                or entry_px * (1.0 + _5b_target_frac(float(lot.get("structural_move_pct") or 0)))
+                or entry_px
+                * (
+                    1.0
+                    + _ph_target_frac(float(lot.get("structural_move_pct") or 0), tf_lot)
+                )
             )
     lo = float((bar or {}).get("l") or last_px or 0)
     hi = float((bar or {}).get("h") or last_px or 0)
-    if style == ONE_A_EXIT_TRIP:
+    tf_n = room3_recipes.normalize_tf(str(lot.get("tf") or lot.get("timeframe") or ""))
+    five_m_trail = style == PH_5M_EXIT_STYLE or (
+        style == PH_EXIT_STYLE and tf_n == "5m"
+    )
+    if style == ONE_A_EXIT_TRIP or five_m_trail:
         peak = max(float(lot.get("exit_high_px") or entry_px), hi if hi > 0 else 0.0, last_px or 0.0)
         lot["exit_high_px"] = peak
-        if peak >= entry_px * (1.0 + ONE_A_TRIP_ARM_FRAC):
-            lot["exit_runner_on"] = True
+        if five_m_trail:
+            arm_px = float(lot.get("exit_tgt_px") or 0)
+            if arm_px <= 0 and entry_px > 0:
+                arm_px = entry_px * (
+                    1.0
+                    + _ph_target_frac(float(lot.get("structural_move_pct") or 0), "5m")
+                )
+            trail_frac = PH_5M_TRAIL_FRAC
+            if arm_px > 0 and peak >= arm_px:
+                lot["exit_runner_on"] = True
+        else:
+            trail_frac = ONE_A_TRIP_TRAIL_FRAC
+            if peak >= entry_px * (1.0 + ONE_A_TRIP_ARM_FRAC):
+                lot["exit_runner_on"] = True
         if lot.get("exit_runner_on"):
-            trail = peak * (1.0 - ONE_A_TRIP_TRAIL_FRAC)
+            trail = peak * (1.0 - trail_frac)
             if trail > stop_px:
                 stop_px = trail
                 lot["exit_stop_px"] = stop_px

@@ -9,10 +9,10 @@ Gene is unchanged: nearest live letter, ≥85%, same TF. This is **tactics only*
 
 **Locked 1m (own Handle, not this):** 5B, 2A, 1A, 2D, 2B, 2C, 3A.
 
-**1m (everyone else):** skip **9:30–9:45 ET**; **no RVOL gate**; **first of that letter** on that name that day; **fill now** at ≥85% (operator 2026-09-17 — need live data). Lookback-low stop (floor 2%); **half stored structural** target. 15 min cool after a stop. Market in RTH.
+**1m (everyone else):** skip **9:30–9:45 ET**; **no RVOL gate**; **first of that letter** on that name that day; **fill now** at ≥85% (operator 2026-09-17 — need live data). Lookback-low stop (floor 2%, **cap 3.5% max loss**); **half stored structural** target. 15 min cool after a stop. Market in RTH.
 
-**5m:** skip **9:30–9:45 ET**; first of that letter that day; **~0.6% dip** then **hold** (close back near the armed print — not a full prior-bar reclaim); lookback-low stop (3 bars, floor 2%); half structural.
+**5m:** skip **9:30–9:45 ET**; first of that letter that day; **~0.6% dip** then **hold** (close back near the armed print — not a full prior-bar reclaim); lookback-low stop (3 bars, floor 2%); **75% stored structural** target; after that print, **trail 8% off the high** (operator 2026-09-19 — was half structural / hard clip).
 
-**15m:** **no** open skip (first bar is the session); first of that letter that day; **~0.8% dip** then **hold**; lookback-low stop (3 bars, floor 2%); half structural.
+**15m:** **no** open skip (first bar is the session); first of that letter that day; **~0.8% dip** then **hold**; lookback-low stop (3 bars, floor 2%); **12% target** (operator 2026-09-19 — was half structural). Hard clip, no trail.
 
 Specialize like 5B/2A/1A/2D/2B/2C/3A when the operator asks. Local until Cloud push.
