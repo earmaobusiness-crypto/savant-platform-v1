@@ -26,7 +26,7 @@ import room3_precursor as precursor
 
 ET = ZoneInfo("America/New_York")
 
-LOCKED_1M = ("5B", "2A", "1A", "2D", "2B", "2C", "3A")
+LOCKED_1M = ("5B", "2A", "1A", "2D", "2B", "2C", "3A", "4A", "3B", "5A", "7A", "3C", "4D", "4B", "6A", "4C", "4E", "6B", "3D", "7B", "3G", "3F", "8A", "7C", "3E", "6C")
 SESS_START = date(2026, 9, 2)
 SESS_END = date(2026, 9, 11)
 # Sep 7 2026 is Labor Day — RTH closed. Not a missing-tape day.
@@ -125,6 +125,44 @@ def gene_ok(letter: str, slices: list[dict[str, Any]]) -> bool:
         return bool(m._2c_gene_ok(slices))
     if letter == "3A":
         return bool(m._3a_gene_ok(slices))
+    if letter == "4A":
+        return bool(m._4a_gene_ok(slices))
+    if letter == "3B":
+        return bool(m._3b_gene_ok(slices))
+    if letter == "5A":
+        return bool(m._5a_gene_ok(slices))
+    if letter == "7A":
+        return bool(m._7a_gene_ok(slices))
+    if letter == "3C":
+        return bool(m._3c_gene_ok(slices))
+    if letter == "4D":
+        return bool(m._4d_gene_ok(slices))
+    if letter == "4B":
+        return bool(m._4b_gene_ok(slices))
+    if letter == "6A":
+        return bool(m._6a_gene_ok(slices))
+    if letter == "4C":
+        return bool(m._4c_gene_ok(slices))
+    if letter == "4E":
+        return bool(m._4e_gene_ok(slices))
+    if letter == "6B":
+        return bool(m._6b_gene_ok(slices))
+    if letter == "3D":
+        return bool(m._3d_gene_ok(slices))
+    if letter == "7B":
+        return bool(m._7b_gene_ok(slices))
+    if letter == "3G":
+        return bool(m._3g_gene_ok(slices))
+    if letter == "3F":
+        return bool(m._3f_gene_ok(slices))
+    if letter == "8A":
+        return bool(m._8a_gene_ok(slices))
+    if letter == "7C":
+        return bool(m._7c_gene_ok(slices))
+    if letter == "3E":
+        return bool(m._3e_gene_ok(slices))
+    if letter == "6C":
+        return bool(m._6c_gene_ok(slices))
     return False
 
 
@@ -139,6 +177,44 @@ def _exit_style(letter: str, handle: str = "") -> str:
         return m.TWO_C_EXIT_STYLE
     if letter == "3A":
         return m.THREE_A_EXIT_STYLE
+    if letter == "4A":
+        return m.FOUR_A_EXIT_STYLE
+    if letter == "3B":
+        return m.THREE_B_EXIT_STYLE
+    if letter == "5A":
+        return m.FIVE_A_EXIT_STYLE
+    if letter == "7A":
+        return m.SEVEN_A_EXIT_STYLE
+    if letter == "3C":
+        return m.THREE_C_EXIT_STYLE
+    if letter == "4D":
+        return m.FOUR_D_EXIT_STYLE
+    if letter == "4B":
+        return m.FOUR_B_EXIT_STYLE
+    if letter == "6A":
+        return m.SIX_A_EXIT_STYLE
+    if letter == "4C":
+        return m.FOUR_C_EXIT_STYLE
+    if letter == "4E":
+        return m.FOUR_E_EXIT_STYLE
+    if letter == "6B":
+        return m.SIX_B_EXIT_STYLE
+    if letter == "3D":
+        return m.THREE_D_EXIT_STYLE
+    if letter == "7B":
+        return m.SEVEN_B_EXIT_STYLE
+    if letter == "3G":
+        return m.THREE_G_EXIT_STYLE
+    if letter == "3F":
+        return m.THREE_F_EXIT_STYLE
+    if letter == "8A":
+        return m.EIGHT_A_EXIT_STYLE
+    if letter == "7C":
+        return m.SEVEN_C_EXIT_STYLE
+    if letter == "3E":
+        return m.THREE_E_EXIT_STYLE
+    if letter == "6C":
+        return m.SIX_C_EXIT_STYLE
     if letter == "2D":
         return m.TWO_D_EXIT_STYLE
     if letter == "1A":
@@ -162,6 +238,44 @@ def _pack_exits(
         return m._2c_pack_exits(slices, fill, 0.0)
     if letter == "3A":
         return m._3a_pack_exits(slices, fill, 0.0)
+    if letter == "4A":
+        return m._4a_pack_exits(slices, fill, 0.0)
+    if letter == "3B":
+        return m._3b_pack_exits(slices, fill, 0.0)
+    if letter == "5A":
+        return m._5a_pack_exits(slices, fill, 0.0)
+    if letter == "7A":
+        return m._7a_pack_exits(slices, fill, 0.0)
+    if letter == "3C":
+        return m._3c_pack_exits(slices, fill, 0.0)
+    if letter == "4D":
+        return m._4d_pack_exits(slices, fill, 0.0)
+    if letter == "4B":
+        return m._4b_pack_exits(slices, fill, 0.0)
+    if letter == "6A":
+        return m._6a_pack_exits(slices, fill, 0.0)
+    if letter == "4C":
+        return m._4c_pack_exits(slices, fill, 0.0)
+    if letter == "4E":
+        return m._4e_pack_exits(slices, fill, 0.0)
+    if letter == "6B":
+        return m._6b_pack_exits(slices, fill, 0.0)
+    if letter == "3D":
+        return m._3d_pack_exits(slices, fill, 0.0)
+    if letter == "7B":
+        return m._7b_pack_exits(slices, fill, 0.0)
+    if letter == "3G":
+        return m._3g_pack_exits(slices, fill, 0.0)
+    if letter == "3F":
+        return m._3f_pack_exits(slices, fill, 0.0)
+    if letter == "8A":
+        return m._8a_pack_exits(slices, fill, 0.0)
+    if letter == "7C":
+        return m._7c_pack_exits(slices, fill, 0.0)
+    if letter == "3E":
+        return m._3e_pack_exits(slices, fill, 0.0)
+    if letter == "6C":
+        return m._6c_pack_exits(slices, fill, 0.0)
     if letter == "2D":
         return m._2d_pack_exits(slices, fill, 0.0)
     if letter == "1A":
@@ -189,10 +303,49 @@ def _mark_fill(ss: _SS, letter: str, ticker: str) -> None:
         m._2c_mark_used(ss, ticker)
     elif letter == "3A":
         m._3a_mark_used(ss, ticker)
+    elif letter == "4A":
+        m._4a_mark_used(ss, ticker)
+    elif letter == "3B":
+        m._3b_mark_used(ss, ticker)
+    elif letter == "5A":
+        m._5a_mark_used(ss, ticker)
+    elif letter == "7A":
+        m._7a_mark_used(ss, ticker)
+    elif letter == "3C":
+        m._3c_mark_used(ss, ticker)
+    elif letter == "4D":
+        m._4d_mark_used(ss, ticker)
+    elif letter == "4B":
+        m._4b_mark_used(ss, ticker)
+    elif letter == "6A":
+        m._6a_mark_used(ss, ticker)
+    elif letter == "4C":
+        m._4c_mark_used(ss, ticker)
+    elif letter == "4E":
+        m._4e_mark_used(ss, ticker)
+    elif letter == "6B":
+        m._6b_mark_used(ss, ticker)
+    elif letter == "3D":
+        m._3d_mark_used(ss, ticker)
+    elif letter == "7B":
+        m._7b_mark_used(ss, ticker)
+    elif letter == "3G":
+        m._3g_mark_used(ss, ticker)
+    elif letter == "3F":
+        m._3f_mark_used(ss, ticker)
+    elif letter == "8A":
+        m._8a_mark_used(ss, ticker)
+    elif letter == "7C":
+        m._7c_mark_used(ss, ticker)
+    elif letter == "3E":
+        m._3e_mark_used(ss, ticker)
+    elif letter == "6C":
+        m._6c_mark_used(ss, ticker)
     elif letter == "1A":
         m._1a_mark_used(ss, ticker)
     elif letter == "2D":
         m._2d_mark_shot(ss, ticker)
+    m._1m_mark_name_shot(ss, ticker)
 
 
 def _mark_target(ss: _SS, letter: str, ticker: str) -> None:

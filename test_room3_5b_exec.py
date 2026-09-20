@@ -39,8 +39,8 @@ def test_other_1m_placeholder_waits_dip():
         fat,
         last_px=1.0,
         tf="1m",
-        strategy="3B (1M)",
-        layout_id="3",
+        strategy="9A (1M)",
+        layout_id="6",
         structural=8.0,
         session_state=ss,
     )
@@ -48,7 +48,7 @@ def test_other_1m_placeholder_waits_dip():
     assert "enter now" in note
     assert "RVOL" not in note
     assert m._enter_on_print("5B (1M)", "1m", "5", 33.0) is True
-    assert m._enter_on_print("3B (1M)", "1m", "3", 8.0) is True
+    assert m._enter_on_print("9A (1M)", "1m", "9", 8.0) is True
 
 
 def test_1m_placeholder_skips_open():
@@ -58,8 +58,8 @@ def test_1m_placeholder_skips_open():
         [_bar(1, 1.02, 0.99, 1.01, v=400)] * 6,
         last_px=1.01,
         tf="1m",
-        strategy="3B (1M)",
-        layout_id="3",
+        strategy="9A (1M)",
+        layout_id="6",
         structural=8.0,
         session_state=ss,
     )

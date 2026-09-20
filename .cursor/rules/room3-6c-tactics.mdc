@@ -1,0 +1,16 @@
+---
+description: Room 3 — 6C (1M) milder dump-bounce tactics (locked 2026-09-20)
+alwaysApply: true
+---
+
+# 6C (1M) — locked 2026-09-20
+
+Detect is still **6C nearest, ≥85%, same TF**. Do not treat every 85% print as 6C. Not 6A (that letter is vel5 **≤−3%** and vel9 **≤−2%**). Not 6B (that letter is vel5 **≤−2.5%**). Not 5A / 5B.
+
+**Hunt extra:** 5-bar window still down **0.3% to under 2%**, last bar **green** and range **≥2%**, live print **under VWAP**. Not 6A / 6B.
+
+**Tactics:** skip **9:30–10:00 ET**; **first 6C of the day** on that name; **fill now**; stop under the **5-bar lookback low** (**floor 3.5%**, **cap 3.5% max loss**); **14% target**. 15 min cool after a stop. Market in RTH; limit outside RTH.
+
+Local until Cloud push.
+
+**Sep 2–11 belt (Yahoo 1m):** a firing day about **+7.5% on $1,000** · **win rate 43% (9 of 21)** · fire **7 of 7**. 14.5% broke WR. Not live Alpaca.

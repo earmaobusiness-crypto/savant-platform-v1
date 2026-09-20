@@ -1,0 +1,16 @@
+---
+description: Room 3 — 4A (1M) middle-velocity tactics (locked 2026-09-19)
+alwaysApply: true
+---
+
+# 4A (1M) — locked 2026-09-19
+
+Detect is still **4A nearest, ≥85%, same TF**. Do not treat every 85% print as 4A. Not 2A / 1A (those need RVOL ≥2 and a fatter window).
+
+**Hunt extra:** 5-bar window still up **3–8%**, last bar range **≥2%**, **RVOL < 1.5**.
+
+**Tactics:** skip **9:30–9:45 ET**; **first 4A of the day** on that name; **fill now**; stop under the **5-bar lookback low** (floor 2%, **cap 3.5% max loss**); **6% target**. 15 min cool after a stop. Market in RTH; limit outside RTH.
+
+Local until Cloud push.
+
+**Sep 2–11 belt (Yahoo 1m):** a firing day about **+2.4% on $1,000** · **win rate 50% (9 of 18)** · fire **7 of 7**. Prior dollars peak without the RVOL gate was +5.3% · 43% (16 of 37). Not live Alpaca.

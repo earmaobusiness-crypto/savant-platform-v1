@@ -1,0 +1,16 @@
+---
+description: Room 3 — 3F (1M) quiet above-VWAP smaller-bar tactics (locked 2026-09-20)
+alwaysApply: true
+---
+
+# 3F (1M) — locked 2026-09-20 (clip + skip push)
+
+Detect is still **3F nearest, ≥85%, same TF**. Do not treat every 85% print as 3F. Not 3C (that letter is last bar **≥4%**). Not 3D (that letter is last bar **3.5–<4%**). **No 3A noon cut.**
+
+**Hunt extra:** live print **above VWAP**, last bar **green** and range **2% to under 3.5%**, tape **RVOL < 1.5**, session still up **≥8%** vs the first printed open.
+
+**Tactics:** skip **9:30–10:00 ET**; **first 3F of the day** on that name; **fill now**; stop under the **5-bar lookback low** (**floor 3.5%**, **cap 3.5% max loss**); **12.5% target**. 15 min cool after a stop. Market in RTH; limit outside RTH.
+
+Local until Cloud push.
+
+**Sep 2–11 belt (Yahoo 1m):** a firing day about **+6.3% on $1,000** · **win rate 57% (4 of 7)** · fire **5 of 7**. Prior skip 9:45 / 10% was +4.7. 13% broke WR. Not live Alpaca.

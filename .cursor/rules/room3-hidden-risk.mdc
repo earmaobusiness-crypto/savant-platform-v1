@@ -13,7 +13,7 @@ When adding execution logic: put the rule on the execution posture / watch book,
 
 **Same day:** Checkboxes gate **new entries**. Post on → open trades may hold through post. Post off → at RTH close: flatten opens, drop committed maps, **clear the belt** (clean slate for the evening). Always flatten by ~8:00 ET. Overnight flat.
 
-**Belt:** Drop **adds** names — they stay through the trading windows you enabled. Max **15**. × removes one; Clear wipes all. Post off at RTH close also clears the belt. Several names can be in at once. One ticker = one open position at a time (Alpaca is one pile of shares); after that exit it can fire again the same day.
+**Belt:** Drop **adds** names — they stay through the trading windows you enabled. Max **15**. × removes one; Clear wipes all. Post off at RTH close also clears the belt. Several names can be in at once. One ticker = one open position at a time (Alpaca is one pile of shares). A second 1m letter may add as its own lot. **1m: max 3 fills per name per day** (all letters share the count); after that, no new 1m on that name until the next session.
 
 **Orders:** Price off **Alpaca last**, not Yahoo close. Style is **per strategy**: pops (scalp/sniper/impulse, and unnamed 1m) → market; slower setups on any TF → limit. Outside RTH always limit. Kill / day-end flatten uses limit.
 

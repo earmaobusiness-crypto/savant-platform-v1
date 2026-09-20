@@ -72,7 +72,7 @@ TWO_C_COOL_SEC = 15 * 60
 THREE_A_RVOL_MIN = 1.5
 THREE_A_BAR_RANGE_PCT = 1.5
 THREE_A_DIP_FRAC = 0.015
-THREE_A_TARGET_FRAC = 0.09
+THREE_A_TARGET_FRAC = 0.10
 THREE_A_STOP_FLOOR_PCT = 3.5
 THREE_A_SKIP_UNTIL = dtime(10, 0)
 THREE_A_UNTIL = dtime(12, 0)
@@ -108,7 +108,216 @@ TWO_D_TARGET_FRAC = 0.065
 TWO_D_SKIP_UNTIL = dtime(9, 45)
 TWO_D_EXIT_STYLE = "2d_pack"
 TWO_D_COOL_SEC = 15 * 60
-# Placeholder Handle for every other live letter (not 5B / 2A / 1A / 2D / 2B / 2C / 3A).
+# 4A (1M) — middle 5-bar 3–8%, last bar ≥2%, RVOL <1.5. Not 2A/1A.
+# Yahoo 1m belt 2026-09-02..11 WR push. Fill now.
+FOUR_A_VEL5_MIN = 3.0
+FOUR_A_VEL5_MAX = 8.0
+FOUR_A_BAR_RANGE_PCT = 2.0
+FOUR_A_RVOL_MAX = 1.5
+FOUR_A_TARGET_FRAC = 0.06
+FOUR_A_SKIP_UNTIL = dtime(9, 45)
+FOUR_A_EXIT_STYLE = "4a_pack"
+FOUR_A_COOL_SEC = 15 * 60
+# 3B (1M) — under VWAP, last bar ≥2%, RVOL <1.5 (complement of 3A ≥1.5).
+# No 3A noon cut. Stop floor 3.5%. Yahoo 1m belt 2026-09-02..11.
+THREE_B_BAR_RANGE_PCT = 2.0
+THREE_B_RVOL_MAX = 1.5
+THREE_B_TARGET_FRAC = 0.16
+THREE_B_STOP_FLOOR_PCT = 3.5
+THREE_B_SKIP_UNTIL = dtime(10, 0)
+THREE_B_EXIT_STYLE = "3b_pack"
+THREE_B_COOL_SEC = 15 * 60
+# 5A (1M) — 5-bar and 9-bar still down ≥4%, last bar green range ≥2%.
+# Not 5B climax. Yahoo 1m belt 2026-09-02..11. Fill now.
+FIVE_A_VEL5_PCT = -4.0
+FIVE_A_VEL9_PCT = -4.0
+FIVE_A_BAR_RANGE_PCT = 2.0
+FIVE_A_TARGET_FRAC = 0.10
+FIVE_A_SKIP_UNTIL = dtime(9, 45)
+FIVE_A_EXIT_STYLE = "5a_pack"
+FIVE_A_COOL_SEC = 15 * 60
+# 7A (1M) — quiet green, last bar ≥3%, strong close, body ≥1.5%, vel5 −1..3%, RVOL <1.5. Not 2A/4A.
+# Yahoo 1m belt 2026-09-02..11 WR + $ push. Fill now. Stop floor 3.5%. Target 8%.
+SEVEN_A_VEL5_MIN = -1.0
+SEVEN_A_VEL5_MAX = 3.0
+SEVEN_A_BAR_RANGE_PCT = 3.0
+SEVEN_A_CLOSE_LOC_MIN = 0.55
+SEVEN_A_BODY_PCT_MIN = 1.5
+SEVEN_A_RVOL_MAX = 1.5
+SEVEN_A_TARGET_FRAC = 0.08
+SEVEN_A_STOP_FLOOR_PCT = 3.5
+SEVEN_A_SKIP_UNTIL = dtime(9, 45)
+SEVEN_A_EXIT_STYLE = "7a_pack"
+SEVEN_A_COOL_SEC = 15 * 60
+# 3C (1M) — above VWAP, last bar ≥4%, RVOL <1.5. Not 3A/3B. Last-green not required.
+# No 3A noon cut. Stop floor 3.5%. Target 16%. Yahoo 1m belt $ push.
+THREE_C_BAR_RANGE_PCT = 4.0
+THREE_C_RVOL_MAX = 1.5
+THREE_C_TARGET_FRAC = 0.16
+THREE_C_STOP_FLOOR_PCT = 3.5
+THREE_C_SKIP_UNTIL = dtime(9, 45)
+THREE_C_EXIT_STYLE = "3c_pack"
+THREE_C_COOL_SEC = 15 * 60
+# 4D (1M) — 5-bar 3–10%, last bar green ≥5%, RVOL ≥1.5, session still up vs first printed open.
+# Not 2A/1A/4A. Yahoo 1m belt 2026-09-02..11. Fill now. Stop floor 2%. Target 8%.
+FOUR_D_VEL5_MIN = 3.0
+FOUR_D_VEL5_MAX = 10.0
+FOUR_D_BAR_RANGE_PCT = 5.0
+FOUR_D_RVOL_MIN = 1.5
+FOUR_D_SESS_UP_MIN = 0.0
+FOUR_D_TARGET_FRAC = 0.08
+FOUR_D_SKIP_UNTIL = dtime(9, 45)
+FOUR_D_EXIT_STYLE = "4d_pack"
+FOUR_D_COOL_SEC = 15 * 60
+# 4B (1M) — fatter than 4A, not 4D's 5% bar. Vel5 4–9%, last green ≥3%, RVOL ≥1.5, session up ≥8%.
+# Skip 10:00. Target 16%. Yahoo 1m belt 2026-09-02..11.
+FOUR_B_VEL5_MIN = 4.0
+FOUR_B_VEL5_MAX = 9.0
+FOUR_B_BAR_RANGE_PCT = 3.0
+FOUR_B_RVOL_MIN = 1.5
+FOUR_B_SESS_UP_MIN = 8.0
+FOUR_B_TARGET_FRAC = 0.16
+FOUR_B_SKIP_UNTIL = dtime(10, 0)
+FOUR_B_EXIT_STYLE = "4b_pack"
+FOUR_B_COOL_SEC = 15 * 60
+# 6A (1M) — down-window bounce under VWAP. Vel5 ≤−3%, vel9 ≤−2%, last green ≥2.5%. Not 5A/5B.
+# Floor 3.5%. Target 16%. Yahoo 1m belt 2026-09-02..11.
+SIX_A_VEL5_MAX = -3.0
+SIX_A_VEL9_MAX = -2.0
+SIX_A_BAR_RANGE_PCT = 2.5
+SIX_A_TARGET_FRAC = 0.16
+SIX_A_STOP_FLOOR_PCT = 3.5
+SIX_A_SKIP_UNTIL = dtime(9, 45)
+SIX_A_EXIT_STYLE = "6a_pack"
+SIX_A_COOL_SEC = 15 * 60
+# 4C (1M) — calmer than 4A, not 7A strong-close. Vel5 0.5–<3%, last green ≥3%,
+# close loc ≥0.40, RVOL <1.5. Target 6%. Yahoo 1m belt 2026-09-02..11.
+FOUR_C_VEL5_MIN = 0.5
+FOUR_C_VEL5_MAX = 3.0
+FOUR_C_BAR_RANGE_PCT = 3.0
+FOUR_C_CLOSE_LOC_MIN = 0.40
+FOUR_C_RVOL_MAX = 1.5
+FOUR_C_TARGET_FRAC = 0.06
+FOUR_C_SKIP_UNTIL = dtime(9, 45)
+FOUR_C_EXIT_STYLE = "4c_pack"
+FOUR_C_COOL_SEC = 15 * 60
+# 4E (1M) — quiet fatter window than 4A. Vel5 9–12%, last green ≥4%, RVOL <1.5, session up.
+# Not 4B/4D (those need RVOL ≥1.5). Target 8.5%. Yahoo 1m belt 2026-09-02..11.
+FOUR_E_VEL5_MIN = 9.0
+FOUR_E_VEL5_MAX = 12.0
+FOUR_E_BAR_RANGE_PCT = 4.0
+FOUR_E_RVOL_MAX = 1.5
+FOUR_E_SESS_UP_MIN = 0.0
+FOUR_E_TARGET_FRAC = 0.085
+FOUR_E_SKIP_UNTIL = dtime(9, 45)
+FOUR_E_EXIT_STYLE = "4e_pack"
+FOUR_E_COOL_SEC = 15 * 60
+# 6B (1M) — milder dump bounce than 6A. Vel5 ≤−2.5%, vel9 ≤0, last green ≥2%, under VWAP.
+# Not 6A (that letter is vel5 ≤−3 and vel9 ≤−2). Floor 3.5%. Target 15.5%.
+SIX_B_VEL5_MAX = -2.5
+SIX_B_VEL9_MAX = 0.0
+SIX_B_BAR_RANGE_PCT = 2.0
+SIX_B_TARGET_FRAC = 0.155
+SIX_B_STOP_FLOOR_PCT = 3.5
+SIX_B_SKIP_UNTIL = dtime(9, 45)
+SIX_B_EXIT_STYLE = "6b_pack"
+SIX_B_COOL_SEC = 15 * 60
+# 3D (1M) — quiet above-VWAP sliver under 3C's 4% bar. Last green 3.5–<4%, loc ≥0.55, RVOL <1.5.
+# Floor 3.5%. Target 14%. Yahoo 1m belt 2026-09-02..11.
+THREE_D_BAR_RANGE_MIN = 3.5
+THREE_D_BAR_RANGE_MAX = 4.0
+THREE_D_CLOSE_LOC_MIN = 0.55
+THREE_D_RVOL_MAX = 1.5
+THREE_D_TARGET_FRAC = 0.14
+THREE_D_STOP_FLOOR_PCT = 3.5
+THREE_D_SKIP_UNTIL = dtime(9, 45)
+THREE_D_EXIT_STYLE = "3d_pack"
+THREE_D_COOL_SEC = 15 * 60
+# 7B (1M) — 7A's smaller last bar. Last green 2.5–<3%, loc ≥0.55, body ≥1.5%, vel5 0–<3%, RVOL <1.5.
+# Floor 3.5%. Target 12.5%. Yahoo 1m belt 2026-09-02..11.
+SEVEN_B_VEL5_MIN = 0.0
+SEVEN_B_VEL5_MAX = 3.0
+SEVEN_B_BAR_RANGE_MIN = 2.5
+SEVEN_B_BAR_RANGE_MAX = 3.0
+SEVEN_B_CLOSE_LOC_MIN = 0.55
+SEVEN_B_BODY_PCT_MIN = 1.5
+SEVEN_B_RVOL_MAX = 1.5
+SEVEN_B_TARGET_FRAC = 0.125
+SEVEN_B_STOP_FLOOR_PCT = 3.5
+SEVEN_B_SKIP_UNTIL = dtime(9, 45)
+SEVEN_B_EXIT_STYLE = "7b_pack"
+SEVEN_B_COOL_SEC = 15 * 60
+# 3G (1M) — loud above-VWAP. Last bar ≥4%, RVOL ≥1.5, session up ≥8%. Not 3C (quiet) / 4B / 4D.
+# Floor 3.5%. Target 10%. Yahoo 1m belt 2026-09-02..11.
+THREE_G_BAR_RANGE_PCT = 4.0
+THREE_G_RVOL_MIN = 1.5
+THREE_G_SESS_UP_MIN = 8.0
+THREE_G_TARGET_FRAC = 0.10
+THREE_G_STOP_FLOOR_PCT = 3.5
+THREE_G_SKIP_UNTIL = dtime(9, 45)
+THREE_G_EXIT_STYLE = "3g_pack"
+THREE_G_COOL_SEC = 15 * 60
+# 3F (1M) — quiet above-VWAP smaller than 3D. Last green 2–<3.5%, RVOL <1.5, session up ≥8%.
+# Floor 3.5%. Target 12.5%. Skip 10:00. Yahoo 1m belt 2026-09-02..11.
+THREE_F_BAR_RANGE_MIN = 2.0
+THREE_F_BAR_RANGE_MAX = 3.5
+THREE_F_RVOL_MAX = 1.5
+THREE_F_SESS_UP_MIN = 8.0
+THREE_F_TARGET_FRAC = 0.125
+THREE_F_STOP_FLOOR_PCT = 3.5
+THREE_F_SKIP_UNTIL = dtime(10, 0)
+THREE_F_EXIT_STYLE = "3f_pack"
+THREE_F_COOL_SEC = 15 * 60
+# 8A (1M) — leftover loud loc-strong bar after a cooled window. Last green ≥2%,
+# loc ≥0.60, vel5 −2–<2%, RVOL ≥1.5, session up ≥5%. Skip 10:00. Floor 3.5%. Target 12.5%.
+# Yahoo 1m belt 2026-09-02..11. Not 1A / 2A / 4* / 3* / 5A / 5B / 6A / 6B / 7A / 7B.
+EIGHT_A_VEL5_MIN = -2.0
+EIGHT_A_VEL5_MAX = 2.0
+EIGHT_A_BAR_RANGE_PCT = 2.0
+EIGHT_A_CLOSE_LOC_MIN = 0.60
+EIGHT_A_RVOL_MIN = 1.5
+EIGHT_A_SESS_UP_MIN = 5.0
+EIGHT_A_TARGET_FRAC = 0.125
+EIGHT_A_STOP_FLOOR_PCT = 3.5
+EIGHT_A_SKIP_UNTIL = dtime(10, 0)
+EIGHT_A_EXIT_STYLE = "8a_pack"
+EIGHT_A_COOL_SEC = 15 * 60
+# 7C (1M) — 7B's smaller last bar. Last green 2–<2.5%, loc ≥0.70, vel5 −1–<2%, RVOL <1.5.
+# Skip 10:00. Floor 3.5%. Target 18%. Yahoo 1m belt 2026-09-02..11. Not 7A / 7B.
+SEVEN_C_VEL5_MIN = -1.0
+SEVEN_C_VEL5_MAX = 2.0
+SEVEN_C_BAR_RANGE_MIN = 2.0
+SEVEN_C_BAR_RANGE_MAX = 2.5
+SEVEN_C_CLOSE_LOC_MIN = 0.70
+SEVEN_C_RVOL_MAX = 1.5
+SEVEN_C_TARGET_FRAC = 0.18
+SEVEN_C_STOP_FLOOR_PCT = 3.5
+SEVEN_C_SKIP_UNTIL = dtime(10, 0)
+SEVEN_C_EXIT_STYLE = "7c_pack"
+SEVEN_C_COOL_SEC = 15 * 60
+# 3E (1M) — quiet above-VWAP leftover of 3F. Last bar 2–<3.5%, loc ≥0.50, RVOL <1.5, session up ≥0.
+# Last-green not required. Floor 3.5%. Target 17%. Skip 10:00. Not 3F / 4A.
+THREE_E_BAR_RANGE_MIN = 2.0
+THREE_E_BAR_RANGE_MAX = 3.5
+THREE_E_CLOSE_LOC_MIN = 0.50
+THREE_E_RVOL_MAX = 1.5
+THREE_E_SESS_UP_MIN = 0.0
+THREE_E_TARGET_FRAC = 0.17
+THREE_E_STOP_FLOOR_PCT = 3.5
+THREE_E_SKIP_UNTIL = dtime(10, 0)
+THREE_E_EXIT_STYLE = "3e_pack"
+THREE_E_COOL_SEC = 15 * 60
+# 6C (1M) — milder dump bounce than 6B. Last green ≥2%, vel5 −2 to −0.3%, under VWAP.
+# Skip 10:00. Floor 3.5%. Target 14%. Not 6A / 6B / 5A / 5B.
+SIX_C_VEL5_MIN = -2.0
+SIX_C_VEL5_MAX = -0.3
+SIX_C_BAR_RANGE_PCT = 2.0
+SIX_C_TARGET_FRAC = 0.14
+SIX_C_STOP_FLOOR_PCT = 3.5
+SIX_C_SKIP_UNTIL = dtime(10, 0)
+SIX_C_EXIT_STYLE = "6c_pack"
+SIX_C_COOL_SEC = 15 * 60
+# Placeholder Handle for every other live letter (not 5B / 2A / 1A / 2D / 2B / 2C / 3A / 4A / 3B / 5A / 7A / 3C / 4D / 4B / 6A / 4C / 4E / 6B / 3D / 7B / 3G / 3F / 8A / 7C / 3E / 6C).
 # Gene stays nearest ≥85% same TF. Tactics only — specialize later.
 # Remaining 1m: fill-now at ≥85% (2026-09-17). 5m/15m hold after a small dip.
 PH_EXIT_STYLE = "ph_pack"
@@ -117,11 +326,14 @@ PH_RVOL_MIN = 0.0
 PH_DIP_FRAC_1M = 0.01
 PH_DIP_FRAC_5M = 0.006
 PH_DIP_FRAC_15M = 0.008
-PH_5M_STRUCT_FRAC = 0.75  # was half; operator 2026-09-19
-PH_5M_TRAIL_FRAC = 0.08  # after tagging the 75% structural target
-PH_15M_TARGET_FRAC = 0.12  # operator 2026-09-19 — locked 12% clip, not half structural
+PH_5M_STRUCT_FRAC = 0.75  # tag sooner than full structural
+PH_5M_TRAIL_FRAC = 0.08  # middle of 5 / 10
+PH_15M_TARGET_FRAC = 0.12  # 12% hard clip — Friday never tagged 15/20
 PH_SKIP_UNTIL = dtime(9, 45)
 PH_COOL_SEC = 15 * 60
+# Volatile-day grind: Hunt extras can print several 1m letters on one name.
+# Cap shared across letters. Second letter may still add until this count.
+ONE_M_NAME_SHOT_MAX = 3
 MIN_SLICES = {"1m": 5, "5m": 4, "15m": 3}
 PLACEHOLDER_LAYOUTS = frozenset(
     {"NEW_LAYOUT", "PURGATORY_PENDING", "Purgatory", "PURGATORY", "—", "-", ""}
@@ -601,6 +813,139 @@ def _is_2d_1m(strategy: str, tf: str = "1m") -> bool:
     return token.startswith("2D") and "1M" in token
 
 
+def _is_4a_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("4A") and "1M" in token
+
+
+def _is_3b_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("3B") and "1M" in token
+
+
+def _is_5a_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("5A") and "1M" in token
+
+
+def _is_7a_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("7A") and "1M" in token
+
+
+def _is_3c_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("3C") and "1M" in token
+
+
+def _is_4d_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("4D") and "1M" in token
+
+
+def _is_4b_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("4B") and "1M" in token
+
+
+def _is_6a_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("6A") and "1M" in token
+
+
+def _is_4c_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("4C") and "1M" in token
+
+
+def _is_4e_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("4E") and "1M" in token
+
+
+def _is_6b_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("6B") and "1M" in token
+
+
+def _is_3d_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("3D") and "1M" in token
+
+
+def _is_7b_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("7B") and "1M" in token
+
+
+def _is_3g_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("3G") and "1M" in token
+
+
+def _is_3f_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("3F") and "1M" in token
+
+
+def _is_8a_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("8A") and "1M" in token
+
+
+def _is_7c_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("7C") and "1M" in token
+
+
+def _is_3e_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("3E") and "1M" in token
+
+
+def _is_6c_1m(strategy: str, tf: str = "1m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "1m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("6C") and "1M" in token
+
+
 def _5b_now(session_state: Any = None) -> datetime:
     try:
         if session_state is not None:
@@ -665,6 +1010,82 @@ def _2d_open_chop(session_state: Any = None) -> bool:
     return _rth_before(session_state, TWO_D_SKIP_UNTIL)
 
 
+def _4a_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, FOUR_A_SKIP_UNTIL)
+
+
+def _3b_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, THREE_B_SKIP_UNTIL)
+
+
+def _5a_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, FIVE_A_SKIP_UNTIL)
+
+
+def _7a_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, SEVEN_A_SKIP_UNTIL)
+
+
+def _3c_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, THREE_C_SKIP_UNTIL)
+
+
+def _4d_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, FOUR_D_SKIP_UNTIL)
+
+
+def _4b_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, FOUR_B_SKIP_UNTIL)
+
+
+def _6a_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, SIX_A_SKIP_UNTIL)
+
+
+def _4c_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, FOUR_C_SKIP_UNTIL)
+
+
+def _4e_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, FOUR_E_SKIP_UNTIL)
+
+
+def _6b_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, SIX_B_SKIP_UNTIL)
+
+
+def _3d_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, THREE_D_SKIP_UNTIL)
+
+
+def _7b_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, SEVEN_B_SKIP_UNTIL)
+
+
+def _3g_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, THREE_G_SKIP_UNTIL)
+
+
+def _3f_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, THREE_F_SKIP_UNTIL)
+
+
+def _8a_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, EIGHT_A_SKIP_UNTIL)
+
+
+def _7c_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, SEVEN_C_SKIP_UNTIL)
+
+
+def _3e_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, THREE_E_SKIP_UNTIL)
+
+
+def _6c_open_chop(session_state: Any = None) -> bool:
+    return _rth_before(session_state, SIX_C_SKIP_UNTIL)
+
+
 def _5b_cool_until(session_state: Any, ticker: str) -> datetime | None:
     if session_state is None:
         return None
@@ -724,6 +1145,63 @@ def _pack_mark_stop_cool(session_state: Any, ticker: str, lot: dict[str, Any]) -
         return
     if _is_2d_1m(strat, tf) or style == TWO_D_EXIT_STYLE:
         _2d_mark_stop_cool(session_state, ticker)
+        return
+    if _is_4a_1m(strat, tf) or style == FOUR_A_EXIT_STYLE:
+        _4a_mark_stop_cool(session_state, ticker)
+        return
+    if _is_3b_1m(strat, tf) or style == THREE_B_EXIT_STYLE:
+        _3b_mark_stop_cool(session_state, ticker)
+        return
+    if _is_5a_1m(strat, tf) or style == FIVE_A_EXIT_STYLE:
+        _5a_mark_stop_cool(session_state, ticker)
+        return
+    if _is_7a_1m(strat, tf) or style == SEVEN_A_EXIT_STYLE:
+        _7a_mark_stop_cool(session_state, ticker)
+        return
+    if _is_3c_1m(strat, tf) or style == THREE_C_EXIT_STYLE:
+        _3c_mark_stop_cool(session_state, ticker)
+        return
+    if _is_4d_1m(strat, tf) or style == FOUR_D_EXIT_STYLE:
+        _4d_mark_stop_cool(session_state, ticker)
+        return
+    if _is_4b_1m(strat, tf) or style == FOUR_B_EXIT_STYLE:
+        _4b_mark_stop_cool(session_state, ticker)
+        return
+    if _is_6a_1m(strat, tf) or style == SIX_A_EXIT_STYLE:
+        _6a_mark_stop_cool(session_state, ticker)
+        return
+    if _is_4c_1m(strat, tf) or style == FOUR_C_EXIT_STYLE:
+        _4c_mark_stop_cool(session_state, ticker)
+        return
+    if _is_4e_1m(strat, tf) or style == FOUR_E_EXIT_STYLE:
+        _4e_mark_stop_cool(session_state, ticker)
+        return
+    if _is_6b_1m(strat, tf) or style == SIX_B_EXIT_STYLE:
+        _6b_mark_stop_cool(session_state, ticker)
+        return
+    if _is_3d_1m(strat, tf) or style == THREE_D_EXIT_STYLE:
+        _3d_mark_stop_cool(session_state, ticker)
+        return
+    if _is_7b_1m(strat, tf) or style == SEVEN_B_EXIT_STYLE:
+        _7b_mark_stop_cool(session_state, ticker)
+        return
+    if _is_3g_1m(strat, tf) or style == THREE_G_EXIT_STYLE:
+        _3g_mark_stop_cool(session_state, ticker)
+        return
+    if _is_3f_1m(strat, tf) or style == THREE_F_EXIT_STYLE:
+        _3f_mark_stop_cool(session_state, ticker)
+        return
+    if _is_8a_1m(strat, tf) or style == EIGHT_A_EXIT_STYLE:
+        _8a_mark_stop_cool(session_state, ticker)
+        return
+    if _is_7c_1m(strat, tf) or style == SEVEN_C_EXIT_STYLE:
+        _7c_mark_stop_cool(session_state, ticker)
+        return
+    if _is_3e_1m(strat, tf) or style == THREE_E_EXIT_STYLE:
+        _3e_mark_stop_cool(session_state, ticker)
+        return
+    if _is_6c_1m(strat, tf) or style == SIX_C_EXIT_STYLE:
+        _6c_mark_stop_cool(session_state, ticker)
         return
     if _is_1a_1m(strat, tf) or style in ONE_A_EXIT_STYLES:
         _1a_mark_stop_cool(session_state, ticker)
@@ -905,6 +1383,728 @@ def _3a_mark_used(session_state: Any, ticker: str) -> None:
     _5b_bag_set(session_state, "room3_3a_used_day", ticker, _5b_day_key(session_state))
 
 
+def _4a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_4a_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _4a_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=FOUR_A_COOL_SEC)
+    _5b_bag_set(session_state, "room3_4a_cool_until", ticker, until.isoformat())
+
+
+def _4a_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_4a_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _4a_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_4a_used_day", ticker, _5b_day_key(session_state))
+
+
+def _3b_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_3b_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _3b_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=THREE_B_COOL_SEC)
+    _5b_bag_set(session_state, "room3_3b_cool_until", ticker, until.isoformat())
+
+
+def _3b_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_3b_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _3b_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_3b_used_day", ticker, _5b_day_key(session_state))
+
+
+def _5a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_5a_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _5a_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=FIVE_A_COOL_SEC)
+    _5b_bag_set(session_state, "room3_5a_cool_until", ticker, until.isoformat())
+
+
+def _5a_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_5a_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _5a_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_5a_used_day", ticker, _5b_day_key(session_state))
+
+
+def _7a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_7a_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _7a_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=SEVEN_A_COOL_SEC)
+    _5b_bag_set(session_state, "room3_7a_cool_until", ticker, until.isoformat())
+
+
+def _7a_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_7a_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _7a_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_7a_used_day", ticker, _5b_day_key(session_state))
+
+
+def _3c_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_3c_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _3c_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=THREE_C_COOL_SEC)
+    _5b_bag_set(session_state, "room3_3c_cool_until", ticker, until.isoformat())
+
+
+def _3c_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_3c_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _3c_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_3c_used_day", ticker, _5b_day_key(session_state))
+
+
+def _4d_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_4d_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _4d_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=FOUR_D_COOL_SEC)
+    _5b_bag_set(session_state, "room3_4d_cool_until", ticker, until.isoformat())
+
+
+def _4d_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_4d_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _4d_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_4d_used_day", ticker, _5b_day_key(session_state))
+
+
+def _4b_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_4b_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _4b_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=FOUR_B_COOL_SEC)
+    _5b_bag_set(session_state, "room3_4b_cool_until", ticker, until.isoformat())
+
+
+def _4b_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_4b_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _4b_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_4b_used_day", ticker, _5b_day_key(session_state))
+
+
+def _6a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_6a_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _6a_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=SIX_A_COOL_SEC)
+    _5b_bag_set(session_state, "room3_6a_cool_until", ticker, until.isoformat())
+
+
+def _6a_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_6a_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _6a_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_6a_used_day", ticker, _5b_day_key(session_state))
+
+
+def _4c_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_4c_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _4c_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=FOUR_C_COOL_SEC)
+    _5b_bag_set(session_state, "room3_4c_cool_until", ticker, until.isoformat())
+
+
+def _4c_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_4c_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _4c_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_4c_used_day", ticker, _5b_day_key(session_state))
+
+
+def _4e_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_4e_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _4e_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=FOUR_E_COOL_SEC)
+    _5b_bag_set(session_state, "room3_4e_cool_until", ticker, until.isoformat())
+
+
+def _4e_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_4e_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _4e_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_4e_used_day", ticker, _5b_day_key(session_state))
+
+
+def _6b_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_6b_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _6b_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=SIX_B_COOL_SEC)
+    _5b_bag_set(session_state, "room3_6b_cool_until", ticker, until.isoformat())
+
+
+def _6b_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_6b_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _6b_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_6b_used_day", ticker, _5b_day_key(session_state))
+
+
+def _3d_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_3d_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _3d_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=THREE_D_COOL_SEC)
+    _5b_bag_set(session_state, "room3_3d_cool_until", ticker, until.isoformat())
+
+
+def _3d_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_3d_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _3d_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_3d_used_day", ticker, _5b_day_key(session_state))
+
+
+def _7b_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_7b_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _7b_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=SEVEN_B_COOL_SEC)
+    _5b_bag_set(session_state, "room3_7b_cool_until", ticker, until.isoformat())
+
+
+def _7b_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_7b_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _7b_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_7b_used_day", ticker, _5b_day_key(session_state))
+
+
+def _3g_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_3g_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _3g_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=THREE_G_COOL_SEC)
+    _5b_bag_set(session_state, "room3_3g_cool_until", ticker, until.isoformat())
+
+
+def _3g_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_3g_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _3g_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_3g_used_day", ticker, _5b_day_key(session_state))
+
+
+def _3f_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_3f_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _3f_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=THREE_F_COOL_SEC)
+    _5b_bag_set(session_state, "room3_3f_cool_until", ticker, until.isoformat())
+
+
+def _3f_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_3f_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _3f_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_3f_used_day", ticker, _5b_day_key(session_state))
+
+
+def _8a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_8a_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _8a_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=EIGHT_A_COOL_SEC)
+    _5b_bag_set(session_state, "room3_8a_cool_until", ticker, until.isoformat())
+
+
+def _8a_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_8a_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _8a_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_8a_used_day", ticker, _5b_day_key(session_state))
+
+
+def _7c_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_7c_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _7c_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=SEVEN_C_COOL_SEC)
+    _5b_bag_set(session_state, "room3_7c_cool_until", ticker, until.isoformat())
+
+
+def _7c_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_7c_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _7c_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_7c_used_day", ticker, _5b_day_key(session_state))
+
+
+def _3e_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_3e_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _3e_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=THREE_E_COOL_SEC)
+    _5b_bag_set(session_state, "room3_3e_cool_until", ticker, until.isoformat())
+
+
+def _3e_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_3e_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _3e_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_3e_used_day", ticker, _5b_day_key(session_state))
+
+
+def _6c_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if session_state is None:
+        return None
+    try:
+        bag = session_state.get("room3_6c_cool_until") or {}
+    except Exception:
+        return None
+    raw = bag.get(str(ticker or "").upper())
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _6c_mark_stop_cool(session_state: Any, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=SIX_C_COOL_SEC)
+    _5b_bag_set(session_state, "room3_6c_cool_until", ticker, until.isoformat())
+
+
+def _6c_used_today(session_state: Any, ticker: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        bag = session_state.get("room3_6c_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(str(ticker or "").upper()) or "") == _5b_day_key(session_state)
+
+
+def _6c_mark_used(session_state: Any, ticker: str) -> None:
+    _5b_bag_set(session_state, "room3_6c_used_day", ticker, _5b_day_key(session_state))
+
+
 def _1a_cool_until(session_state: Any, ticker: str) -> datetime | None:
     if session_state is None:
         return None
@@ -1010,6 +2210,37 @@ def _2d_mark_shot(session_state: Any, ticker: str) -> None:
     )
     if n >= 2:
         _2d_mark_used(session_state, ticker)
+
+
+def _1m_name_shots_today(session_state: Any, ticker: str) -> int:
+    if session_state is None:
+        return 0
+    try:
+        bag = session_state.get("room3_1m_name_shots_day") or {}
+    except Exception:
+        return 0
+    raw = str(bag.get(str(ticker or "").upper()) or "")
+    day = _5b_day_key(session_state)
+    if raw.startswith(f"{day}:"):
+        try:
+            return max(0, int(raw.split(":", 1)[1]))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _1m_name_shots_blocked(session_state: Any, ticker: str) -> bool:
+    return _1m_name_shots_today(session_state, ticker) >= ONE_M_NAME_SHOT_MAX
+
+
+def _1m_mark_name_shot(session_state: Any, ticker: str) -> None:
+    n = _1m_name_shots_today(session_state, ticker) + 1
+    _5b_bag_set(
+        session_state,
+        "room3_1m_name_shots_day",
+        ticker,
+        f"{_5b_day_key(session_state)}:{n}",
+    )
 
 
 def _ph_token(ticker: str, strategy: str) -> str:
@@ -1153,6 +2384,483 @@ def _3a_gene_ok(slices: list[dict[str, Any]]) -> bool:
     return True
 
 
+def _4a_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Middle 5-bar 3–8%, last bar ≥2%, RVOL <1.5. Not 2A/1A wallpaper."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < FOUR_A_BAR_RANGE_PCT:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < FOUR_A_VEL5_MIN or vel5 > FOUR_A_VEL5_MAX:
+        return False
+    if _5b_tape_rvol(slices) >= FOUR_A_RVOL_MAX:
+        return False
+    if _2a_gene_ok(slices):
+        return False
+    if _1a_classify(slices):
+        return False
+    return True
+
+
+def _3b_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Under VWAP, last bar ≥2%, RVOL <1.5. Complement of 3A — wallpaper 3B does not fire."""
+    if len(slices) < 2:
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < THREE_B_BAR_RANGE_PCT:
+        return False
+    if _5b_tape_rvol(slices) >= THREE_B_RVOL_MAX:
+        return False
+    vwap = _3a_session_vwap(slices)
+    px = float(last.get("c") or 0)
+    if vwap <= 0 or px <= 0 or px >= vwap:
+        return False
+    return True
+
+
+def _5a_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """5-bar and 9-bar still down ≥4%, last bar green ≥2%. Not 5B climax."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < FIVE_A_BAR_RANGE_PCT:
+        return False
+    if _window_velocity_pct(slices, 5) > FIVE_A_VEL5_PCT:
+        return False
+    if _window_velocity_pct(slices, 9) > FIVE_A_VEL9_PCT:
+        return False
+    if _5b_climax_ok(slices) and _5b_tape_rvol(slices) >= FIVE_B_RVOL_MIN:
+        return False
+    return True
+
+
+def _7a_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Quiet green, last bar ≥3% with strong close and ≥1.5% body, vel5 −1..3%, RVOL <1.5. Not 2A/4A wallpaper."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < SEVEN_A_BAR_RANGE_PCT:
+        return False
+    if _bar_close_loc(last) < SEVEN_A_CLOSE_LOC_MIN:
+        return False
+    if _bar_body_pct(last) < SEVEN_A_BODY_PCT_MIN:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < SEVEN_A_VEL5_MIN or vel5 >= SEVEN_A_VEL5_MAX:
+        return False
+    if _5b_tape_rvol(slices) >= SEVEN_A_RVOL_MAX:
+        return False
+    if _2a_gene_ok(slices) or _2b_gene_ok(slices) or _2c_gene_ok(slices):
+        return False
+    if _1a_classify(slices) or _4a_gene_ok(slices):
+        return False
+    return True
+
+
+def _3c_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Above VWAP, last bar ≥4%, RVOL <1.5. Not 3A/3B. Last-green not required."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < THREE_C_BAR_RANGE_PCT:
+        return False
+    if _5b_tape_rvol(slices) >= THREE_C_RVOL_MAX:
+        return False
+    vwap = _3a_session_vwap(slices)
+    px = float(last.get("c") or 0)
+    if vwap <= 0 or px <= 0 or px <= vwap:
+        return False
+    if _3a_gene_ok(slices) or _3b_gene_ok(slices):
+        return False
+    return True
+
+
+def _4d_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """5-bar 3–10%, last bar green ≥5%, RVOL ≥1.5, session still up. Not 2A/1A/4A."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < FOUR_D_BAR_RANGE_PCT:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < FOUR_D_VEL5_MIN or vel5 > FOUR_D_VEL5_MAX:
+        return False
+    if _5b_tape_rvol(slices) < FOUR_D_RVOL_MIN:
+        return False
+    if _session_up_pct(slices) < FOUR_D_SESS_UP_MIN:
+        return False
+    if _2a_gene_ok(slices) or _1a_classify(slices) or _4a_gene_ok(slices):
+        return False
+    return True
+
+
+def _4b_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Vel5 4–9%, last green ≥3%, RVOL ≥1.5, session up ≥8%. Not 2A/1A/4A/4D."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < FOUR_B_BAR_RANGE_PCT:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < FOUR_B_VEL5_MIN or vel5 > FOUR_B_VEL5_MAX:
+        return False
+    if _5b_tape_rvol(slices) < FOUR_B_RVOL_MIN:
+        return False
+    if _session_up_pct(slices) < FOUR_B_SESS_UP_MIN:
+        return False
+    if _2a_gene_ok(slices) or _1a_classify(slices) or _4a_gene_ok(slices) or _4d_gene_ok(slices):
+        return False
+    return True
+
+
+def _6a_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Vel5 ≤−3%, vel9 ≤−2%, last green ≥2.5%, under VWAP. Not 5A / 5B climax."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < SIX_A_BAR_RANGE_PCT:
+        return False
+    if _window_velocity_pct(slices, 5) > SIX_A_VEL5_MAX:
+        return False
+    if _window_velocity_pct(slices, 9) > SIX_A_VEL9_MAX:
+        return False
+    vwap = _3a_session_vwap(slices)
+    px = float(last.get("c") or 0)
+    if vwap <= 0 or px >= vwap:
+        return False
+    if _5a_gene_ok(slices):
+        return False
+    if _5b_climax_ok(slices) and _5b_tape_rvol(slices) >= FIVE_B_RVOL_MIN:
+        return False
+    return True
+
+
+def _4c_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Vel5 0.5–<3%, last green ≥3%, close loc ≥0.40, RVOL <1.5. Not 4A/7A/2A/1A."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < FOUR_C_BAR_RANGE_PCT:
+        return False
+    if _bar_close_loc(last) < FOUR_C_CLOSE_LOC_MIN:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < FOUR_C_VEL5_MIN or vel5 >= FOUR_C_VEL5_MAX:
+        return False
+    if _5b_tape_rvol(slices) >= FOUR_C_RVOL_MAX:
+        return False
+    if _4a_gene_ok(slices) or _7a_gene_ok(slices):
+        return False
+    if _2a_gene_ok(slices) or _1a_classify(slices):
+        return False
+    return True
+
+
+def _4e_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Vel5 9–12%, last green ≥4%, RVOL <1.5, session still up. Not 4A/4B/4D."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < FOUR_E_BAR_RANGE_PCT:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < FOUR_E_VEL5_MIN or vel5 > FOUR_E_VEL5_MAX:
+        return False
+    if _5b_tape_rvol(slices) >= FOUR_E_RVOL_MAX:
+        return False
+    if _session_up_pct(slices) < FOUR_E_SESS_UP_MIN:
+        return False
+    return True
+
+
+def _6b_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Vel5 ≤−2.5%, vel9 ≤0, last green ≥2%, under VWAP. Not 6A / 5A / 5B."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < SIX_B_BAR_RANGE_PCT:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    vel9 = _window_velocity_pct(slices, 9)
+    if vel5 > SIX_B_VEL5_MAX:
+        return False
+    if vel9 > SIX_B_VEL9_MAX:
+        return False
+    if vel5 <= SIX_A_VEL5_MAX and vel9 <= SIX_A_VEL9_MAX:
+        return False
+    vwap = _3a_session_vwap(slices)
+    px = float(last.get("c") or 0)
+    if vwap <= 0 or px >= vwap:
+        return False
+    if _5a_gene_ok(slices):
+        return False
+    if _5b_climax_ok(slices) and _5b_tape_rvol(slices) >= FIVE_B_RVOL_MIN:
+        return False
+    return True
+
+
+def _3d_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Above VWAP, last green 3.5–<4%, close loc ≥0.55, RVOL <1.5. Not 3C."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    rng = _bar_range_pct(last)
+    if rng < THREE_D_BAR_RANGE_MIN or rng >= THREE_D_BAR_RANGE_MAX:
+        return False
+    if _bar_close_loc(last) < THREE_D_CLOSE_LOC_MIN:
+        return False
+    if _5b_tape_rvol(slices) >= THREE_D_RVOL_MAX:
+        return False
+    vwap = _3a_session_vwap(slices)
+    px = float(last.get("c") or 0)
+    if vwap <= 0 or px <= vwap:
+        return False
+    return True
+
+
+def _7b_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Last green 2.5–<3%, loc ≥0.55, body ≥1.5%, vel5 0–<3%, RVOL <1.5. Not 7A."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    rng = _bar_range_pct(last)
+    if rng < SEVEN_B_BAR_RANGE_MIN or rng >= SEVEN_B_BAR_RANGE_MAX:
+        return False
+    if _bar_close_loc(last) < SEVEN_B_CLOSE_LOC_MIN:
+        return False
+    if _bar_body_pct(last) < SEVEN_B_BODY_PCT_MIN:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < SEVEN_B_VEL5_MIN or vel5 >= SEVEN_B_VEL5_MAX:
+        return False
+    if _5b_tape_rvol(slices) >= SEVEN_B_RVOL_MAX:
+        return False
+    return True
+
+
+def _3g_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Above VWAP, last bar ≥4%, RVOL ≥1.5, session up ≥8%. Not 3C / 4B / 4D / 2A / 1A."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < THREE_G_BAR_RANGE_PCT:
+        return False
+    if _5b_tape_rvol(slices) < THREE_G_RVOL_MIN:
+        return False
+    vwap = _3a_session_vwap(slices)
+    px = float(last.get("c") or 0)
+    if vwap <= 0 or px <= vwap:
+        return False
+    if _session_up_pct(slices) < THREE_G_SESS_UP_MIN:
+        return False
+    if _2a_gene_ok(slices) or _1a_classify(slices) or _4b_gene_ok(slices) or _4d_gene_ok(slices):
+        return False
+    return True
+
+
+def _3f_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Above VWAP, last green 2–<3.5%, RVOL <1.5, session up ≥8%. Not 3C / 3D."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    rng = _bar_range_pct(last)
+    if rng < THREE_F_BAR_RANGE_MIN or rng >= THREE_F_BAR_RANGE_MAX:
+        return False
+    if _5b_tape_rvol(slices) >= THREE_F_RVOL_MAX:
+        return False
+    vwap = _3a_session_vwap(slices)
+    px = float(last.get("c") or 0)
+    if vwap <= 0 or px <= vwap:
+        return False
+    if _session_up_pct(slices) < THREE_F_SESS_UP_MIN:
+        return False
+    return True
+
+
+def _8a_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Last green ≥2%, loc ≥0.60, vel5 −2–<2%, RVOL ≥1.5, session up ≥5%. Not 1A/2*/4*/3*/5A/5B/6A/6B/7A/7B."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < EIGHT_A_BAR_RANGE_PCT:
+        return False
+    if _bar_close_loc(last) < EIGHT_A_CLOSE_LOC_MIN:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < EIGHT_A_VEL5_MIN or vel5 >= EIGHT_A_VEL5_MAX:
+        return False
+    if _5b_tape_rvol(slices) < EIGHT_A_RVOL_MIN:
+        return False
+    if _session_up_pct(slices) < EIGHT_A_SESS_UP_MIN:
+        return False
+    if (
+        _1a_classify(slices)
+        or _2a_gene_ok(slices)
+        or _2b_gene_ok(slices)
+        or _2c_gene_ok(slices)
+        or _2d_gene_ok(slices)
+        or _3a_gene_ok(slices)
+        or _3b_gene_ok(slices)
+        or _3c_gene_ok(slices)
+        or _3d_gene_ok(slices)
+        or _3f_gene_ok(slices)
+        or _3g_gene_ok(slices)
+        or _4a_gene_ok(slices)
+        or _4b_gene_ok(slices)
+        or _4c_gene_ok(slices)
+        or _4d_gene_ok(slices)
+        or _4e_gene_ok(slices)
+        or _5a_gene_ok(slices)
+        or _6a_gene_ok(slices)
+        or _6b_gene_ok(slices)
+        or _7a_gene_ok(slices)
+        or _7b_gene_ok(slices)
+    ):
+        return False
+    if _5b_climax_ok(slices) and _5b_tape_rvol(slices) >= FIVE_B_RVOL_MIN:
+        return False
+    return True
+
+
+def _7c_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Last green 2–<2.5%, loc ≥0.70, vel5 −1–<2%, RVOL <1.5. Not 7A / 7B."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    rng = _bar_range_pct(last)
+    if rng < SEVEN_C_BAR_RANGE_MIN or rng >= SEVEN_C_BAR_RANGE_MAX:
+        return False
+    if _bar_close_loc(last) < SEVEN_C_CLOSE_LOC_MIN:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < SEVEN_C_VEL5_MIN or vel5 >= SEVEN_C_VEL5_MAX:
+        return False
+    if _5b_tape_rvol(slices) >= SEVEN_C_RVOL_MAX:
+        return False
+    return True
+
+
+def _3e_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Above VWAP, last 2–<3.5%, loc ≥0.50, RVOL <1.5, session up ≥0. Not 3F / 4A."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    rng = _bar_range_pct(last)
+    if rng < THREE_E_BAR_RANGE_MIN or rng >= THREE_E_BAR_RANGE_MAX:
+        return False
+    if _bar_close_loc(last) < THREE_E_CLOSE_LOC_MIN:
+        return False
+    if _5b_tape_rvol(slices) >= THREE_E_RVOL_MAX:
+        return False
+    vwap = _3a_session_vwap(slices)
+    px = float(last.get("c") or 0)
+    if vwap <= 0 or px <= vwap:
+        return False
+    if _session_up_pct(slices) < THREE_E_SESS_UP_MIN:
+        return False
+    if (
+        _3a_gene_ok(slices)
+        or _3b_gene_ok(slices)
+        or _3c_gene_ok(slices)
+        or _3d_gene_ok(slices)
+        or _3f_gene_ok(slices)
+        or _3g_gene_ok(slices)
+        or _4a_gene_ok(slices)
+        or _4b_gene_ok(slices)
+        or _4c_gene_ok(slices)
+        or _4d_gene_ok(slices)
+        or _4e_gene_ok(slices)
+        or _2a_gene_ok(slices)
+        or _1a_classify(slices)
+        or _7a_gene_ok(slices)
+        or _7b_gene_ok(slices)
+        or _7c_gene_ok(slices)
+        or _8a_gene_ok(slices)
+    ):
+        return False
+    return True
+
+
+def _6c_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Vel5 −2 to −0.3%, last green ≥2%, under VWAP. Not 6A / 6B / 5A / 5B."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < SIX_C_BAR_RANGE_PCT:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 <= SIX_C_VEL5_MIN or vel5 > SIX_C_VEL5_MAX:
+        return False
+    vwap = _3a_session_vwap(slices)
+    px = float(last.get("c") or 0)
+    if vwap <= 0 or px >= vwap:
+        return False
+    if _6a_gene_ok(slices) or _6b_gene_ok(slices):
+        return False
+    if _5a_gene_ok(slices):
+        return False
+    if _5b_climax_ok(slices) and _5b_tape_rvol(slices) >= FIVE_B_RVOL_MIN:
+        return False
+    return True
+
+
 def _2d_gene_ok(slices: list[dict[str, Any]]) -> bool:
     """Hunt extra — not a new gene. Fat green bar + RVOL ≥3. Wallpaper 2D does not fire."""
     if len(slices) < 2:
@@ -1210,6 +2918,36 @@ def _bar_range_pct(bar: dict[str, Any]) -> float:
     if c <= 0:
         return 0.0
     return (h - l) / c * 100.0
+
+
+def _bar_close_loc(bar: dict[str, Any]) -> float:
+    """0 = close at the low, 1 = close at the high."""
+    h = float(bar.get("h") or 0)
+    l = float(bar.get("l") or 0)
+    c = float(bar.get("c") or 0)
+    span = h - l
+    if span <= 0:
+        return 0.5
+    return (c - l) / span
+
+
+def _bar_body_pct(bar: dict[str, Any]) -> float:
+    o = float(bar.get("o") or 0)
+    c = float(bar.get("c") or 0)
+    if o <= 0:
+        return 0.0
+    return (c - o) / o * 100.0
+
+
+def _session_up_pct(slices: list[dict[str, Any]]) -> float:
+    """Last close vs first printed open. Walkforward day-open when slices start at the open."""
+    if not slices:
+        return 0.0
+    o = float(slices[0].get("o") or 0)
+    c = float(slices[-1].get("c") or 0)
+    if o <= 0:
+        return 0.0
+    return (c - o) / o * 100.0
 
 
 def _5b_tape_rvol(slices: list[dict[str, Any]]) -> float:
@@ -1374,6 +3112,299 @@ def _2d_pack_exits(
     return stop_px, tgt_px, stop_frac
 
 
+def _4a_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    stop_px, _, stop_frac = _5b_pack_exits(slices, fill, 0.0)
+    px = float(fill or 0)
+    tgt_px = px * (1.0 + FOUR_A_TARGET_FRAC) if px > 0 else 0.0
+    return stop_px, tgt_px, stop_frac
+
+
+def _3b_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = THREE_B_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, THREE_B_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + THREE_B_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
+def _5a_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    stop_px, _, stop_frac = _5b_pack_exits(slices, fill, 0.0)
+    px = float(fill or 0)
+    tgt_px = px * (1.0 + FIVE_A_TARGET_FRAC) if px > 0 else 0.0
+    return stop_px, tgt_px, stop_frac
+
+
+def _7a_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = SEVEN_A_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, SEVEN_A_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + SEVEN_A_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
+def _3c_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = THREE_C_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, THREE_C_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + THREE_C_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
+def _4d_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    stop_px, _, stop_frac = _5b_pack_exits(slices, fill, 0.0)
+    px = float(fill or 0)
+    tgt_px = px * (1.0 + FOUR_D_TARGET_FRAC) if px > 0 else 0.0
+    return stop_px, tgt_px, stop_frac
+
+
+def _4b_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    stop_px, _, stop_frac = _5b_pack_exits(slices, fill, 0.0)
+    px = float(fill or 0)
+    tgt_px = px * (1.0 + FOUR_B_TARGET_FRAC) if px > 0 else 0.0
+    return stop_px, tgt_px, stop_frac
+
+
+def _6a_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = SIX_A_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, SIX_A_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + SIX_A_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
+def _4c_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    stop_px, _, stop_frac = _5b_pack_exits(slices, fill, 0.0)
+    px = float(fill or 0)
+    tgt_px = px * (1.0 + FOUR_C_TARGET_FRAC) if px > 0 else 0.0
+    return stop_px, tgt_px, stop_frac
+
+
+def _4e_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    stop_px, _, stop_frac = _5b_pack_exits(slices, fill, 0.0)
+    px = float(fill or 0)
+    tgt_px = px * (1.0 + FOUR_E_TARGET_FRAC) if px > 0 else 0.0
+    return stop_px, tgt_px, stop_frac
+
+
+def _6b_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = SIX_B_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, SIX_B_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + SIX_B_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
+def _3d_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = THREE_D_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, THREE_D_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + THREE_D_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
+def _7b_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = SEVEN_B_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, SEVEN_B_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + SEVEN_B_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
+def _3g_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = THREE_G_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, THREE_G_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + THREE_G_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
+def _3f_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = THREE_F_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, THREE_F_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + THREE_F_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
+def _8a_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = EIGHT_A_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, EIGHT_A_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + EIGHT_A_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
+def _7c_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = SEVEN_C_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, SEVEN_C_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + SEVEN_C_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
+def _3e_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = THREE_E_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, THREE_E_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + THREE_E_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
+def _6c_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    structural_move_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    _ = structural_move_pct
+    px = float(fill or 0)
+    floor_pct = SIX_C_STOP_FLOOR_PCT / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor_pct
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, FIVE_B_LOOKBACK_BARS, SIX_C_STOP_FLOOR_PCT
+    )
+    tgt_px = px * (1.0 + SIX_C_TARGET_FRAC)
+    return stop_px, tgt_px, stop_frac
+
+
 def _1a_style_for(handle: str) -> str:
     if handle == "trip":
         return ONE_A_EXIT_TRIP
@@ -1442,6 +3473,25 @@ def _5b_lot_exit(lot: dict[str, Any]) -> bool:
         TWO_C_EXIT_STYLE,
         THREE_A_EXIT_STYLE,
         TWO_D_EXIT_STYLE,
+        FOUR_A_EXIT_STYLE,
+        THREE_B_EXIT_STYLE,
+        FIVE_A_EXIT_STYLE,
+        SEVEN_A_EXIT_STYLE,
+        THREE_C_EXIT_STYLE,
+        FOUR_D_EXIT_STYLE,
+        FOUR_B_EXIT_STYLE,
+        SIX_A_EXIT_STYLE,
+        FOUR_C_EXIT_STYLE,
+        FOUR_E_EXIT_STYLE,
+        SIX_B_EXIT_STYLE,
+        THREE_D_EXIT_STYLE,
+        SEVEN_B_EXIT_STYLE,
+        THREE_G_EXIT_STYLE,
+        THREE_F_EXIT_STYLE,
+        EIGHT_A_EXIT_STYLE,
+        SEVEN_C_EXIT_STYLE,
+        THREE_E_EXIT_STYLE,
+        SIX_C_EXIT_STYLE,
         PH_EXIT_STYLE,
         PH_5M_EXIT_STYLE,
         *ONE_A_EXIT_STYLES,
@@ -1455,6 +3505,25 @@ def _5b_lot_exit(lot: dict[str, Any]) -> bool:
         or _is_2b_1m(strat, tf)
         or _is_2c_1m(strat, tf)
         or _is_3a_1m(strat, tf)
+        or _is_4a_1m(strat, tf)
+        or _is_3b_1m(strat, tf)
+        or _is_5a_1m(strat, tf)
+        or _is_7a_1m(strat, tf)
+        or _is_3c_1m(strat, tf)
+        or _is_4d_1m(strat, tf)
+        or _is_4b_1m(strat, tf)
+        or _is_6a_1m(strat, tf)
+        or _is_4c_1m(strat, tf)
+        or _is_4e_1m(strat, tf)
+        or _is_6b_1m(strat, tf)
+        or _is_3d_1m(strat, tf)
+        or _is_7b_1m(strat, tf)
+        or _is_3g_1m(strat, tf)
+        or _is_3f_1m(strat, tf)
+        or _is_8a_1m(strat, tf)
+        or _is_7c_1m(strat, tf)
+        or _is_3e_1m(strat, tf)
+        or _is_6c_1m(strat, tf)
         or _is_1a_1m(strat, tf)
         or _is_2d_1m(strat, tf)
     )
@@ -1774,6 +3843,253 @@ def _try_queue_child_entry(
                 stamped["exit_stop_px"] = stop_px
                 stamped["exit_tgt_px"] = tgt_px
                 _2d_mark_shot(session_state, ticker)
+            elif _is_4a_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _4a_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = FOUR_A_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = FOUR_A_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _4a_mark_used(session_state, ticker)
+            elif _is_3b_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _3b_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = THREE_B_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = THREE_B_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _3b_mark_used(session_state, ticker)
+            elif _is_5a_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _5a_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = FIVE_A_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = FIVE_A_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5a_mark_used(session_state, ticker)
+            elif _is_7a_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _7a_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = SEVEN_A_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = SEVEN_A_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _7a_mark_used(session_state, ticker)
+            elif _is_3c_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _3c_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = THREE_C_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = THREE_C_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _3c_mark_used(session_state, ticker)
+            elif _is_4d_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _4d_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = FOUR_D_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = FOUR_D_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _4d_mark_used(session_state, ticker)
+            elif _is_4b_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _4b_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = FOUR_B_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = FOUR_B_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _4b_mark_used(session_state, ticker)
+            elif _is_6a_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _6a_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = SIX_A_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = SIX_A_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _6a_mark_used(session_state, ticker)
+            elif _is_4c_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _4c_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = FOUR_C_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = FOUR_C_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _4c_mark_used(session_state, ticker)
+            elif _is_4e_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _4e_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = FOUR_E_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = FOUR_E_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _4e_mark_used(session_state, ticker)
+            elif _is_6b_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _6b_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = SIX_B_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = SIX_B_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _6b_mark_used(session_state, ticker)
+            elif _is_3d_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _3d_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = THREE_D_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = THREE_D_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _3d_mark_used(session_state, ticker)
+            elif _is_7b_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _7b_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = SEVEN_B_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = SEVEN_B_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _7b_mark_used(session_state, ticker)
+            elif _is_3g_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _3g_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = THREE_G_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = THREE_G_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _3g_mark_used(session_state, ticker)
+            elif _is_3f_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _3f_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = THREE_F_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = THREE_F_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _3f_mark_used(session_state, ticker)
+            elif _is_8a_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _8a_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = EIGHT_A_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = EIGHT_A_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _8a_mark_used(session_state, ticker)
+            elif _is_7c_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _7c_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = SEVEN_C_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = SEVEN_C_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _7c_mark_used(session_state, ticker)
+            elif _is_3e_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _3e_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = THREE_E_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = THREE_E_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _3e_mark_used(session_state, ticker)
+            elif _is_6c_1m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _6c_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = SIX_C_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = SIX_C_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _6c_mark_used(session_state, ticker)
             else:
                 stop_px, tgt_px, stop_frac = _ph_pack_exits(
                     slices, last_px, structural, tf
@@ -1792,6 +4108,8 @@ def _try_queue_child_entry(
                 stamped["exit_stop_px"] = stop_px
                 stamped["exit_tgt_px"] = tgt_px
                 _ph_mark_used(session_state, ticker, strategy)
+            if room3_recipes.normalize_tf(tf) == "1m":
+                _1m_mark_name_shot(session_state, ticker)
         line["nearest_strategy"] = strategy
         line["patience"] = False
         line.pop("patience_note", None)
@@ -1859,6 +4177,44 @@ def _5b_should_exit(
             tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + THREE_A_TARGET_FRAC))
         elif style == TWO_D_EXIT_STYLE:
             tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + TWO_D_TARGET_FRAC))
+        elif style == FOUR_A_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + FOUR_A_TARGET_FRAC))
+        elif style == THREE_B_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + THREE_B_TARGET_FRAC))
+        elif style == FIVE_A_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + FIVE_A_TARGET_FRAC))
+        elif style == SEVEN_A_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + SEVEN_A_TARGET_FRAC))
+        elif style == THREE_C_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + THREE_C_TARGET_FRAC))
+        elif style == FOUR_D_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + FOUR_D_TARGET_FRAC))
+        elif style == FOUR_B_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + FOUR_B_TARGET_FRAC))
+        elif style == SIX_A_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + SIX_A_TARGET_FRAC))
+        elif style == FOUR_C_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + FOUR_C_TARGET_FRAC))
+        elif style == FOUR_E_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + FOUR_E_TARGET_FRAC))
+        elif style == SIX_B_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + SIX_B_TARGET_FRAC))
+        elif style == THREE_D_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + THREE_D_TARGET_FRAC))
+        elif style == SEVEN_B_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + SEVEN_B_TARGET_FRAC))
+        elif style == THREE_G_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + THREE_G_TARGET_FRAC))
+        elif style == THREE_F_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + THREE_F_TARGET_FRAC))
+        elif style == EIGHT_A_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + EIGHT_A_TARGET_FRAC))
+        elif style == SEVEN_C_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + SEVEN_C_TARGET_FRAC))
+        elif style == THREE_E_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + THREE_E_TARGET_FRAC))
+        elif style == SIX_C_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + SIX_C_TARGET_FRAC))
         elif style == ONE_A_EXIT_MILD:
             tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + ONE_A_MILD_TARGET_FRAC))
         elif style == ONE_A_EXIT_VIOLENT:
@@ -2164,13 +4520,428 @@ def _2d_entry_ready(
         return False, "2D · skip 9:30–9:45"
     if _2d_used_today(session_state, ticker):
         return False, "2D · done for the day"
-    shots = _2d_shots_today(session_state, ticker)
-    if shots >= 2:
-        return False, "2D · two shots already used"
-    if shots >= 1 and (cool is None or now < cool):
+    if _2d_shots_today(session_state, ticker) >= 1:
         return False, "2D · first of day already used"
     _ = slices
     return _1m_live_fill_now(line, "2D")
+
+
+def _4a_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _4a_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"4A · cool {mins}m after stop"
+    if _4a_open_chop(session_state):
+        return False, "4A · skip 9:30–9:45"
+    if _4a_used_today(session_state, ticker):
+        return False, "4A · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "4A")
+
+
+def _3b_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _3b_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"3B · cool {mins}m after stop"
+    if _3b_open_chop(session_state):
+        return False, "3B · skip 9:30–10:00"
+    if _3b_used_today(session_state, ticker):
+        return False, "3B · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "3B")
+
+
+def _5a_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _5a_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"5A · cool {mins}m after stop"
+    if _5a_open_chop(session_state):
+        return False, "5A · skip 9:30–9:45"
+    if _5a_used_today(session_state, ticker):
+        return False, "5A · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "5A")
+
+
+def _7a_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _7a_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"7A · cool {mins}m after stop"
+    if _7a_open_chop(session_state):
+        return False, "7A · skip 9:30–9:45"
+    if _7a_used_today(session_state, ticker):
+        return False, "7A · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "7A")
+
+
+def _3c_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _3c_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"3C · cool {mins}m after stop"
+    if _3c_open_chop(session_state):
+        return False, "3C · skip 9:30–9:45"
+    if _3c_used_today(session_state, ticker):
+        return False, "3C · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "3C")
+
+
+def _4d_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _4d_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"4D · cool {mins}m after stop"
+    if _4d_open_chop(session_state):
+        return False, "4D · skip 9:30–9:45"
+    if _4d_used_today(session_state, ticker):
+        return False, "4D · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "4D")
+
+
+def _4b_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _4b_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"4B · cool {mins}m after stop"
+    if _4b_open_chop(session_state):
+        return False, "4B · skip 9:30–10:00"
+    if _4b_used_today(session_state, ticker):
+        return False, "4B · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "4B")
+
+
+def _6a_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _6a_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"6A · cool {mins}m after stop"
+    if _6a_open_chop(session_state):
+        return False, "6A · skip 9:30–9:45"
+    if _6a_used_today(session_state, ticker):
+        return False, "6A · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "6A")
+
+
+def _4c_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _4c_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"4C · cool {mins}m after stop"
+    if _4c_open_chop(session_state):
+        return False, "4C · skip 9:30–9:45"
+    if _4c_used_today(session_state, ticker):
+        return False, "4C · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "4C")
+
+
+def _4e_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _4e_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"4E · cool {mins}m after stop"
+    if _4e_open_chop(session_state):
+        return False, "4E · skip 9:30–9:45"
+    if _4e_used_today(session_state, ticker):
+        return False, "4E · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "4E")
+
+
+def _6b_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _6b_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"6B · cool {mins}m after stop"
+    if _6b_open_chop(session_state):
+        return False, "6B · skip 9:30–9:45"
+    if _6b_used_today(session_state, ticker):
+        return False, "6B · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "6B")
+
+
+def _3d_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _3d_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"3D · cool {mins}m after stop"
+    if _3d_open_chop(session_state):
+        return False, "3D · skip 9:30–9:45"
+    if _3d_used_today(session_state, ticker):
+        return False, "3D · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "3D")
+
+
+def _7b_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _7b_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"7B · cool {mins}m after stop"
+    if _7b_open_chop(session_state):
+        return False, "7B · skip 9:30–9:45"
+    if _7b_used_today(session_state, ticker):
+        return False, "7B · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "7B")
+
+
+def _3g_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _3g_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"3G · cool {mins}m after stop"
+    if _3g_open_chop(session_state):
+        return False, "3G · skip 9:30–9:45"
+    if _3g_used_today(session_state, ticker):
+        return False, "3G · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "3G")
+
+
+def _3f_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _3f_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"3F · cool {mins}m after stop"
+    if _3f_open_chop(session_state):
+        return False, "3F · skip 9:30–10:00"
+    if _3f_used_today(session_state, ticker):
+        return False, "3F · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "3F")
+
+
+def _8a_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _8a_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"8A · cool {mins}m after stop"
+    if _8a_open_chop(session_state):
+        return False, "8A · skip 9:30–10:00"
+    if _8a_used_today(session_state, ticker):
+        return False, "8A · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "8A")
+
+
+def _7c_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _7c_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"7C · cool {mins}m after stop"
+    if _7c_open_chop(session_state):
+        return False, "7C · skip 9:30–10:00"
+    if _7c_used_today(session_state, ticker):
+        return False, "7C · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "7C")
+
+
+def _3e_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _3e_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"3E · cool {mins}m after stop"
+    if _3e_open_chop(session_state):
+        return False, "3E · skip 9:30–10:00"
+    if _3e_used_today(session_state, ticker):
+        return False, "3E · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "3E")
+
+
+def _6c_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _6c_cool_until(session_state, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"6C · cool {mins}m after stop"
+    if _6c_open_chop(session_state):
+        return False, "6C · skip 9:30–10:00"
+    if _6c_used_today(session_state, ticker):
+        return False, "6C · first of day already used"
+    _ = slices
+    _ = last_px
+    return _1m_live_fill_now(line, "6C")
 
 
 def _1a_entry_ready(
@@ -2210,7 +4981,7 @@ def _ph_entry_ready(
     structural: float,
     session_state: Any = None,
 ) -> tuple[bool, str]:
-    """Shared Handle for letters that are not 5B / 2A / 1A / 2D / 2B / 2C / 3A. Detect is still ≥85% same TF."""
+    """Shared Handle for letters that are not 5B / 2A / 1A / 2D / 2B / 2C / 3A / 4A / 3B / 5A / 7A / 3C / 4D / 4B / 6A / 4C. Detect is still ≥85% same TF."""
     ticker = str(line.get("ticker") or "").upper()
     tf_n = room3_recipes.normalize_tf(tf)
     cool = _ph_cool_until(session_state, ticker, strategy)
@@ -2292,6 +5063,10 @@ def _entry_trigger_ready(
         return False, "late · skipped · wait next pattern"
     if last_px <= 0:
         return False, "no last print"
+    if room3_recipes.normalize_tf(tf) == "1m" and _1m_name_shots_blocked(
+        session_state, str(line.get("ticker") or "")
+    ):
+        return False, "1m · max 3 shots this name today"
     if _is_5b_1m(strategy, tf):
         return _5b_entry_ready(line, slices, last_px=last_px, session_state=session_state)
     if _is_2a_1m(strategy, tf):
@@ -2306,6 +5081,44 @@ def _entry_trigger_ready(
         return _1a_entry_ready(line, slices, last_px=last_px, session_state=session_state)
     if _is_2d_1m(strategy, tf):
         return _2d_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_4a_1m(strategy, tf):
+        return _4a_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_3b_1m(strategy, tf):
+        return _3b_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_5a_1m(strategy, tf):
+        return _5a_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_7a_1m(strategy, tf):
+        return _7a_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_3c_1m(strategy, tf):
+        return _3c_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_4d_1m(strategy, tf):
+        return _4d_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_4b_1m(strategy, tf):
+        return _4b_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_6a_1m(strategy, tf):
+        return _6a_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_4c_1m(strategy, tf):
+        return _4c_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_4e_1m(strategy, tf):
+        return _4e_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_6b_1m(strategy, tf):
+        return _6b_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_3d_1m(strategy, tf):
+        return _3d_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_7b_1m(strategy, tf):
+        return _7b_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_3g_1m(strategy, tf):
+        return _3g_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_3f_1m(strategy, tf):
+        return _3f_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_8a_1m(strategy, tf):
+        return _8a_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_7c_1m(strategy, tf):
+        return _7c_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_3e_1m(strategy, tf):
+        return _3e_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_6c_1m(strategy, tf):
+        return _6c_entry_ready(line, slices, last_px=last_px, session_state=session_state)
     return _ph_entry_ready(
         line,
         slices,

@@ -126,15 +126,15 @@ def test_3a_first_of_day_blocks():
     assert "first of day" in note
 
 
-def test_3a_stop_floor_35_target_9():
+def test_3a_stop_floor_35_target_10():
     slices, px = _3a_slices()
     stop_px, tgt_px, stop_frac = m._3a_pack_exits(slices, px)
-    assert abs(tgt_px - 1.09) < 1e-6
+    assert abs(tgt_px - 1.10) < 1e-6
     assert abs(stop_frac - 0.035) < 1e-6
     assert abs(stop_px - px * 0.965) < 1e-6
 
 
-def test_3a_pack_target_9pct():
+def test_3a_pack_target_10pct():
     lot = {
         "strategy": "3A (1M)",
         "tf": "1m",
@@ -142,7 +142,7 @@ def test_3a_pack_target_9pct():
         "exit_style": m.THREE_A_EXIT_STYLE,
         "entry_px": 1.00,
         "exit_stop_px": 0.965,
-        "exit_tgt_px": 1.09,
+        "exit_tgt_px": 1.10,
         "entry_ts": "2026-09-11T11:00:00-04:00",
     }
     ss = _SS(_now_et=datetime(2026, 9, 11, 11, 20, tzinfo=ET))
@@ -158,9 +158,9 @@ def test_3a_pack_target_9pct():
     why = m._lot_should_exit(
         lot,
         cur_match=90,
-        last_px=1.09,
+        last_px=1.11,
         patience=True,
-        bar={"h": 1.09, "l": 1.05, "c": 1.09},
+        bar={"h": 1.11, "l": 1.05, "c": 1.11},
         session_state=ss,
     )
     assert why.startswith("target")
@@ -180,11 +180,11 @@ def test_append_lot_stamps_3a_pack_exit():
             "structural_move_pct": 21.0,
             "exit_style": m.THREE_A_EXIT_STYLE,
             "exit_stop_px": 0.965,
-            "exit_tgt_px": 1.09,
+            "exit_tgt_px": 1.10,
         },
     )
     assert row["exit_style"] == m.THREE_A_EXIT_STYLE
-    assert abs(row["exit_tgt_px"] - 1.09) < 1e-6
+    assert abs(row["exit_tgt_px"] - 1.10) < 1e-6
     assert ss.room3_3a_used_day["FAMI"]
 
 

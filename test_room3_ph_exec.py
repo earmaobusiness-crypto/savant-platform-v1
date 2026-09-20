@@ -31,8 +31,8 @@ def test_1m_placeholder_no_rvol_gate():
         quiet,
         last_px=1.001,
         tf="1m",
-        strategy="3B (1M)",
-        layout_id="3",
+        strategy="9A (1M)",
+        layout_id="6",
         structural=8.0,
         session_state=ss,
     )

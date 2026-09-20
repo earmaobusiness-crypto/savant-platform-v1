@@ -387,6 +387,25 @@ class lots:
         is_1a = token.startswith("1A") and "1M" in token and (not tf or tf == "1m")
         is_2d = token.startswith("2D") and "1M" in token and (not tf or tf == "1m")
         is_3a = token.startswith("3A") and "1M" in token and (not tf or tf == "1m")
+        is_4a = token.startswith("4A") and "1M" in token and (not tf or tf == "1m")
+        is_3b = token.startswith("3B") and "1M" in token and (not tf or tf == "1m")
+        is_5a = token.startswith("5A") and "1M" in token and (not tf or tf == "1m")
+        is_7a = token.startswith("7A") and "1M" in token and (not tf or tf == "1m")
+        is_3c = token.startswith("3C") and "1M" in token and (not tf or tf == "1m")
+        is_4d = token.startswith("4D") and "1M" in token and (not tf or tf == "1m")
+        is_4b = token.startswith("4B") and "1M" in token and (not tf or tf == "1m")
+        is_6a = token.startswith("6A") and "1M" in token and (not tf or tf == "1m")
+        is_4c = token.startswith("4C") and "1M" in token and (not tf or tf == "1m")
+        is_4e = token.startswith("4E") and "1M" in token and (not tf or tf == "1m")
+        is_6b = token.startswith("6B") and "1M" in token and (not tf or tf == "1m")
+        is_3d = token.startswith("3D") and "1M" in token and (not tf or tf == "1m")
+        is_7b = token.startswith("7B") and "1M" in token and (not tf or tf == "1m")
+        is_3g = token.startswith("3G") and "1M" in token and (not tf or tf == "1m")
+        is_3f = token.startswith("3F") and "1M" in token and (not tf or tf == "1m")
+        is_8a = token.startswith("8A") and "1M" in token and (not tf or tf == "1m")
+        is_7c = token.startswith("7C") and "1M" in token and (not tf or tf == "1m")
+        is_3e = token.startswith("3E") and "1M" in token and (not tf or tf == "1m")
+        is_6c = token.startswith("6C") and "1M" in token and (not tf or tf == "1m")
         pack_style = (
             style
             in (
@@ -402,6 +421,25 @@ class lots:
                 "1a_mild",
                 "1a_violent",
                 "1a_trip",
+                "4a_pack",
+                "3b_pack",
+                "5a_pack",
+                "7a_pack",
+                "3c_pack",
+                "4d_pack",
+                "4b_pack",
+                "6a_pack",
+                "4c_pack",
+                "4e_pack",
+                "6b_pack",
+                "3d_pack",
+                "7b_pack",
+                "3g_pack",
+                "3f_pack",
+                "8a_pack",
+                "7c_pack",
+                "3e_pack",
+                "6c_pack",
             )
             or is_5b
             or is_2a
@@ -410,13 +448,32 @@ class lots:
             or is_1a
             or is_2d
             or is_3a
+            or is_4a
+            or is_3b
+            or is_5a
+            or is_7a
+            or is_3c
+            or is_4d
+            or is_4b
+            or is_6a
+            or is_4c
+            or is_4e
+            or is_6b
+            or is_3d
+            or is_7b
+            or is_3g
+            or is_3f
+            or is_8a
+            or is_7c
+            or is_3e
+            or is_6c
         )
         if frac is not None or pack_style:
             try:
                 frac_f = float(frac if frac is not None else 0.02)
             except (TypeError, ValueError):
                 frac_f = 0.02
-            frac_f = max(frac_f, 0.035 if is_3a else 0.02)
+            frac_f = max(frac_f, 0.035 if (is_3a or is_3b or is_7a or is_3c or is_6a or is_6b or is_3d or is_7b or is_3g or is_3f or is_8a or is_7c or is_3e or is_6c) else 0.02)
             one_m = (not tf or tf == "1m") and (
                 pack_style
                 or is_5b
@@ -426,30 +483,82 @@ class lots:
                 or is_1a
                 or is_2d
                 or is_3a
+                or is_4a
+                or is_3b
+                or is_5a
+                or is_7a
+                or is_3c
+                or is_4d
+                or is_4b
+                or is_6a
+                or is_4c
+                or is_4e
+                or is_6b
+                or is_3d
+                or is_7b
+                or is_3g
+                or is_3f
+                or is_8a
+                or is_7c
+                or is_3e
+                or is_6c
             )
             if one_m:
                 frac_f = min(frac_f, 0.035)
-            row["exit_style"] = style or (
-                "3a_pack"
-                if is_3a
-                else (
-                "2d_pack"
-                if is_2d
-                else (
-                    "2c_pack"
-                    if is_2c
-                    else (
-                        "2b_pack"
-                        if is_2b
-                        else (
-                            "2a_pack_half"
-                            if is_2a
-                            else ("1a_violent" if is_1a else "5b_pack_half")
-                        )
-                    )
-                )
-                )
-            )
+            if style:
+                row["exit_style"] = style
+            elif is_7a:
+                row["exit_style"] = "7a_pack"
+            elif is_3c:
+                row["exit_style"] = "3c_pack"
+            elif is_4d:
+                row["exit_style"] = "4d_pack"
+            elif is_4b:
+                row["exit_style"] = "4b_pack"
+            elif is_6a:
+                row["exit_style"] = "6a_pack"
+            elif is_4c:
+                row["exit_style"] = "4c_pack"
+            elif is_4e:
+                row["exit_style"] = "4e_pack"
+            elif is_6b:
+                row["exit_style"] = "6b_pack"
+            elif is_3d:
+                row["exit_style"] = "3d_pack"
+            elif is_7b:
+                row["exit_style"] = "7b_pack"
+            elif is_3g:
+                row["exit_style"] = "3g_pack"
+            elif is_3f:
+                row["exit_style"] = "3f_pack"
+            elif is_8a:
+                row["exit_style"] = "8a_pack"
+            elif is_7c:
+                row["exit_style"] = "7c_pack"
+            elif is_3e:
+                row["exit_style"] = "3e_pack"
+            elif is_6c:
+                row["exit_style"] = "6c_pack"
+            elif is_4a:
+                row["exit_style"] = "4a_pack"
+            elif is_3b:
+                row["exit_style"] = "3b_pack"
+            elif is_5a:
+                row["exit_style"] = "5a_pack"
+            elif is_3a:
+                row["exit_style"] = "3a_pack"
+            elif is_2d:
+                row["exit_style"] = "2d_pack"
+            elif is_2c:
+                row["exit_style"] = "2c_pack"
+            elif is_2b:
+                row["exit_style"] = "2b_pack"
+            elif is_2a:
+                row["exit_style"] = "2a_pack_half"
+            elif is_1a:
+                row["exit_style"] = "1a_violent"
+            else:
+                row["exit_style"] = "5b_pack_half"
             row["exit_r_frac"] = frac_f
             stop_px = payload.get("exit_stop_px")
             tgt_px = payload.get("exit_tgt_px")
@@ -483,11 +592,49 @@ class lots:
                 elif is_2d:
                     row["exit_tgt_px"] = fill * (1.0 + 0.065)
                 elif is_3a:
-                    row["exit_tgt_px"] = fill * (1.0 + 0.09)
+                    row["exit_tgt_px"] = fill * (1.0 + 0.10)
                 elif is_2b:
                     row["exit_tgt_px"] = fill * (1.0 + 0.06)
                 elif is_2c:
                     row["exit_tgt_px"] = fill * (1.0 + 0.10)
+                elif is_4a:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.06)
+                elif is_3b:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.16)
+                elif is_5a:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.10)
+                elif is_7a:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.08)
+                elif is_3c:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.16)
+                elif is_4d:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.08)
+                elif is_4b:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.16)
+                elif is_6a:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.16)
+                elif is_4c:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.06)
+                elif is_4e:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.085)
+                elif is_6b:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.155)
+                elif is_3d:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.14)
+                elif is_7b:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.125)
+                elif is_3g:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.10)
+                elif is_3f:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.125)
+                elif is_8a:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.125)
+                elif is_7c:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.18)
+                elif is_3e:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.17)
+                elif is_6c:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.14)
                 else:
                     struct = abs(float(row.get("structural_move_pct") or 0))
                     share = (
@@ -543,6 +690,158 @@ class lots:
                     bag = dict(session_state.get("room3_3a_used_day") or {})
                     bag[ticker] = day
                     session_state.room3_3a_used_day = bag
+                except Exception:
+                    pass
+            if is_4a:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_4a_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_4a_used_day = bag
+                except Exception:
+                    pass
+            if is_3b:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_3b_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_3b_used_day = bag
+                except Exception:
+                    pass
+            if is_5a:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_5a_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_5a_used_day = bag
+                except Exception:
+                    pass
+            if is_7a:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_7a_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_7a_used_day = bag
+                except Exception:
+                    pass
+            if is_3c:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_3c_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_3c_used_day = bag
+                except Exception:
+                    pass
+            if is_4d:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_4d_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_4d_used_day = bag
+                except Exception:
+                    pass
+            if is_4b:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_4b_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_4b_used_day = bag
+                except Exception:
+                    pass
+            if is_6a:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_6a_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_6a_used_day = bag
+                except Exception:
+                    pass
+            if is_4c:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_4c_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_4c_used_day = bag
+                except Exception:
+                    pass
+            if is_4e:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_4e_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_4e_used_day = bag
+                except Exception:
+                    pass
+            if is_6b:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_6b_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_6b_used_day = bag
+                except Exception:
+                    pass
+            if is_3d:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_3d_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_3d_used_day = bag
+                except Exception:
+                    pass
+            if is_7b:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_7b_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_7b_used_day = bag
+                except Exception:
+                    pass
+            if is_3g:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_3g_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_3g_used_day = bag
+                except Exception:
+                    pass
+            if is_3f:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_3f_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_3f_used_day = bag
+                except Exception:
+                    pass
+            if is_8a:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_8a_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_8a_used_day = bag
+                except Exception:
+                    pass
+            if is_7c:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_7c_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_7c_used_day = bag
+                except Exception:
+                    pass
+            if is_3e:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_3e_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_3e_used_day = bag
+                except Exception:
+                    pass
+            if is_6c:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_6c_used_day") or {})
+                    bag[ticker] = day
+                    session_state.room3_6c_used_day = bag
                 except Exception:
                     pass
             if is_1a:

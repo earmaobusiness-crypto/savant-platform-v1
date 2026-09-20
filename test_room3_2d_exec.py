@@ -92,15 +92,15 @@ def test_2d_fills_now_when_hunt_ok():
     assert "enter now" in note
 
 
-def test_2d_second_shot_after_stop_cool():
+def test_2d_no_second_after_stop():
     now = datetime(2026, 9, 11, 12, 0, tzinfo=ET)
     ss = _SS(_now_et=now)
     m._2d_mark_shot(ss, "SPWR")
     ss.room3_2d_cool_until = {"SPWR": (now - timedelta(seconds=30)).isoformat()}
     slices, px = _hot_slices()
     ready, note = _ready(ss, slices, px)
-    assert ready is True
-    assert "enter now" in note
+    assert ready is False
+    assert "first" in note or "done" in note
 
 
 def test_2d_no_second_after_target():

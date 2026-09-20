@@ -387,7 +387,7 @@ def handle_execution_for(
     _ = layout_id
     tf = normalize_tf(timeframe)
     head = _letter_head(strategy)
-    specialized_1m = frozenset({"5B", "2A", "1A", "2D", "2B", "2C", "3A"})
+    specialized_1m = frozenset({"5B", "2A", "1A", "2D", "2B", "2C", "3A", "4A", "3B", "5A", "7A", "3C", "4D", "4B", "6A", "4C", "4E", "6B", "3D", "7B", "3G", "3F", "8A", "7C", "3E", "6C"})
     base: dict[str, Any] = {
         "tf": tf,
         "letter": str(strategy or "").strip() or head,
@@ -408,7 +408,7 @@ def handle_execution_for(
                 "skip_until": "09:45",
             }
         )
-        if head in ("2A", "2C", "3A", "1A"):
+        if head in ("2A", "2C", "3A", "1A", "3B", "4B", "3F", "8A", "7C", "3E", "6C"):
             base["skip_until"] = "10:00"
         if head == "5B":
             base["target_pct"] = 16.5
@@ -418,21 +418,72 @@ def handle_execution_for(
             base["target_pct"] = "trip_12_trail_12 / violent_12 / mild_8"
         elif head == "2D":
             base["target_pct"] = 6.5
-            base["second_shot_after_stop"] = True
         elif head == "2B":
             base["target_pct"] = 6.0
         elif head == "2C":
             base["target_pct"] = 10.0
         elif head == "3A":
-            base["target_pct"] = 9.0
+            base["target_pct"] = 10.0
             base["stop_floor_pct"] = 3.5
             base["no_new_after"] = "12:00"
+        elif head == "4A":
+            base["target_pct"] = 6.0
+        elif head == "3B":
+            base["target_pct"] = 16.0
+            base["stop_floor_pct"] = 3.5
+        elif head == "5A":
+            base["target_pct"] = 10.0
+        elif head == "7A":
+            base["target_pct"] = 8.0
+            base["stop_floor_pct"] = 3.5
+        elif head == "3C":
+            base["target_pct"] = 16.0
+            base["stop_floor_pct"] = 3.5
+        elif head == "4D":
+            base["target_pct"] = 8.0
+        elif head == "4B":
+            base["target_pct"] = 16.0
+        elif head == "6A":
+            base["target_pct"] = 16.0
+            base["stop_floor_pct"] = 3.5
+        elif head == "4C":
+            base["target_pct"] = 6.0
+        elif head == "4E":
+            base["target_pct"] = 8.5
+        elif head == "6B":
+            base["target_pct"] = 15.5
+            base["stop_floor_pct"] = 3.5
+        elif head == "3D":
+            base["target_pct"] = 14.0
+            base["stop_floor_pct"] = 3.5
+        elif head == "7B":
+            base["target_pct"] = 12.5
+            base["stop_floor_pct"] = 3.5
+        elif head == "3G":
+            base["target_pct"] = 10.0
+            base["stop_floor_pct"] = 3.5
+        elif head == "3F":
+            base["target_pct"] = 12.5
+            base["stop_floor_pct"] = 3.5
+        elif head == "8A":
+            base["target_pct"] = 12.5
+            base["stop_floor_pct"] = 3.5
+        elif head == "7C":
+            base["target_pct"] = 18.0
+            base["stop_floor_pct"] = 3.5
+        elif head == "3E":
+            base["target_pct"] = 17.0
+            base["stop_floor_pct"] = 3.5
+        elif head == "6C":
+            base["target_pct"] = 14.0
+            base["stop_floor_pct"] = 3.5
         else:
             move = abs(float(structural_move_pct or 0))
             base["target_pct"] = round(move * 0.5, 4) if move > 0 else 0.0
             base["specialized"] = False
         if head in specialized_1m:
             base["specialized"] = True
+        base["name_shots_max"] = 3
         return base
     dip = 0.006 if tf == "5m" else 0.008
     if tf == "5m":
