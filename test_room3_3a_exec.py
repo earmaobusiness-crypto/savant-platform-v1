@@ -51,8 +51,8 @@ def test_3a_waits_on_wallpaper():
         structural=21.0,
         session_state=ss,
     )
-    assert ready is True
-    assert "enter now" in note
+    assert ready is False
+    assert "suited" in note or "wait" in note
 
 
 def test_3a_skips_until_10():

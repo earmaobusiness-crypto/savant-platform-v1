@@ -54,8 +54,8 @@ def test_2c_waits_on_wallpaper():
         structural=16.0,
         session_state=ss,
     )
-    assert ready is True
-    assert "enter now" in note
+    assert ready is False
+    assert "suited" in note or "wait" in note
 
 
 def test_2c_skips_until_10():

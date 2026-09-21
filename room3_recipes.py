@@ -291,6 +291,8 @@ def order_style_for(
     tf = normalize_tf(timeframe)
     if tf == "1m":
         return "market"
+    if tf == "5m" and _letter_head(strategy) in {"1A", "1B", "5A"}:
+        return "market"
     blob = f"{strategy} {layout_id}".lower()
     patient = (
         "vwap",
@@ -382,12 +384,14 @@ def handle_execution_for(
 ) -> dict[str, Any]:
     """
     Live Handle stamped onto a vault layout bucket. DNA vector is unchanged.
-    1m fill-now (2026-09-17). 5m/15m placeholder still dip-hold.
+    1m fill-now after Hunt extra (2026-09-20). 5m 1A/1B/5A fill-now after Hunt extra.
+    Other 5m/15m placeholder still dip-hold.
     """
     _ = layout_id
     tf = normalize_tf(timeframe)
     head = _letter_head(strategy)
     specialized_1m = frozenset({"5B", "2A", "1A", "2D", "2B", "2C", "3A", "4A", "3B", "5A", "7A", "3C", "4D", "4B", "6A", "4C", "4E", "6B", "3D", "7B", "3G", "3F", "8A", "7C", "3E", "6C"})
+    specialized_5m = frozenset({"1A", "1B", "5A"})
     base: dict[str, Any] = {
         "tf": tf,
         "letter": str(strategy or "").strip() or head,
@@ -484,6 +488,29 @@ def handle_execution_for(
         if head in specialized_1m:
             base["specialized"] = True
         base["name_shots_max"] = 3
+        return base
+    if tf == "5m" and head in specialized_5m:
+        base.update(
+            {
+                "entry": "fill_now",
+                "order_style_rth": "market",
+                "order_style_outside_rth": "limit",
+                "specialized": True,
+                "lookback_bars": 3,
+            }
+        )
+        if head == "1A":
+            base["skip_until"] = "09:45"
+            base["target_pct"] = 16.0
+            base["stop_floor_pct"] = 2.0
+        elif head == "1B":
+            base["skip_until"] = "09:45"
+            base["target_pct"] = 8.0
+            base["stop_floor_pct"] = 3.5
+        else:
+            base["skip_until"] = "10:00"
+            base["target_pct"] = 6.5
+            base["stop_floor_pct"] = 3.5
         return base
     dip = 0.006 if tf == "5m" else 0.008
     if tf == "5m":

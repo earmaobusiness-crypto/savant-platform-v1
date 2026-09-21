@@ -50,8 +50,8 @@ def test_2b_waits_on_wallpaper():
         structural=12.0,
         session_state=ss,
     )
-    assert ready is True
-    assert "enter now" in note
+    assert ready is False
+    assert "suited" in note or "wait" in note
 
 
 def test_2b_skips_open_chop():

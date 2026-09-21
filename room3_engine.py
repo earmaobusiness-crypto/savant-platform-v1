@@ -406,6 +406,9 @@ class lots:
         is_7c = token.startswith("7C") and "1M" in token and (not tf or tf == "1m")
         is_3e = token.startswith("3E") and "1M" in token and (not tf or tf == "1m")
         is_6c = token.startswith("6C") and "1M" in token and (not tf or tf == "1m")
+        is_1a_5m = token.startswith("1A") and "5M" in token and (not tf or tf == "5m")
+        is_1b_5m = token.startswith("1B") and "5M" in token and (not tf or tf == "5m")
+        is_5a_5m = token.startswith("5A") and "5M" in token and (not tf or tf == "5m")
         pack_style = (
             style
             in (
@@ -440,6 +443,9 @@ class lots:
                 "7c_pack",
                 "3e_pack",
                 "6c_pack",
+                "1a_5m_pack",
+                "1b_5m_pack",
+                "5a_5m_pack",
             )
             or is_5b
             or is_2a
@@ -467,14 +473,17 @@ class lots:
             or is_7c
             or is_3e
             or is_6c
+            or is_1a_5m
+            or is_1b_5m
+            or is_5a_5m
         )
         if frac is not None or pack_style:
             try:
                 frac_f = float(frac if frac is not None else 0.02)
             except (TypeError, ValueError):
                 frac_f = 0.02
-            frac_f = max(frac_f, 0.035 if (is_3a or is_3b or is_7a or is_3c or is_6a or is_6b or is_3d or is_7b or is_3g or is_3f or is_8a or is_7c or is_3e or is_6c) else 0.02)
-            one_m = (not tf or tf == "1m") and (
+            frac_f = max(frac_f, 0.035 if (is_3a or is_3b or is_7a or is_3c or is_6a or is_6b or is_3d or is_7b or is_3g or is_3f or is_8a or is_7c or is_3e or is_6c or is_1b_5m or is_5a_5m) else 0.02)
+            one_m = (not tf or tf == "1m") and not (is_1a_5m or is_1b_5m or is_5a_5m) and (
                 pack_style
                 or is_5b
                 or is_2a
@@ -539,6 +548,12 @@ class lots:
                 row["exit_style"] = "3e_pack"
             elif is_6c:
                 row["exit_style"] = "6c_pack"
+            elif is_1a_5m:
+                row["exit_style"] = "1a_5m_pack"
+            elif is_1b_5m:
+                row["exit_style"] = "1b_5m_pack"
+            elif is_5a_5m:
+                row["exit_style"] = "5a_5m_pack"
             elif is_4a:
                 row["exit_style"] = "4a_pack"
             elif is_3b:
@@ -635,6 +650,12 @@ class lots:
                     row["exit_tgt_px"] = fill * (1.0 + 0.17)
                 elif is_6c:
                     row["exit_tgt_px"] = fill * (1.0 + 0.14)
+                elif is_1a_5m:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.16)
+                elif is_1b_5m:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.08)
+                elif is_5a_5m:
+                    row["exit_tgt_px"] = fill * (1.0 + 0.065)
                 else:
                     struct = abs(float(row.get("structural_move_pct") or 0))
                     share = (
@@ -842,6 +863,15 @@ class lots:
                     bag = dict(session_state.get("room3_6c_used_day") or {})
                     bag[ticker] = day
                     session_state.room3_6c_used_day = bag
+                except Exception:
+                    pass
+            if is_1a_5m or is_1b_5m or is_5a_5m:
+                try:
+                    day = datetime.now(ET).strftime("%Y-%m-%d")
+                    bag = dict(session_state.get("room3_5m_spec_used_day") or {})
+                    letter5 = "1A" if is_1a_5m else ("1B" if is_1b_5m else "5A")
+                    bag[f"{letter5}|{ticker}"] = day
+                    session_state.room3_5m_spec_used_day = bag
                 except Exception:
                     pass
             if is_1a:

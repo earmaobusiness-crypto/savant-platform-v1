@@ -117,8 +117,8 @@ def test_5b_waits_small_dump():
         structural=33.0,
         session_state=ss,
     )
-    assert ready is True
-    assert "enter now" in note
+    assert ready is False
+    assert "dump" in note or "wait" in note
     ss = _SS(_now_et=datetime(2026, 9, 11, 9, 55, tzinfo=ET))
     knife = _bar(3.02, 3.06, 2.97, 2.99, v=200)
     ready, note = m._entry_trigger_ready(
@@ -131,8 +131,8 @@ def test_5b_waits_small_dump():
         structural=33.0,
         session_state=ss,
     )
-    assert ready is True
-    assert "enter now" in note
+    assert ready is False
+    assert "dump" in note or "wait" in note
 
 
 def test_5b_waits_without_rvol():
@@ -150,8 +150,8 @@ def test_5b_waits_without_rvol():
         structural=33.0,
         session_state=ss,
     )
-    assert ready is True
-    assert "enter now" in note
+    assert ready is False
+    assert "dump" in note or "wait" in note
 
 
 def test_5b_climax_enters_after_hold():

@@ -112,7 +112,7 @@ def _letter_token(letter: str) -> str:
 def gene_ok(letter: str, slices: list[dict[str, Any]]) -> bool:
     """Hunt extras as detect. Wallpaper does not fire."""
     if letter == "5B":
-        return bool(m._5b_climax_ok(slices) and m._5b_tape_rvol(slices) >= m.FIVE_B_RVOL_MIN)
+        return bool(m._5b_gene_ok(slices))
     if letter == "2A":
         return bool(m._2a_gene_ok(slices))
     if letter == "1A":

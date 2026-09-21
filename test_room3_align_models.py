@@ -140,6 +140,11 @@ def test_operator_clips_locked_2026_09_19():
     assert abs(m.SEVEN_C_TARGET_FRAC - 0.18) < 1e-9
     assert abs(m.THREE_E_TARGET_FRAC - 0.17) < 1e-9
     assert abs(m.SIX_C_TARGET_FRAC - 0.14) < 1e-9
+    assert abs(m.ONE_A_5M_TARGET_FRAC - 0.16) < 1e-9
+    assert abs(m.ONE_B_5M_TARGET_FRAC - 0.08) < 1e-9
+    assert abs(m.FIVE_A_5M_TARGET_FRAC - 0.065) < 1e-9
+    assert abs(m.ONE_B_5M_STOP_FLOOR_PCT - 3.5) < 1e-9
+    assert abs(m.FIVE_A_5M_STOP_FLOOR_PCT - 3.5) < 1e-9
     assert abs(m.SIX_B_STOP_FLOOR_PCT - 3.5) < 1e-9
     assert abs(m.THREE_D_STOP_FLOOR_PCT - 3.5) < 1e-9
     assert abs(m.SEVEN_B_STOP_FLOOR_PCT - 3.5) < 1e-9
@@ -255,3 +260,21 @@ def test_operator_clips_locked_2026_09_19():
     assert abs(float(c7["stop_floor_pct"]) - 3.5) < 1e-9
     assert int(d2["name_shots_max"]) == 3
     assert "trail_12" in str(a1["target_pct"])
+    a1_5 = r.handle_execution_for("1A (5M)", "5m")
+    b1_5 = r.handle_execution_for("1B (5M)", "5m")
+    a5_5 = r.handle_execution_for("5A (5M)", "5m")
+    assert a1_5["entry"] == "fill_now"
+    assert b1_5["entry"] == "fill_now"
+    assert a5_5["entry"] == "fill_now"
+    assert a1_5["specialized"] is True
+    assert b1_5["specialized"] is True
+    assert a5_5["specialized"] is True
+    assert a1_5["skip_until"] == "09:45"
+    assert b1_5["skip_until"] == "09:45"
+    assert a5_5["skip_until"] == "10:00"
+    assert abs(float(a1_5["target_pct"]) - 16.0) < 1e-9
+    assert abs(float(b1_5["target_pct"]) - 8.0) < 1e-9
+    assert abs(float(a5_5["target_pct"]) - 6.5) < 1e-9
+    assert abs(float(b1_5["stop_floor_pct"]) - 3.5) < 1e-9
+    assert abs(float(a5_5["stop_floor_pct"]) - 3.5) < 1e-9
+    assert r.order_style_for("1A (5M)", "5m") == "market"

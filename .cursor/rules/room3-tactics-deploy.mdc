@@ -1,0 +1,10 @@
+---
+description: Room 3 — push locked tactics when the operator moves on
+alwaysApply: true
+---
+
+# Tactics deploy (locked 2026-09-20)
+
+When the operator finishes a letter or a batch and says **moving on / next / send it / deploy**, **commit and push** that Handle to origin so Cloud can trade it the next session. Do not leave it local-only.
+
+Specialized letters trade **as locked**: Hunt extras block wallpaper; then fill now; skip / first-of-day / cool / stops / targets stay. That is the live book, not buy-every-85%.

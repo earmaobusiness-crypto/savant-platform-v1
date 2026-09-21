@@ -317,9 +317,38 @@ SIX_C_STOP_FLOOR_PCT = 3.5
 SIX_C_SKIP_UNTIL = dtime(10, 0)
 SIX_C_EXIT_STYLE = "6c_pack"
 SIX_C_COOL_SEC = 15 * 60
+# 1A (5M) — fat 5m rip. vel5 ≥10%, last green, last range ≥5%. Fill now. Skip 9:45.
+# Floor 2%, no 3.5 cap (cap broke the 5m book). Target 16%. 18% broke WR.
+ONE_A_5M_VEL5_MIN = 10.0
+ONE_A_5M_BAR_RANGE_PCT = 5.0
+ONE_A_5M_TARGET_FRAC = 0.16
+ONE_A_5M_STOP_FLOOR_PCT = 2.0
+ONE_A_5M_SKIP_UNTIL = dtime(9, 45)
+ONE_A_5M_EXIT_STYLE = "1a_5m_pack"
+ONE_A_5M_COOL_SEC = 15 * 60
+ONE_A_5M_LOOKBACK = 3
+# 1B (5M) — medium up, not 1A. vel5 5–<10, last green, last range ≥4%.
+# Skip 9:45. Floor 3.5%, no cap. Target 8%.
+ONE_B_5M_VEL5_MIN = 5.0
+ONE_B_5M_VEL5_MAX = 10.0
+ONE_B_5M_BAR_RANGE_PCT = 4.0
+ONE_B_5M_TARGET_FRAC = 0.08
+ONE_B_5M_STOP_FLOOR_PCT = 3.5
+ONE_B_5M_SKIP_UNTIL = dtime(9, 45)
+ONE_B_5M_EXIT_STYLE = "1b_5m_pack"
+ONE_B_5M_COOL_SEC = 15 * 60
+# 5A (5M) — dump bounce. vel5 ≤−2, last green ≥2%, under VWAP. Not 1A / 1B.
+# Skip 10:00. Floor 3.5%, no cap. Target 6.5%. 8% broke WR.
+FIVE_A_5M_VEL5_MAX = -2.0
+FIVE_A_5M_BAR_RANGE_PCT = 2.0
+FIVE_A_5M_TARGET_FRAC = 0.065
+FIVE_A_5M_STOP_FLOOR_PCT = 3.5
+FIVE_A_5M_SKIP_UNTIL = dtime(10, 0)
+FIVE_A_5M_EXIT_STYLE = "5a_5m_pack"
+FIVE_A_5M_COOL_SEC = 15 * 60
 # Placeholder Handle for every other live letter (not 5B / 2A / 1A / 2D / 2B / 2C / 3A / 4A / 3B / 5A / 7A / 3C / 4D / 4B / 6A / 4C / 4E / 6B / 3D / 7B / 3G / 3F / 8A / 7C / 3E / 6C).
-# Gene stays nearest ≥85% same TF. Tactics only — specialize later.
-# Remaining 1m: fill-now at ≥85% (2026-09-17). 5m/15m hold after a small dip.
+# 5m specialized: 1A / 1B / 5A. Gene stays nearest ≥85% same TF. Tactics only — specialize later.
+# Remaining 1m: fill-now at ≥85% (2026-09-17). Other 5m/15m hold after a small dip.
 PH_EXIT_STYLE = "ph_pack"
 PH_5M_EXIT_STYLE = "ph_5m_trail"
 PH_RVOL_MIN = 0.0
@@ -946,6 +975,96 @@ def _is_6c_1m(strategy: str, tf: str = "1m") -> bool:
     return token.startswith("6C") and "1M" in token
 
 
+def _is_1a_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("1A") and "5M" in token
+
+
+def _is_1b_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("1B") and "5M" in token
+
+
+def _is_5a_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("5A") and "5M" in token
+
+
+def _5m_spec_letter(strategy: str, tf: str = "5m") -> str:
+    if _is_1a_5m(strategy, tf):
+        return "1A"
+    if _is_1b_5m(strategy, tf):
+        return "1B"
+    if _is_5a_5m(strategy, tf):
+        return "5A"
+    return ""
+
+
+def _5m_spec_bag_token(letter: str, ticker: str) -> str:
+    return f"{letter}|{str(ticker or '').upper()}"
+
+
+def _5m_spec_cool_until(session_state: Any, letter: str, ticker: str) -> datetime | None:
+    if session_state is None or not letter:
+        return None
+    try:
+        bag = session_state.get("room3_5m_spec_cool") or {}
+    except Exception:
+        return None
+    raw = bag.get(_5m_spec_bag_token(letter, ticker))
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _5m_spec_mark_stop_cool(session_state: Any, letter: str, ticker: str) -> None:
+    sec = {
+        "1A": ONE_A_5M_COOL_SEC,
+        "1B": ONE_B_5M_COOL_SEC,
+        "5A": FIVE_A_5M_COOL_SEC,
+    }.get(letter, 15 * 60)
+    until = _5b_now(session_state) + timedelta(seconds=sec)
+    _5b_bag_set(
+        session_state,
+        "room3_5m_spec_cool",
+        _5m_spec_bag_token(letter, ticker),
+        until.isoformat(),
+    )
+
+
+def _5m_spec_used_today(session_state: Any, letter: str, ticker: str) -> bool:
+    if session_state is None or not letter:
+        return False
+    try:
+        bag = session_state.get("room3_5m_spec_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(_5m_spec_bag_token(letter, ticker)) or "") == _5b_day_key(
+        session_state
+    )
+
+
+def _5m_spec_mark_used(session_state: Any, letter: str, ticker: str) -> None:
+    _5b_bag_set(
+        session_state,
+        "room3_5m_spec_used_day",
+        _5m_spec_bag_token(letter, ticker),
+        _5b_day_key(session_state),
+    )
+
+
 def _5b_now(session_state: Any = None) -> datetime:
     try:
         if session_state is not None:
@@ -1202,6 +1321,20 @@ def _pack_mark_stop_cool(session_state: Any, ticker: str, lot: dict[str, Any]) -
         return
     if _is_6c_1m(strat, tf) or style == SIX_C_EXIT_STYLE:
         _6c_mark_stop_cool(session_state, ticker)
+        return
+    letter_5m = _5m_spec_letter(strat, tf)
+    if letter_5m or style in (
+        ONE_A_5M_EXIT_STYLE,
+        ONE_B_5M_EXIT_STYLE,
+        FIVE_A_5M_EXIT_STYLE,
+    ):
+        if not letter_5m:
+            letter_5m = {
+                ONE_A_5M_EXIT_STYLE: "1A",
+                ONE_B_5M_EXIT_STYLE: "1B",
+                FIVE_A_5M_EXIT_STYLE: "5A",
+            }.get(style, "")
+        _5m_spec_mark_stop_cool(session_state, letter_5m, ticker)
         return
     if _is_1a_1m(strat, tf) or style in ONE_A_EXIT_STYLES:
         _1a_mark_stop_cool(session_state, ticker)
@@ -2861,6 +2994,63 @@ def _6c_gene_ok(slices: list[dict[str, Any]]) -> bool:
     return True
 
 
+def _1a_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Fat 5m rip: vel5 ≥10%, last green, last range ≥5%."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < ONE_A_5M_BAR_RANGE_PCT:
+        return False
+    if _window_velocity_pct(slices, 5) < ONE_A_5M_VEL5_MIN:
+        return False
+    return True
+
+
+def _1b_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Medium 5m up, not 1A: vel5 5–<10, last green, last range ≥4%."""
+    if len(slices) < 3:
+        return False
+    if _1a_5m_gene_ok(slices):
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < ONE_B_5M_BAR_RANGE_PCT:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < ONE_B_5M_VEL5_MIN or vel5 >= ONE_B_5M_VEL5_MAX:
+        return False
+    return True
+
+
+def _5a_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """5m dump bounce: vel5 ≤−2, last green ≥2%, under VWAP. Not 1A / 1B."""
+    if len(slices) < 3:
+        return False
+    if _1a_5m_gene_ok(slices) or _1b_5m_gene_ok(slices):
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < FIVE_A_5M_BAR_RANGE_PCT:
+        return False
+    if _window_velocity_pct(slices, 5) > FIVE_A_5M_VEL5_MAX:
+        return False
+    vwap = _3a_session_vwap(slices)
+    px = float(last.get("c") or 0)
+    if vwap <= 0 or px >= vwap:
+        return False
+    return True
+
+
 def _2d_gene_ok(slices: list[dict[str, Any]]) -> bool:
     """Hunt extra — not a new gene. Fat green bar + RVOL ≥3. Wallpaper 2D does not fire."""
     if len(slices) < 2:
@@ -3405,6 +3595,45 @@ def _6c_pack_exits(
     return stop_px, tgt_px, stop_frac
 
 
+def _5m_spec_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    *,
+    floor_pct: float,
+    tgt_frac: float,
+) -> tuple[float, float, float]:
+    px = float(fill or 0)
+    floor = float(floor_pct) / 100.0
+    if px <= 0:
+        return 0.0, 0.0, floor
+    stop_px, stop_frac = _lookback_stop_px(
+        px, slices, ONE_A_5M_LOOKBACK, floor_pct, cap_pct=None
+    )
+    tgt_px = px * (1.0 + float(tgt_frac))
+    return stop_px, tgt_px, stop_frac
+
+
+def _1a_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=ONE_A_5M_STOP_FLOOR_PCT, tgt_frac=ONE_A_5M_TARGET_FRAC
+    )
+
+
+def _1b_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=ONE_B_5M_STOP_FLOOR_PCT, tgt_frac=ONE_B_5M_TARGET_FRAC
+    )
+
+
+def _5a_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=FIVE_A_5M_STOP_FLOOR_PCT, tgt_frac=FIVE_A_5M_TARGET_FRAC
+    )
+
+
 def _1a_style_for(handle: str) -> str:
     if handle == "trip":
         return ONE_A_EXIT_TRIP
@@ -3492,6 +3721,9 @@ def _5b_lot_exit(lot: dict[str, Any]) -> bool:
         SEVEN_C_EXIT_STYLE,
         THREE_E_EXIT_STYLE,
         SIX_C_EXIT_STYLE,
+        ONE_A_5M_EXIT_STYLE,
+        ONE_B_5M_EXIT_STYLE,
+        FIVE_A_5M_EXIT_STYLE,
         PH_EXIT_STYLE,
         PH_5M_EXIT_STYLE,
         *ONE_A_EXIT_STYLES,
@@ -3524,6 +3756,9 @@ def _5b_lot_exit(lot: dict[str, Any]) -> bool:
         or _is_7c_1m(strat, tf)
         or _is_3e_1m(strat, tf)
         or _is_6c_1m(strat, tf)
+        or _is_1a_5m(strat, tf)
+        or _is_1b_5m(strat, tf)
+        or _is_5a_5m(strat, tf)
         or _is_1a_1m(strat, tf)
         or _is_2d_1m(strat, tf)
     )
@@ -4090,6 +4325,45 @@ def _try_queue_child_entry(
                 stamped["exit_stop_px"] = stop_px
                 stamped["exit_tgt_px"] = tgt_px
                 _6c_mark_used(session_state, ticker)
+            elif _is_1a_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _1a_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = ONE_A_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = ONE_A_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "1A", ticker)
+            elif _is_1b_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _1b_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = ONE_B_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = ONE_B_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "1B", ticker)
+            elif _is_5a_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _5a_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = FIVE_A_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = FIVE_A_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "5A", ticker)
             else:
                 stop_px, tgt_px, stop_frac = _ph_pack_exits(
                     slices, last_px, structural, tf
@@ -4215,6 +4489,12 @@ def _5b_should_exit(
             tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + THREE_E_TARGET_FRAC))
         elif style == SIX_C_EXIT_STYLE:
             tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + SIX_C_TARGET_FRAC))
+        elif style == ONE_A_5M_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + ONE_A_5M_TARGET_FRAC))
+        elif style == ONE_B_5M_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + ONE_B_5M_TARGET_FRAC))
+        elif style == FIVE_A_5M_EXIT_STYLE:
+            tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + FIVE_A_5M_TARGET_FRAC))
         elif style == ONE_A_EXIT_MILD:
             tgt_px = float(lot.get("exit_tgt_px") or entry_px * (1.0 + ONE_A_MILD_TARGET_FRAC))
         elif style == ONE_A_EXIT_VIOLENT:
@@ -4359,13 +4639,25 @@ def _enter_on_print(
     structural_move_pct: float,
     session_state: Any = None,
 ) -> bool:
-    """1m fill-now at ≥85% nearest (operator 2026-09-17). 5m/15m still wait their Handle."""
+    """1m / specialized 5m: fill-now after the letter's Hunt extra. Other 5m/15m wait Handle."""
     _ = (strategy, layout_id, structural_move_pct, session_state)
     return room3_recipes.normalize_tf(tf) == "1m"
 
 
-def _1m_live_fill_now(line: dict[str, Any], tag: str) -> tuple[bool, str]:
-    """Locked 1m letters + placeholders fire on the print. Hunt extras / dip do not block."""
+def _5b_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    return bool(_5b_climax_ok(slices) and _5b_tape_rvol(slices) >= FIVE_B_RVOL_MIN)
+
+
+def _1m_live_fill_now(
+    line: dict[str, Any],
+    tag: str,
+    *,
+    gene_ok: bool = True,
+    wait: str = "wait suited tape",
+) -> tuple[bool, str]:
+    """Fill now on the print. Specialized letters pass gene_ok first (operator 2026-09-20)."""
+    if not gene_ok:
+        return False, f"{tag} · {wait}"
     line["trigger_phase"] = "ready"
     return True, f"{tag} · enter now"
 
@@ -4408,9 +4700,10 @@ def _5b_entry_ready(
         return False, "5B · skip 9:30–9:45"
     if _5b_used_today(session_state, ticker):
         return False, "5B · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "5B")
+    return _1m_live_fill_now(
+        line, "5B", gene_ok=_5b_gene_ok(slices), wait="wait dump-then-hold"
+    )
 
 
 def _2a_entry_ready(
@@ -4430,9 +4723,8 @@ def _2a_entry_ready(
         return False, "2A · skip 9:30–10:00"
     if _2a_used_today(session_state, ticker):
         return False, "2A · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "2A")
+    return _1m_live_fill_now(line, "2A", gene_ok=_2a_gene_ok(slices))
 
 
 def _2b_entry_ready(
@@ -4452,9 +4744,8 @@ def _2b_entry_ready(
         return False, "2B · skip 9:30–9:45"
     if _2b_used_today(session_state, ticker):
         return False, "2B · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "2B")
+    return _1m_live_fill_now(line, "2B", gene_ok=_2b_gene_ok(slices))
 
 
 def _2c_entry_ready(
@@ -4474,9 +4765,8 @@ def _2c_entry_ready(
         return False, "2C · skip 9:30–10:00"
     if _2c_used_today(session_state, ticker):
         return False, "2C · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "2C")
+    return _1m_live_fill_now(line, "2C", gene_ok=_2c_gene_ok(slices))
 
 
 def _3a_entry_ready(
@@ -4498,9 +4788,8 @@ def _3a_entry_ready(
         return False, "3A · no new shot after 12:00"
     if _3a_used_today(session_state, ticker):
         return False, "3A · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "3A")
+    return _1m_live_fill_now(line, "3A", gene_ok=_3a_gene_ok(slices))
 
 
 def _2d_entry_ready(
@@ -4522,7 +4811,10 @@ def _2d_entry_ready(
         return False, "2D · done for the day"
     if _2d_shots_today(session_state, ticker) >= 1:
         return False, "2D · first of day already used"
-    _ = slices
+    if not _2d_gene_ok(slices):
+        return _1m_live_fill_now(line, "2D", gene_ok=False)
+    if int(line.get("match_pct") or 0) < TWO_D_MATCH_MIN:
+        return _1m_live_fill_now(line, "2D", gene_ok=False, wait="wait match ≥91")
     return _1m_live_fill_now(line, "2D")
 
 
@@ -4543,9 +4835,8 @@ def _4a_entry_ready(
         return False, "4A · skip 9:30–9:45"
     if _4a_used_today(session_state, ticker):
         return False, "4A · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "4A")
+    return _1m_live_fill_now(line, "4A", gene_ok=_4a_gene_ok(slices))
 
 
 def _3b_entry_ready(
@@ -4565,9 +4856,8 @@ def _3b_entry_ready(
         return False, "3B · skip 9:30–10:00"
     if _3b_used_today(session_state, ticker):
         return False, "3B · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "3B")
+    return _1m_live_fill_now(line, "3B", gene_ok=_3b_gene_ok(slices))
 
 
 def _5a_entry_ready(
@@ -4587,9 +4877,8 @@ def _5a_entry_ready(
         return False, "5A · skip 9:30–9:45"
     if _5a_used_today(session_state, ticker):
         return False, "5A · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "5A")
+    return _1m_live_fill_now(line, "5A", gene_ok=_5a_gene_ok(slices))
 
 
 def _7a_entry_ready(
@@ -4609,9 +4898,8 @@ def _7a_entry_ready(
         return False, "7A · skip 9:30–9:45"
     if _7a_used_today(session_state, ticker):
         return False, "7A · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "7A")
+    return _1m_live_fill_now(line, "7A", gene_ok=_7a_gene_ok(slices))
 
 
 def _3c_entry_ready(
@@ -4631,9 +4919,8 @@ def _3c_entry_ready(
         return False, "3C · skip 9:30–9:45"
     if _3c_used_today(session_state, ticker):
         return False, "3C · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "3C")
+    return _1m_live_fill_now(line, "3C", gene_ok=_3c_gene_ok(slices))
 
 
 def _4d_entry_ready(
@@ -4653,9 +4940,8 @@ def _4d_entry_ready(
         return False, "4D · skip 9:30–9:45"
     if _4d_used_today(session_state, ticker):
         return False, "4D · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "4D")
+    return _1m_live_fill_now(line, "4D", gene_ok=_4d_gene_ok(slices))
 
 
 def _4b_entry_ready(
@@ -4675,9 +4961,8 @@ def _4b_entry_ready(
         return False, "4B · skip 9:30–10:00"
     if _4b_used_today(session_state, ticker):
         return False, "4B · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "4B")
+    return _1m_live_fill_now(line, "4B", gene_ok=_4b_gene_ok(slices))
 
 
 def _6a_entry_ready(
@@ -4697,9 +4982,8 @@ def _6a_entry_ready(
         return False, "6A · skip 9:30–9:45"
     if _6a_used_today(session_state, ticker):
         return False, "6A · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "6A")
+    return _1m_live_fill_now(line, "6A", gene_ok=_6a_gene_ok(slices))
 
 
 def _4c_entry_ready(
@@ -4719,9 +5003,8 @@ def _4c_entry_ready(
         return False, "4C · skip 9:30–9:45"
     if _4c_used_today(session_state, ticker):
         return False, "4C · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "4C")
+    return _1m_live_fill_now(line, "4C", gene_ok=_4c_gene_ok(slices))
 
 
 def _4e_entry_ready(
@@ -4741,9 +5024,8 @@ def _4e_entry_ready(
         return False, "4E · skip 9:30–9:45"
     if _4e_used_today(session_state, ticker):
         return False, "4E · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "4E")
+    return _1m_live_fill_now(line, "4E", gene_ok=_4e_gene_ok(slices))
 
 
 def _6b_entry_ready(
@@ -4763,9 +5045,8 @@ def _6b_entry_ready(
         return False, "6B · skip 9:30–9:45"
     if _6b_used_today(session_state, ticker):
         return False, "6B · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "6B")
+    return _1m_live_fill_now(line, "6B", gene_ok=_6b_gene_ok(slices))
 
 
 def _3d_entry_ready(
@@ -4785,9 +5066,8 @@ def _3d_entry_ready(
         return False, "3D · skip 9:30–9:45"
     if _3d_used_today(session_state, ticker):
         return False, "3D · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "3D")
+    return _1m_live_fill_now(line, "3D", gene_ok=_3d_gene_ok(slices))
 
 
 def _7b_entry_ready(
@@ -4807,9 +5087,8 @@ def _7b_entry_ready(
         return False, "7B · skip 9:30–9:45"
     if _7b_used_today(session_state, ticker):
         return False, "7B · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "7B")
+    return _1m_live_fill_now(line, "7B", gene_ok=_7b_gene_ok(slices))
 
 
 def _3g_entry_ready(
@@ -4829,9 +5108,8 @@ def _3g_entry_ready(
         return False, "3G · skip 9:30–9:45"
     if _3g_used_today(session_state, ticker):
         return False, "3G · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "3G")
+    return _1m_live_fill_now(line, "3G", gene_ok=_3g_gene_ok(slices))
 
 
 def _3f_entry_ready(
@@ -4851,9 +5129,8 @@ def _3f_entry_ready(
         return False, "3F · skip 9:30–10:00"
     if _3f_used_today(session_state, ticker):
         return False, "3F · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "3F")
+    return _1m_live_fill_now(line, "3F", gene_ok=_3f_gene_ok(slices))
 
 
 def _8a_entry_ready(
@@ -4873,9 +5150,8 @@ def _8a_entry_ready(
         return False, "8A · skip 9:30–10:00"
     if _8a_used_today(session_state, ticker):
         return False, "8A · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "8A")
+    return _1m_live_fill_now(line, "8A", gene_ok=_8a_gene_ok(slices))
 
 
 def _7c_entry_ready(
@@ -4895,9 +5171,8 @@ def _7c_entry_ready(
         return False, "7C · skip 9:30–10:00"
     if _7c_used_today(session_state, ticker):
         return False, "7C · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "7C")
+    return _1m_live_fill_now(line, "7C", gene_ok=_7c_gene_ok(slices))
 
 
 def _3e_entry_ready(
@@ -4917,9 +5192,8 @@ def _3e_entry_ready(
         return False, "3E · skip 9:30–10:00"
     if _3e_used_today(session_state, ticker):
         return False, "3E · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "3E")
+    return _1m_live_fill_now(line, "3E", gene_ok=_3e_gene_ok(slices))
 
 
 def _6c_entry_ready(
@@ -4939,9 +5213,35 @@ def _6c_entry_ready(
         return False, "6C · skip 9:30–10:00"
     if _6c_used_today(session_state, ticker):
         return False, "6C · first of day already used"
-    _ = slices
     _ = last_px
-    return _1m_live_fill_now(line, "6C")
+    return _1m_live_fill_now(line, "6C", gene_ok=_6c_gene_ok(slices))
+
+
+def _5m_spec_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    letter: str,
+    skip_until,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _5m_spec_cool_until(session_state, letter, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"{letter} (5M) · cool {mins}m after stop"
+    if _rth_before(session_state, skip_until):
+        until = skip_until.strftime("%H:%M")
+        return False, f"{letter} (5M) · skip 9:30–{until}"
+    if _5m_spec_used_today(session_state, letter, ticker):
+        return False, f"{letter} (5M) · first of day already used"
+    gene = {"1A": _1a_5m_gene_ok, "1B": _1b_5m_gene_ok, "5A": _5a_5m_gene_ok}[letter]
+    _ = last_px
+    return _1m_live_fill_now(
+        line, f"{letter} (5M)", gene_ok=gene(slices), wait="wait suited tape"
+    )
 
 
 def _1a_entry_ready(
@@ -4961,8 +5261,15 @@ def _1a_entry_ready(
         return False, "1A · skip 9:30–9:45"
     if _1a_used_today(session_state, ticker):
         return False, "1A · first of day already used"
-    handle = str(line.get("1a_handle") or "") or _1a_classify(slices) or "mild"
+    handle = str(line.get("1a_handle") or "") or _1a_classify(slices)
+    if not handle:
+        return False, "1A · wait suited tape"
     line["1a_handle"] = handle
+    if handle in ("trip", "mild"):
+        if _rth_before(session_state, ONE_A_LONG_PAUSE):
+            return False, "1A · skip 9:30–10:00"
+    elif _rth_before(session_state, ONE_A_SKIP_UNTIL):
+        return False, "1A · skip 9:30–9:45"
     tag = {"trip": "trip runner", "mild": "mild 8%", "violent": "violent 12%"}.get(
         handle, "1A"
     )
@@ -5119,6 +5426,33 @@ def _entry_trigger_ready(
         return _3e_entry_ready(line, slices, last_px=last_px, session_state=session_state)
     if _is_6c_1m(strategy, tf):
         return _6c_entry_ready(line, slices, last_px=last_px, session_state=session_state)
+    if _is_1a_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="1A",
+            skip_until=ONE_A_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_1b_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="1B",
+            skip_until=ONE_B_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_5a_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="5A",
+            skip_until=FIVE_A_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
     return _ph_entry_ready(
         line,
         slices,
