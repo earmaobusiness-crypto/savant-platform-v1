@@ -205,7 +205,7 @@ def test_1m_open_chop_blocks_fill_now():
 
 def test_5m_still_dip_hold_not_fill_now():
     book, line = _book(tf="5m", slices=_5m_slices())
-    layouts = _library_from_live(line, strategy="6A (5M)", tf="5m", ts=_fresh_ts())
+    layouts = _library_from_live(line, strategy="3B (5M)", tf="5m", ts=_fresh_ts())
     ss = _ss(tradable=1000)
     _run(line, layouts, ss, book)
     assert int(line.get("match_pct") or 0) >= 85

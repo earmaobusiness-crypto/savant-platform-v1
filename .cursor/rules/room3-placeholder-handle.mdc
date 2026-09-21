@@ -3,18 +3,20 @@ description: Room 3 — placeholder Handle for letters not yet specialized
 alwaysApply: true
 ---
 
-# Placeholder Handle (not 5B / 2A / 1A / 2D / 2B / 2C / 3A / 4A / 3B / 5A / 7A / 3C / 4D / 4B / 6A / 4C / 4E / 6B / 3D / 7B / 3G / 3F / 8A / 7C / 3E / 6C 1m · not 1A / 1B / 5A 5m) — 2026-09-16
+# Placeholder Handle (not 5B / 2A / 1A / 2D / 2B / 2C / 3A / 4A / 3B / 5A / 7A / 3C / 4D / 4B / 6A / 4C / 4E / 6B / 3D / 7B / 3G / 3F / 8A / 7C / 3E / 6C 1m · not 1A / 1B / 5A / 1C / 9A / 5B / 2B / 5C / 8A / 6A / 2C / 2D / 2A / 1D / 4A / 6B / 8B / 3A / 9B 5m · not 1A / 1B / 1C / 1D / 2A / 2B / 6A / 9A 15m) — 2026-09-16
 
 Gene is unchanged: nearest live letter, ≥85%, same TF. This is **tactics only** so other 1m / 5m / 15m letters can fire today until each is specialized. Not a WR claim.
 
 **Locked 1m (own Handle, not this):** 5B, 2A, 1A, 2D, 2B, 2C, 3A, 4A, 3B, 5A, 7A, 3C, 4D, 4B, 6A, 4C, 4E, 6B, 3D, 7B, 3G, 3F, 8A, 7C, 3E, 6C. Live 1m letters are all specialized.
 
-**Locked 5m (own Handle, not this):** 1A, 1B, 5A.
+**Locked 5m (own Handle, not this):** 1A, 1B, 5A, 1C, 9A, 5B, 2B, 5C, 8A, 6A, 2C, 2D, 2A, 1D, 4A, 6B, 8B, 3A, 9B. Live 5m letters are all specialized.
+
+**Locked 15m (own Handle, not this):** 1A, 1B, 1C, 1D, 2A, 2B, 6A, 9A. **8A / 8B (15M)** stay this placeholder (origin books red / near-0).
 
 **1m (everyone else):** skip **9:30–9:45 ET**; **no RVOL gate**; **first of that letter** on that name that day; **fill now** at ≥85%. Lookback-low stop (floor 2%, **cap 3.5% max loss**); **half stored structural** target. 15 min cool after a stop. Market in RTH. Shares the **max 3 1m fills per name per day** cap with specialized letters. Live 1m letters are all specialized — this branch is leftover only.
 
-**5m (everyone else):** skip **9:30–9:45 ET**; first of that letter that day; **~0.6% dip** then **hold** (close back near the armed print — not a full prior-bar reclaim); lookback-low stop (3 bars, floor 2%); **75% stored structural** target; after that print, **trail 8% off the high**.
+**5m (everyone else):** skip **9:30–9:45 ET**; first of that letter that day; **~0.6% dip** then **hold** (close back near the armed print — not a full prior-bar reclaim); lookback-low stop (3 bars, floor 2%); **75% stored structural** target; after that print, **trail 8% off the high**. Live 5m letters are all specialized — this branch is leftover only.
 
-**15m:** **no** open skip (first bar is the session); first of that letter that day; **~0.8% dip** then **hold**; lookback-low stop (3 bars, floor 2%); **12% target**. Hard clip, no trail.
+**15m:** **no** open skip (first bar is the session); first of that letter that day; **~0.8% dip** then **hold**; lookback-low stop (3 bars, floor 2%); **12% target**. Hard clip, no trail. Live leftover is **8A / 8B**.
 
-Specialize like 5B/2A/1A/2D/2B/2C/3A/4A/3B/5A/7A/3C/4D/4B/6A/4C/4E/6B/3D/7B/3G/3F/8A/7C/3E/6C (1m) and 1A/1B/5A (5m) when the operator asks, **three letters at a time**. First lock is already the stretch. When they say **moving on**, push that batch to Cloud so it can trade the next session.
+Specialize like 5B/2A/1A/2D/2B/2C/3A/4A/3B/5A/7A/3C/4D/4B/6A/4C/4E/6B/3D/7B/3G/3F/8A/7C/3E/6C (1m), 1A/1B/5A/1C/9A/5B/2B/5C/8A/6A/2C/2D/2A/1D/4A/6B/8B/3A/9B (5m), and 1A/1B/1C/1D/2A/2B/6A/9A (15m) when the operator asks, **three letters at a time**. First lock is already the stretch. When they say **moving on**, push that batch to Cloud so it can trade the next session.

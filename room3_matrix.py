@@ -337,7 +337,7 @@ ONE_B_5M_STOP_FLOOR_PCT = 3.5
 ONE_B_5M_SKIP_UNTIL = dtime(9, 45)
 ONE_B_5M_EXIT_STYLE = "1b_5m_pack"
 ONE_B_5M_COOL_SEC = 15 * 60
-# 5A (5M) — dump bounce. vel5 ≤−2, last green ≥2%, under VWAP. Not 1A / 1B.
+# 5A (5M) — dump bounce. vel5 ≤−2, last green ≥2%, under VWAP. Not 1A / 1B / 5B climax.
 # Skip 10:00. Floor 3.5%, no cap. Target 6.5%. 8% broke WR.
 FIVE_A_5M_VEL5_MAX = -2.0
 FIVE_A_5M_BAR_RANGE_PCT = 2.0
@@ -346,8 +346,172 @@ FIVE_A_5M_STOP_FLOOR_PCT = 3.5
 FIVE_A_5M_SKIP_UNTIL = dtime(10, 0)
 FIVE_A_5M_EXIT_STYLE = "5a_5m_pack"
 FIVE_A_5M_COOL_SEC = 15 * 60
+# 1C (5M) — quieter Layout 1 up. vel5 0–<5%, last green ≥3.5%, RVOL <1.5. Not 1A / 1B / 5A.
+ONE_C_5M_VEL5_MIN = 0.0
+ONE_C_5M_VEL5_MAX = 5.0
+ONE_C_5M_BAR_RANGE_PCT = 3.5
+ONE_C_5M_RVOL_MAX = 1.5
+ONE_C_5M_TARGET_FRAC = 0.14
+ONE_C_5M_STOP_FLOOR_PCT = 2.0
+ONE_C_5M_SKIP_UNTIL = dtime(9, 45)
+ONE_C_5M_EXIT_STYLE = "1c_5m_pack"
+ONE_C_5M_COOL_SEC = 15 * 60
+# 9A (5M) — dump bounce above VWAP. vel5 ≤−2, last green ≥2.5%. Not 5A (under VWAP).
+NINE_A_5M_VEL5_MAX = -2.0
+NINE_A_5M_BAR_RANGE_PCT = 2.5
+NINE_A_5M_LOC_MIN = 0.50
+NINE_A_5M_TARGET_FRAC = 0.075
+NINE_A_5M_STOP_FLOOR_PCT = 2.0
+NINE_A_5M_SKIP_UNTIL = dtime(9, 45)
+NINE_A_5M_EXIT_STYLE = "9a_5m_pack"
+NINE_A_5M_COOL_SEC = 15 * 60
+# 5B (5M) — dump climax subset of 5A. 5A plus last green ≥4% loc ≥0.50. Skip 10:00. Floor 2%, no cap. Target 8%. 10% broke WR.
+FIVE_B_5M_BAR_RANGE_PCT = 4.0
+FIVE_B_5M_LOC_MIN = 0.50
+FIVE_B_5M_TARGET_FRAC = 0.08
+FIVE_B_5M_STOP_FLOOR_PCT = 2.0
+FIVE_B_5M_SKIP_UNTIL = dtime(10, 0)
+FIVE_B_5M_EXIT_STYLE = "5b_5m_pack"
+FIVE_B_5M_COOL_SEC = 15 * 60
+# 2B (5M) — leftover 9-bar up. vel9 ≥8%, last green ≥2.5%. Not 1A / 1B / 1C / 5A / 9A / 5B.
+# Skip 9:45. Floor 2%, no cap. Target 10%. 12% broke WR.
+TWO_B_5M_VEL9_PCT = 8.0
+TWO_B_5M_BAR_RANGE_PCT = 2.5
+TWO_B_5M_TARGET_FRAC = 0.10
+TWO_B_5M_STOP_FLOOR_PCT = 2.0
+TWO_B_5M_SKIP_UNTIL = dtime(9, 45)
+TWO_B_5M_EXIT_STYLE = "2b_5m_pack"
+TWO_B_5M_COOL_SEC = 15 * 60
+# 5C (5M) — milder dump than 5A. vel5 −1.5 to under −2, last green ≥2%, under VWAP. Skip 9:45. Floor 3.5%, no cap. Target 8%.
+FIVE_C_5M_VEL5_MIN = -2.0
+FIVE_C_5M_VEL5_MAX = -1.5
+FIVE_C_5M_BAR_RANGE_PCT = 2.0
+FIVE_C_5M_TARGET_FRAC = 0.08
+FIVE_C_5M_STOP_FLOOR_PCT = 3.5
+FIVE_C_5M_SKIP_UNTIL = dtime(9, 45)
+FIVE_C_5M_EXIT_STYLE = "5c_5m_pack"
+FIVE_C_5M_COOL_SEC = 15 * 60
+# 8A (5M) — loud leftover flat-up. vel5 −2–<2, last green ≥2%, loc ≥0.50, RVOL ≥1.5, session ≥8%. Skip 9:45. Floor 2%, no cap. Target 8%. 9% broke WR.
+EIGHT_A_5M_VEL5_MIN = -2.0
+EIGHT_A_5M_VEL5_MAX = 2.0
+EIGHT_A_5M_BAR_RANGE_PCT = 2.0
+EIGHT_A_5M_LOC_MIN = 0.50
+EIGHT_A_5M_RVOL_MIN = 1.5
+EIGHT_A_5M_SESS_PCT = 8.0
+EIGHT_A_5M_TARGET_FRAC = 0.08
+EIGHT_A_5M_STOP_FLOOR_PCT = 2.0
+EIGHT_A_5M_SKIP_UNTIL = dtime(9, 45)
+EIGHT_A_5M_EXIT_STYLE = "8a_5m_pack"
+EIGHT_A_5M_COOL_SEC = 15 * 60
+# 6A (5M) — tighter dump subset of 5A. vel5 ≤−3.5, last green ≥2%, loc ≥0.40, under VWAP. Not 5B. Skip 10:00. Floor 3.5%, no cap. Target 9%.
+SIX_A_5M_VEL5_MAX = -3.5
+SIX_A_5M_LOC_MIN = 0.40
+SIX_A_5M_TARGET_FRAC = 0.09
+SIX_A_5M_STOP_FLOOR_PCT = 3.5
+SIX_A_5M_SKIP_UNTIL = dtime(10, 0)
+SIX_A_5M_EXIT_STYLE = "6a_5m_pack"
+SIX_A_5M_COOL_SEC = 15 * 60
+# 2C (5M) — origin June–Aug packs. Last-green is not required. Range ≥1.9%, RVOL ≥1.5.
+# Not 1A/1B/1C/2B/8A/5A/5B/5C/9A/6A. Skip 9:45. Floor 2%, no cap. Target 8%.
+TWO_C_5M_BAR_RANGE_PCT = 1.9
+TWO_C_5M_RVOL_MIN = 1.5
+TWO_C_5M_TARGET_FRAC = 0.08
+TWO_C_5M_STOP_FLOOR_PCT = 2.0
+TWO_C_5M_SKIP_UNTIL = dtime(9, 45)
+TWO_C_5M_EXIT_STYLE = "2c_5m_pack"
+TWO_C_5M_COOL_SEC = 15 * 60
+# 2D (5M) — origin June–Aug packs. Last-green is not required. Range ≥0.9%, RVOL ≥1.5.
+# Not 2C / 1A/1B/1C/2B/8A/5A/5B/5C/9A/6A. Skip 9:45. Floor 2%, no cap. Target 8%.
+TWO_D_5M_BAR_RANGE_PCT = 0.9
+TWO_D_5M_RVOL_MIN = 1.5
+TWO_D_5M_TARGET_FRAC = 0.08
+TWO_D_5M_STOP_FLOOR_PCT = 2.0
+TWO_D_5M_SKIP_UNTIL = dtime(9, 45)
+TWO_D_5M_EXIT_STYLE = "2d_5m_pack"
+TWO_D_5M_COOL_SEC = 15 * 60
+# 2A (5M) — origin June–Aug packs. Last-green is not required. Range ≥2%, RVOL ≥1.5.
+# Not 1A/1B/1C/2B/8A/5A/5B/5C/9A/6A. Skip 9:45. Floor 2%, no cap. Target 8%.
+TWO_A_5M_BAR_RANGE_PCT = 2.0
+TWO_A_5M_RVOL_MIN = 1.5
+TWO_A_5M_TARGET_FRAC = 0.08
+TWO_A_5M_STOP_FLOOR_PCT = 2.0
+TWO_A_5M_SKIP_UNTIL = dtime(9, 45)
+TWO_A_5M_EXIT_STYLE = "2a_5m_pack"
+TWO_A_5M_COOL_SEC = 15 * 60
+# 1D (5M) — origin June–Aug packs. Last-green is not required. Range ≥1%, RVOL ≥1.5, vel5 under 3%.
+# Not 1A/1B/1C/2C. Skip 9:45. Floor 2%, no cap. Target 8%.
+ONE_D_5M_BAR_RANGE_PCT = 1.0
+ONE_D_5M_RVOL_MIN = 1.5
+ONE_D_5M_VEL5_MAX = 3.0
+ONE_D_5M_TARGET_FRAC = 0.08
+ONE_D_5M_STOP_FLOOR_PCT = 2.0
+ONE_D_5M_SKIP_UNTIL = dtime(9, 45)
+ONE_D_5M_EXIT_STYLE = "1d_5m_pack"
+ONE_D_5M_COOL_SEC = 15 * 60
+# 4A (5M) — origin June–Aug packs. Last-green is not required. vel5 3–<8, range ≥1.5%, RVOL ≥1.5.
+# Not 1A/1B/1C. Skip 9:45. Floor 2%, no cap. Target 8%.
+FOUR_A_5M_VEL5_MIN = 3.0
+FOUR_A_5M_VEL5_MAX = 8.0
+FOUR_A_5M_BAR_RANGE_PCT = 1.5
+FOUR_A_5M_RVOL_MIN = 1.5
+FOUR_A_5M_TARGET_FRAC = 0.08
+FOUR_A_5M_STOP_FLOOR_PCT = 2.0
+FOUR_A_5M_SKIP_UNTIL = dtime(9, 45)
+FOUR_A_5M_EXIT_STYLE = "4a_5m_pack"
+FOUR_A_5M_COOL_SEC = 15 * 60
+# 6B (5M) — origin June–Aug packs. Last-green is not required. Range ≥2%, RVOL ≥1.5.
+SIX_B_5M_BAR_RANGE_PCT = 2.0
+SIX_B_5M_RVOL_MIN = 1.5
+SIX_B_5M_TARGET_FRAC = 0.08
+SIX_B_5M_STOP_FLOOR_PCT = 2.0
+SIX_B_5M_SKIP_UNTIL = dtime(9, 45)
+SIX_B_5M_EXIT_STYLE = "6b_5m_pack"
+SIX_B_5M_COOL_SEC = 15 * 60
+# 8B (5M) — origin June–Aug packs. Last-green is not required (origin starts were last red). Range ≥2%, RVOL ≥1.5.
+EIGHT_B_5M_BAR_RANGE_PCT = 2.0
+EIGHT_B_5M_RVOL_MIN = 1.5
+EIGHT_B_5M_TARGET_FRAC = 0.08
+EIGHT_B_5M_STOP_FLOOR_PCT = 2.0
+EIGHT_B_5M_SKIP_UNTIL = dtime(9, 45)
+EIGHT_B_5M_EXIT_STYLE = "8b_5m_pack"
+EIGHT_B_5M_COOL_SEC = 15 * 60
+# 3A (5M) — origin June–Aug packs. Last-green is not required. Range ≥2%, RVOL ≥1.5.
+THREE_A_5M_BAR_RANGE_PCT = 2.0
+THREE_A_5M_RVOL_MIN = 1.5
+THREE_A_5M_TARGET_FRAC = 0.08
+THREE_A_5M_STOP_FLOOR_PCT = 2.0
+THREE_A_5M_SKIP_UNTIL = dtime(9, 45)
+THREE_A_5M_EXIT_STYLE = "3a_5m_pack"
+THREE_A_5M_COOL_SEC = 15 * 60
+# 9B (5M) — origin June–Aug packs. Last-green is not required. Range ≥4%. No RVOL gate (origin rvol sat under 1.5).
+NINE_B_5M_BAR_RANGE_PCT = 4.0
+NINE_B_5M_TARGET_FRAC = 0.08
+NINE_B_5M_STOP_FLOOR_PCT = 2.0
+NINE_B_5M_SKIP_UNTIL = dtime(9, 45)
+NINE_B_5M_EXIT_STYLE = "9b_5m_pack"
+NINE_B_5M_COOL_SEC = 15 * 60
+# 1A (15M) — leftover Sep 2–11 belt. Last-green is not required. vel5 ≥12%, last range ≥2%. No open skip.
+ONE_A_15M_VEL5_MIN = 12.0
+ONE_A_15M_BAR_RANGE_PCT = 2.0
+ONE_A_15M_TARGET_FRAC = 0.08
+ONE_A_15M_STOP_FLOOR_PCT = 2.0
+ONE_A_15M_SKIP_UNTIL = dtime(9, 30)
+ONE_A_15M_EXIT_STYLE = "1a_15m_pack"
+ONE_A_15M_COOL_SEC = 15 * 60
+# Other specialized 15m — origin June–Aug packs. Last-green is not required. Range ≥3%. Not 1A. No open skip.
+FIFTEEN_M_ORIGIN_BAR_RANGE_PCT = 3.0
+FIFTEEN_M_ORIGIN_TARGET_FRAC = 0.12
+FIFTEEN_M_ORIGIN_STOP_FLOOR_PCT = 2.0
+FIFTEEN_M_ORIGIN_SKIP_UNTIL = dtime(9, 30)
+ONE_B_15M_EXIT_STYLE = "1b_15m_pack"
+ONE_C_15M_EXIT_STYLE = "1c_15m_pack"
+ONE_D_15M_EXIT_STYLE = "1d_15m_pack"
+TWO_A_15M_EXIT_STYLE = "2a_15m_pack"
+TWO_B_15M_EXIT_STYLE = "2b_15m_pack"
+SIX_A_15M_EXIT_STYLE = "6a_15m_pack"
+NINE_A_15M_EXIT_STYLE = "9a_15m_pack"
 # Placeholder Handle for every other live letter (not 5B / 2A / 1A / 2D / 2B / 2C / 3A / 4A / 3B / 5A / 7A / 3C / 4D / 4B / 6A / 4C / 4E / 6B / 3D / 7B / 3G / 3F / 8A / 7C / 3E / 6C).
-# 5m specialized: 1A / 1B / 5A. Gene stays nearest ≥85% same TF. Tactics only — specialize later.
+# 5m specialized: all live 5m. 15m specialized: 1A / 1B / 1C / 1D / 2A / 2B / 6A / 9A (not 8A / 8B). Gene stays nearest ≥85% same TF.
 # Remaining 1m: fill-now at ≥85% (2026-09-17). Other 5m/15m hold after a small dip.
 PH_EXIT_STYLE = "ph_pack"
 PH_5M_EXIT_STYLE = "ph_5m_trail"
@@ -996,6 +1160,135 @@ def _is_5a_5m(strategy: str, tf: str = "5m") -> bool:
     return token.startswith("5A") and "5M" in token
 
 
+def _is_1c_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("1C") and "5M" in token
+
+
+def _is_9a_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("9A") and "5M" in token
+
+
+def _is_5b_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("5B") and "5M" in token
+
+
+def _is_2b_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("2B") and "5M" in token
+
+
+def _is_5c_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("5C") and "5M" in token
+
+
+def _is_8a_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("8A") and "5M" in token
+
+
+def _is_6a_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("6A") and "5M" in token
+
+
+def _is_2c_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("2C") and "5M" in token
+
+
+def _is_2d_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("2D") and "5M" in token
+
+
+def _is_2a_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("2A") and "5M" in token
+
+
+def _is_1d_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("1D") and "5M" in token
+
+
+def _is_4a_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("4A") and "5M" in token
+
+
+def _is_6b_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("6B") and "5M" in token
+
+
+def _is_8b_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("8B") and "5M" in token
+
+
+def _is_3a_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("3A") and "5M" in token
+
+
+def _is_9b_5m(strategy: str, tf: str = "5m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "5m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("9B") and "5M" in token
+
+
+def _is_1a_15m(strategy: str, tf: str = "15m") -> bool:
+    if room3_recipes.normalize_tf(tf) != "15m":
+        return False
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    return token.startswith("1A") and "15M" in token
+
+
+def _is_15m_origin_letter(strategy: str, tf: str = "15m") -> str:
+    if room3_recipes.normalize_tf(tf) != "15m":
+        return ""
+    token = str(strategy or "").strip().upper().replace(" ", "")
+    for head in ("1B", "1C", "1D", "2A", "2B", "6A", "9A"):
+        if token.startswith(head) and "15M" in token:
+            return head
+    return ""
+
+
 def _5m_spec_letter(strategy: str, tf: str = "5m") -> str:
     if _is_1a_5m(strategy, tf):
         return "1A"
@@ -1003,6 +1296,38 @@ def _5m_spec_letter(strategy: str, tf: str = "5m") -> str:
         return "1B"
     if _is_5a_5m(strategy, tf):
         return "5A"
+    if _is_1c_5m(strategy, tf):
+        return "1C"
+    if _is_9a_5m(strategy, tf):
+        return "9A"
+    if _is_5b_5m(strategy, tf):
+        return "5B"
+    if _is_2b_5m(strategy, tf):
+        return "2B"
+    if _is_5c_5m(strategy, tf):
+        return "5C"
+    if _is_8a_5m(strategy, tf):
+        return "8A"
+    if _is_6a_5m(strategy, tf):
+        return "6A"
+    if _is_2c_5m(strategy, tf):
+        return "2C"
+    if _is_2d_5m(strategy, tf):
+        return "2D"
+    if _is_2a_5m(strategy, tf):
+        return "2A"
+    if _is_1d_5m(strategy, tf):
+        return "1D"
+    if _is_4a_5m(strategy, tf):
+        return "4A"
+    if _is_6b_5m(strategy, tf):
+        return "6B"
+    if _is_8b_5m(strategy, tf):
+        return "8B"
+    if _is_3a_5m(strategy, tf):
+        return "3A"
+    if _is_9b_5m(strategy, tf):
+        return "9B"
     return ""
 
 
@@ -1034,6 +1359,22 @@ def _5m_spec_mark_stop_cool(session_state: Any, letter: str, ticker: str) -> Non
         "1A": ONE_A_5M_COOL_SEC,
         "1B": ONE_B_5M_COOL_SEC,
         "5A": FIVE_A_5M_COOL_SEC,
+        "1C": ONE_C_5M_COOL_SEC,
+        "9A": NINE_A_5M_COOL_SEC,
+        "5B": FIVE_B_5M_COOL_SEC,
+        "2B": TWO_B_5M_COOL_SEC,
+        "5C": FIVE_C_5M_COOL_SEC,
+        "8A": EIGHT_A_5M_COOL_SEC,
+        "6A": SIX_A_5M_COOL_SEC,
+        "2C": TWO_C_5M_COOL_SEC,
+        "2D": TWO_D_5M_COOL_SEC,
+        "2A": TWO_A_5M_COOL_SEC,
+        "1D": ONE_D_5M_COOL_SEC,
+        "4A": FOUR_A_5M_COOL_SEC,
+        "6B": SIX_B_5M_COOL_SEC,
+        "8B": EIGHT_B_5M_COOL_SEC,
+        "3A": THREE_A_5M_COOL_SEC,
+        "9B": NINE_B_5M_COOL_SEC,
     }.get(letter, 15 * 60)
     until = _5b_now(session_state) + timedelta(seconds=sec)
     _5b_bag_set(
@@ -1061,6 +1402,60 @@ def _5m_spec_mark_used(session_state: Any, letter: str, ticker: str) -> None:
         session_state,
         "room3_5m_spec_used_day",
         _5m_spec_bag_token(letter, ticker),
+        _5b_day_key(session_state),
+    )
+
+
+def _15m_spec_bag_token(letter: str, ticker: str) -> str:
+    return f"{letter}|{str(ticker or '').upper()}"
+
+
+def _15m_spec_cool_until(session_state: Any, letter: str, ticker: str) -> datetime | None:
+    if session_state is None or not letter:
+        return None
+    try:
+        bag = session_state.get("room3_15m_spec_cool") or {}
+    except Exception:
+        return None
+    raw = bag.get(_15m_spec_bag_token(letter, ticker))
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=room3_engine.ET)
+    return ts
+
+
+def _15m_spec_mark_stop_cool(session_state: Any, letter: str, ticker: str) -> None:
+    until = _5b_now(session_state) + timedelta(seconds=ONE_A_15M_COOL_SEC)
+    _5b_bag_set(
+        session_state,
+        "room3_15m_spec_cool",
+        _15m_spec_bag_token(letter, ticker),
+        until.isoformat(),
+    )
+
+
+def _15m_spec_used_today(session_state: Any, letter: str, ticker: str) -> bool:
+    if session_state is None or not letter:
+        return False
+    try:
+        bag = session_state.get("room3_15m_spec_used_day") or {}
+    except Exception:
+        return False
+    return str(bag.get(_15m_spec_bag_token(letter, ticker)) or "") == _5b_day_key(
+        session_state
+    )
+
+
+def _15m_spec_mark_used(session_state: Any, letter: str, ticker: str) -> None:
+    _5b_bag_set(
+        session_state,
+        "room3_15m_spec_used_day",
+        _15m_spec_bag_token(letter, ticker),
         _5b_day_key(session_state),
     )
 
@@ -1327,14 +1722,69 @@ def _pack_mark_stop_cool(session_state: Any, ticker: str, lot: dict[str, Any]) -
         ONE_A_5M_EXIT_STYLE,
         ONE_B_5M_EXIT_STYLE,
         FIVE_A_5M_EXIT_STYLE,
+        ONE_C_5M_EXIT_STYLE,
+        NINE_A_5M_EXIT_STYLE,
+        FIVE_B_5M_EXIT_STYLE,
+        TWO_B_5M_EXIT_STYLE,
+        FIVE_C_5M_EXIT_STYLE,
+        EIGHT_A_5M_EXIT_STYLE,
+        SIX_A_5M_EXIT_STYLE,
+        TWO_C_5M_EXIT_STYLE,
+        TWO_D_5M_EXIT_STYLE,
+        TWO_A_5M_EXIT_STYLE,
+        ONE_D_5M_EXIT_STYLE,
+        FOUR_A_5M_EXIT_STYLE,
+        SIX_B_5M_EXIT_STYLE,
+        EIGHT_B_5M_EXIT_STYLE,
+        THREE_A_5M_EXIT_STYLE,
+        NINE_B_5M_EXIT_STYLE,
+        ONE_A_15M_EXIT_STYLE,
+        ONE_B_15M_EXIT_STYLE,
+        ONE_C_15M_EXIT_STYLE,
+        ONE_D_15M_EXIT_STYLE,
+        TWO_A_15M_EXIT_STYLE,
+        TWO_B_15M_EXIT_STYLE,
+        SIX_A_15M_EXIT_STYLE,
+        NINE_A_15M_EXIT_STYLE,
     ):
         if not letter_5m:
             letter_5m = {
                 ONE_A_5M_EXIT_STYLE: "1A",
                 ONE_B_5M_EXIT_STYLE: "1B",
                 FIVE_A_5M_EXIT_STYLE: "5A",
+                ONE_C_5M_EXIT_STYLE: "1C",
+                NINE_A_5M_EXIT_STYLE: "9A",
+                FIVE_B_5M_EXIT_STYLE: "5B",
+                TWO_B_5M_EXIT_STYLE: "2B",
+                FIVE_C_5M_EXIT_STYLE: "5C",
+                EIGHT_A_5M_EXIT_STYLE: "8A",
+                SIX_A_5M_EXIT_STYLE: "6A",
+                TWO_C_5M_EXIT_STYLE: "2C",
+                TWO_D_5M_EXIT_STYLE: "2D",
+                TWO_A_5M_EXIT_STYLE: "2A",
+                ONE_D_5M_EXIT_STYLE: "1D",
+                FOUR_A_5M_EXIT_STYLE: "4A",
+                SIX_B_5M_EXIT_STYLE: "6B",
+                EIGHT_B_5M_EXIT_STYLE: "8B",
+                THREE_A_5M_EXIT_STYLE: "3A",
+                NINE_B_5M_EXIT_STYLE: "9B",
             }.get(style, "")
-        _5m_spec_mark_stop_cool(session_state, letter_5m, ticker)
+        if letter_5m:
+            _5m_spec_mark_stop_cool(session_state, letter_5m, ticker)
+            return
+        letter_15m = {
+            ONE_A_15M_EXIT_STYLE: "1A",
+            ONE_B_15M_EXIT_STYLE: "1B",
+            ONE_C_15M_EXIT_STYLE: "1C",
+            ONE_D_15M_EXIT_STYLE: "1D",
+            TWO_A_15M_EXIT_STYLE: "2A",
+            TWO_B_15M_EXIT_STYLE: "2B",
+            SIX_A_15M_EXIT_STYLE: "6A",
+            NINE_A_15M_EXIT_STYLE: "9A",
+        }.get(style, "")
+        if letter_15m:
+            _15m_spec_mark_stop_cool(session_state, letter_15m, ticker)
+            return
         return
     if _is_1a_1m(strat, tf) or style in ONE_A_EXIT_STYLES:
         _1a_mark_stop_cool(session_state, ticker)
@@ -3029,8 +3479,8 @@ def _1b_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
     return True
 
 
-def _5a_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
-    """5m dump bounce: vel5 ≤−2, last green ≥2%, under VWAP. Not 1A / 1B."""
+def _5a_5m_dump_ok(slices: list[dict[str, Any]]) -> bool:
+    """Under-VWAP dump bounce body. 5A is this minus 5B / 6A; 5B climax; 6A tighter vel."""
     if len(slices) < 3:
         return False
     if _1a_5m_gene_ok(slices) or _1b_5m_gene_ok(slices):
@@ -3047,6 +3497,355 @@ def _5a_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
     vwap = _3a_session_vwap(slices)
     px = float(last.get("c") or 0)
     if vwap <= 0 or px >= vwap:
+        return False
+    return True
+
+
+def _5a_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """5m dump bounce: vel5 ≤−2, last green ≥2%, under VWAP. Not 1A / 1B / 5B / 6A."""
+    if not _5a_5m_dump_ok(slices):
+        return False
+    if _5b_5m_gene_ok(slices):
+        return False
+    if _6a_5m_gene_ok(slices):
+        return False
+    return True
+
+
+def _1c_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Quieter Layout 1 up: vel5 0–<5%, last green ≥3.5%, RVOL <1.5. Not 1A / 1B / 5A."""
+    if len(slices) < 3:
+        return False
+    if _1a_5m_gene_ok(slices) or _1b_5m_gene_ok(slices) or _5a_5m_gene_ok(slices):
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < ONE_C_5M_BAR_RANGE_PCT:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < ONE_C_5M_VEL5_MIN or vel5 >= ONE_C_5M_VEL5_MAX:
+        return False
+    if _5b_tape_rvol(slices) >= ONE_C_5M_RVOL_MAX:
+        return False
+    return True
+
+
+def _9a_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Dump bounce above VWAP: vel5 ≤−2, last green ≥2.5%, loc ≥0.50. Not 5A (under VWAP)."""
+    if len(slices) < 3:
+        return False
+    if (
+        _1a_5m_gene_ok(slices)
+        or _1b_5m_gene_ok(slices)
+        or _5a_5m_gene_ok(slices)
+        or _1c_5m_gene_ok(slices)
+    ):
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < NINE_A_5M_BAR_RANGE_PCT:
+        return False
+    if _bar_close_loc(last) < NINE_A_5M_LOC_MIN:
+        return False
+    if _window_velocity_pct(slices, 5) > NINE_A_5M_VEL5_MAX:
+        return False
+    vwap = _3a_session_vwap(slices)
+    px = float(last.get("c") or 0)
+    if vwap <= 0 or px <= vwap:
+        return False
+    return True
+
+
+def _5b_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Dump climax: 5A dump plus last green ≥4% loc ≥0.50. Not leftover wallpaper."""
+    if not _5a_5m_dump_ok(slices):
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < FIVE_B_5M_BAR_RANGE_PCT:
+        return False
+    if _bar_close_loc(last) < FIVE_B_5M_LOC_MIN:
+        return False
+    return True
+
+
+def _6a_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Tighter dump subset of 5A: vel5 ≤−3.5, last green ≥2%, loc ≥0.40, under VWAP. Not 5B climax."""
+    if not _5a_5m_dump_ok(slices):
+        return False
+    if _5b_5m_gene_ok(slices):
+        return False
+    last = slices[-1]
+    if _bar_close_loc(last) < SIX_A_5M_LOC_MIN:
+        return False
+    if _window_velocity_pct(slices, 5) > SIX_A_5M_VEL5_MAX:
+        return False
+    return True
+
+
+def _5m_spec_siblings_ok(slices: list[dict[str, Any]]) -> bool:
+    """True when a leftover-locked 5m letter already owns this tape."""
+    return (
+        _1a_5m_gene_ok(slices)
+        or _1b_5m_gene_ok(slices)
+        or _1c_5m_gene_ok(slices)
+        or _5a_5m_gene_ok(slices)
+        or _9a_5m_gene_ok(slices)
+        or _5b_5m_gene_ok(slices)
+        or _2b_5m_gene_ok(slices)
+        or _5c_5m_gene_ok(slices)
+        or _8a_5m_gene_ok(slices)
+        or _6a_5m_gene_ok(slices)
+    )
+
+
+def _2c_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Origin 2C (5M): last range ≥1.9%, RVOL ≥1.5. Last-green is not required. Not siblings."""
+    if len(slices) < 3:
+        return False
+    if _5m_spec_siblings_ok(slices):
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < TWO_C_5M_BAR_RANGE_PCT:
+        return False
+    if _5b_tape_rvol(slices) < TWO_C_5M_RVOL_MIN:
+        return False
+    return True
+
+
+def _2d_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Origin 2D (5M): last range ≥0.9%, RVOL ≥1.5. Last-green is not required. Not 2C / siblings."""
+    if len(slices) < 3:
+        return False
+    if _5m_spec_siblings_ok(slices) or _2c_5m_gene_ok(slices):
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < TWO_D_5M_BAR_RANGE_PCT:
+        return False
+    if _5b_tape_rvol(slices) < TWO_D_5M_RVOL_MIN:
+        return False
+    return True
+
+
+def _2a_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Origin 2A (5M): last range ≥2%, RVOL ≥1.5. Last-green is not required. Not leftover siblings."""
+    if len(slices) < 3:
+        return False
+    if _5m_spec_siblings_ok(slices):
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < TWO_A_5M_BAR_RANGE_PCT:
+        return False
+    if _5b_tape_rvol(slices) < TWO_A_5M_RVOL_MIN:
+        return False
+    return True
+
+
+def _1d_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Origin 1D (5M): last range ≥1%, RVOL ≥1.5, vel5 under 3%. Last-green is not required. Not 2C / leftover siblings."""
+    if len(slices) < 3:
+        return False
+    if _5m_spec_siblings_ok(slices) or _2c_5m_gene_ok(slices):
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < ONE_D_5M_BAR_RANGE_PCT:
+        return False
+    if _5b_tape_rvol(slices) < ONE_D_5M_RVOL_MIN:
+        return False
+    if _window_velocity_pct(slices, 5) >= ONE_D_5M_VEL5_MAX:
+        return False
+    return True
+
+
+def _4a_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Origin 4A (5M): vel5 3–<8, last range ≥1.5%, RVOL ≥1.5. Last-green is not required. Not leftover siblings."""
+    if len(slices) < 3:
+        return False
+    if _5m_spec_siblings_ok(slices):
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < FOUR_A_5M_BAR_RANGE_PCT:
+        return False
+    if _5b_tape_rvol(slices) < FOUR_A_5M_RVOL_MIN:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < FOUR_A_5M_VEL5_MIN or vel5 >= FOUR_A_5M_VEL5_MAX:
+        return False
+    return True
+
+
+def _6b_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Origin 6B (5M): last range ≥2%, RVOL ≥1.5. Last-green is not required. Not leftover siblings."""
+    if len(slices) < 3:
+        return False
+    if _5m_spec_siblings_ok(slices):
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < SIX_B_5M_BAR_RANGE_PCT:
+        return False
+    if _5b_tape_rvol(slices) < SIX_B_5M_RVOL_MIN:
+        return False
+    return True
+
+
+def _8b_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Origin 8B (5M): last range ≥2%, RVOL ≥1.5. Last-green is not required. Not leftover siblings."""
+    if len(slices) < 3:
+        return False
+    if _5m_spec_siblings_ok(slices):
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < EIGHT_B_5M_BAR_RANGE_PCT:
+        return False
+    if _5b_tape_rvol(slices) < EIGHT_B_5M_RVOL_MIN:
+        return False
+    return True
+
+
+def _3a_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Origin 3A (5M): last range ≥2%, RVOL ≥1.5. Last-green is not required. Not leftover siblings."""
+    if len(slices) < 3:
+        return False
+    if _5m_spec_siblings_ok(slices):
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < THREE_A_5M_BAR_RANGE_PCT:
+        return False
+    if _5b_tape_rvol(slices) < THREE_A_5M_RVOL_MIN:
+        return False
+    return True
+
+
+def _9b_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Origin 9B (5M): last range ≥4%. Last-green is not required. No RVOL gate. Not leftover siblings."""
+    if len(slices) < 3:
+        return False
+    if _5m_spec_siblings_ok(slices):
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < NINE_B_5M_BAR_RANGE_PCT:
+        return False
+    return True
+
+
+def _1a_15m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Leftover 1A (15M): vel5 ≥12%, last range ≥2%. Last-green is not required."""
+    if len(slices) < 3:
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < ONE_A_15M_BAR_RANGE_PCT:
+        return False
+    if _window_velocity_pct(slices, 5) < ONE_A_15M_VEL5_MIN:
+        return False
+    return True
+
+
+def _15m_origin_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Origin 15m (not 1A / 8A / 8B): last range ≥3%. Last-green is not required."""
+    if len(slices) < 3:
+        return False
+    if _1a_15m_gene_ok(slices):
+        return False
+    last = slices[-1]
+    if _bar_range_pct(last) < FIFTEEN_M_ORIGIN_BAR_RANGE_PCT:
+        return False
+    return True
+
+
+def _2b_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Leftover 9-bar up: vel9 ≥8%, last green ≥2.5%. Not 1A / 1B / 1C / 5A / 9A / 5B."""
+    if len(slices) < 3:
+        return False
+    if (
+        _1a_5m_gene_ok(slices)
+        or _1b_5m_gene_ok(slices)
+        or _1c_5m_gene_ok(slices)
+        or _5a_5m_gene_ok(slices)
+        or _9a_5m_gene_ok(slices)
+        or _5b_5m_gene_ok(slices)
+        or _6a_5m_gene_ok(slices)
+    ):
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < TWO_B_5M_BAR_RANGE_PCT:
+        return False
+    if _window_velocity_pct(slices, 9) < TWO_B_5M_VEL9_PCT:
+        return False
+    return True
+
+
+def _5c_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Milder dump than 5A: vel5 −1.5 to under −2, last green ≥2%, under VWAP."""
+    if len(slices) < 3:
+        return False
+    if (
+        _1a_5m_gene_ok(slices)
+        or _1b_5m_gene_ok(slices)
+        or _1c_5m_gene_ok(slices)
+        or _5a_5m_gene_ok(slices)
+        or _9a_5m_gene_ok(slices)
+        or _5b_5m_gene_ok(slices)
+        or _6a_5m_gene_ok(slices)
+        or _2b_5m_gene_ok(slices)
+    ):
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < FIVE_C_5M_BAR_RANGE_PCT:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 <= FIVE_C_5M_VEL5_MIN or vel5 > FIVE_C_5M_VEL5_MAX:
+        return False
+    vwap = _3a_session_vwap(slices)
+    px = float(last.get("c") or 0)
+    if vwap <= 0 or px >= vwap:
+        return False
+    return True
+
+
+def _8a_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
+    """Loud leftover flat-up: vel5 −2–<2, last green ≥2%, loc ≥0.50, RVOL ≥1.5, session ≥8%."""
+    if len(slices) < 3:
+        return False
+    if (
+        _1a_5m_gene_ok(slices)
+        or _1b_5m_gene_ok(slices)
+        or _1c_5m_gene_ok(slices)
+        or _5a_5m_gene_ok(slices)
+        or _9a_5m_gene_ok(slices)
+        or _5b_5m_gene_ok(slices)
+        or _2b_5m_gene_ok(slices)
+        or _5c_5m_gene_ok(slices)
+        or _6a_5m_gene_ok(slices)
+    ):
+        return False
+    last = slices[-1]
+    last_o = float(last.get("o") or 0)
+    last_c = float(last.get("c") or 0)
+    if last_o <= 0 or last_c <= last_o:
+        return False
+    if _bar_range_pct(last) < EIGHT_A_5M_BAR_RANGE_PCT:
+        return False
+    if _bar_close_loc(last) < EIGHT_A_5M_LOC_MIN:
+        return False
+    vel5 = _window_velocity_pct(slices, 5)
+    if vel5 < EIGHT_A_5M_VEL5_MIN or vel5 >= EIGHT_A_5M_VEL5_MAX:
+        return False
+    if _5b_tape_rvol(slices) < EIGHT_A_5M_RVOL_MIN:
+        return False
+    if _session_up_pct(slices) < EIGHT_A_5M_SESS_PCT:
         return False
     return True
 
@@ -3634,6 +4433,135 @@ def _5a_5m_pack_exits(slices, fill, structural_move_pct=0.0):
     )
 
 
+def _1c_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=ONE_C_5M_STOP_FLOOR_PCT, tgt_frac=ONE_C_5M_TARGET_FRAC
+    )
+
+
+def _9a_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=NINE_A_5M_STOP_FLOOR_PCT, tgt_frac=NINE_A_5M_TARGET_FRAC
+    )
+
+
+def _5b_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=FIVE_B_5M_STOP_FLOOR_PCT, tgt_frac=FIVE_B_5M_TARGET_FRAC
+    )
+
+
+def _2b_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=TWO_B_5M_STOP_FLOOR_PCT, tgt_frac=TWO_B_5M_TARGET_FRAC
+    )
+
+
+def _5c_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=FIVE_C_5M_STOP_FLOOR_PCT, tgt_frac=FIVE_C_5M_TARGET_FRAC
+    )
+
+
+def _8a_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=EIGHT_A_5M_STOP_FLOOR_PCT, tgt_frac=EIGHT_A_5M_TARGET_FRAC
+    )
+
+
+def _6a_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=SIX_A_5M_STOP_FLOOR_PCT, tgt_frac=SIX_A_5M_TARGET_FRAC
+    )
+
+
+def _2c_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=TWO_C_5M_STOP_FLOOR_PCT, tgt_frac=TWO_C_5M_TARGET_FRAC
+    )
+
+
+def _2d_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=TWO_D_5M_STOP_FLOOR_PCT, tgt_frac=TWO_D_5M_TARGET_FRAC
+    )
+
+
+def _2a_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=TWO_A_5M_STOP_FLOOR_PCT, tgt_frac=TWO_A_5M_TARGET_FRAC
+    )
+
+
+def _1d_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=ONE_D_5M_STOP_FLOOR_PCT, tgt_frac=ONE_D_5M_TARGET_FRAC
+    )
+
+
+def _4a_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=FOUR_A_5M_STOP_FLOOR_PCT, tgt_frac=FOUR_A_5M_TARGET_FRAC
+    )
+
+
+def _6b_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=SIX_B_5M_STOP_FLOOR_PCT, tgt_frac=SIX_B_5M_TARGET_FRAC
+    )
+
+
+def _8b_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=EIGHT_B_5M_STOP_FLOOR_PCT, tgt_frac=EIGHT_B_5M_TARGET_FRAC
+    )
+
+
+def _3a_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=THREE_A_5M_STOP_FLOOR_PCT, tgt_frac=THREE_A_5M_TARGET_FRAC
+    )
+
+
+def _9b_5m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=NINE_B_5M_STOP_FLOOR_PCT, tgt_frac=NINE_B_5M_TARGET_FRAC
+    )
+
+
+def _1a_15m_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices, fill, floor_pct=ONE_A_15M_STOP_FLOOR_PCT, tgt_frac=ONE_A_15M_TARGET_FRAC
+    )
+
+
+def _15m_origin_pack_exits(slices, fill, structural_move_pct=0.0):
+    _ = structural_move_pct
+    return _5m_spec_pack_exits(
+        slices,
+        fill,
+        floor_pct=FIFTEEN_M_ORIGIN_STOP_FLOOR_PCT,
+        tgt_frac=FIFTEEN_M_ORIGIN_TARGET_FRAC,
+    )
+
+
 def _1a_style_for(handle: str) -> str:
     if handle == "trip":
         return ONE_A_EXIT_TRIP
@@ -3759,6 +4687,24 @@ def _5b_lot_exit(lot: dict[str, Any]) -> bool:
         or _is_1a_5m(strat, tf)
         or _is_1b_5m(strat, tf)
         or _is_5a_5m(strat, tf)
+        or _is_1c_5m(strat, tf)
+        or _is_9a_5m(strat, tf)
+        or _is_5b_5m(strat, tf)
+        or _is_2b_5m(strat, tf)
+        or _is_5c_5m(strat, tf)
+        or _is_8a_5m(strat, tf)
+        or _is_6a_5m(strat, tf)
+        or _is_2c_5m(strat, tf)
+        or _is_2d_5m(strat, tf)
+        or _is_2a_5m(strat, tf)
+        or _is_1d_5m(strat, tf)
+        or _is_4a_5m(strat, tf)
+        or _is_6b_5m(strat, tf)
+        or _is_8b_5m(strat, tf)
+        or _is_3a_5m(strat, tf)
+        or _is_9b_5m(strat, tf)
+        or _is_1a_15m(strat, tf)
+        or bool(_is_15m_origin_letter(strat, tf))
         or _is_1a_1m(strat, tf)
         or _is_2d_1m(strat, tf)
     )
@@ -4364,6 +5310,250 @@ def _try_queue_child_entry(
                 stamped["exit_stop_px"] = stop_px
                 stamped["exit_tgt_px"] = tgt_px
                 _5m_spec_mark_used(session_state, "5A", ticker)
+            elif _is_1c_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _1c_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = ONE_C_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = ONE_C_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "1C", ticker)
+            elif _is_9a_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _9a_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = NINE_A_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = NINE_A_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "9A", ticker)
+            elif _is_5b_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _5b_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = FIVE_B_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = FIVE_B_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "5B", ticker)
+            elif _is_2b_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _2b_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = TWO_B_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = TWO_B_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "2B", ticker)
+            elif _is_5c_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _5c_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = FIVE_C_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = FIVE_C_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "5C", ticker)
+            elif _is_8a_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _8a_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = EIGHT_A_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = EIGHT_A_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "8A", ticker)
+            elif _is_6a_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _6a_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = SIX_A_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = SIX_A_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "6A", ticker)
+            elif _is_2c_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _2c_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = TWO_C_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = TWO_C_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "2C", ticker)
+            elif _is_2d_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _2d_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = TWO_D_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = TWO_D_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "2D", ticker)
+            elif _is_2a_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _2a_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = TWO_A_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = TWO_A_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "2A", ticker)
+            elif _is_1d_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _1d_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = ONE_D_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = ONE_D_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "1D", ticker)
+            elif _is_4a_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _4a_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = FOUR_A_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = FOUR_A_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "4A", ticker)
+            elif _is_6b_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _6b_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = SIX_B_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = SIX_B_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "6B", ticker)
+            elif _is_8b_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _8b_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = EIGHT_B_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = EIGHT_B_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "8B", ticker)
+            elif _is_3a_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _3a_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = THREE_A_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = THREE_A_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "3A", ticker)
+            elif _is_9b_5m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _9b_5m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = NINE_B_5M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = NINE_B_5M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _5m_spec_mark_used(session_state, "9B", ticker)
+            elif _is_1a_15m(strategy, tf):
+                stop_px, tgt_px, stop_frac = _1a_15m_pack_exits(
+                    slices, last_px, structural
+                )
+                sig["exit_style"] = ONE_A_15M_EXIT_STYLE
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = ONE_A_15M_EXIT_STYLE
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _15m_spec_mark_used(session_state, "1A", ticker)
+            elif _is_15m_origin_letter(strategy, tf):
+                head = _is_15m_origin_letter(strategy, tf)
+                stop_px, tgt_px, stop_frac = _15m_origin_pack_exits(
+                    slices, last_px, structural
+                )
+                style = {
+                    "1B": ONE_B_15M_EXIT_STYLE,
+                    "1C": ONE_C_15M_EXIT_STYLE,
+                    "1D": ONE_D_15M_EXIT_STYLE,
+                    "2A": TWO_A_15M_EXIT_STYLE,
+                    "2B": TWO_B_15M_EXIT_STYLE,
+                    "6A": SIX_A_15M_EXIT_STYLE,
+                    "9A": NINE_A_15M_EXIT_STYLE,
+                }[head]
+                sig["exit_style"] = style
+                sig["exit_r_frac"] = stop_frac
+                sig["exit_stop_px"] = stop_px
+                sig["exit_tgt_px"] = tgt_px
+                stamped["exit_style"] = style
+                stamped["exit_r_frac"] = stop_frac
+                stamped["exit_stop_px"] = stop_px
+                stamped["exit_tgt_px"] = tgt_px
+                _15m_spec_mark_used(session_state, head, ticker)
             else:
                 stop_px, tgt_px, stop_frac = _ph_pack_exits(
                     slices, last_px, structural, tf
@@ -5237,10 +6427,56 @@ def _5m_spec_entry_ready(
         return False, f"{letter} (5M) · skip 9:30–{until}"
     if _5m_spec_used_today(session_state, letter, ticker):
         return False, f"{letter} (5M) · first of day already used"
-    gene = {"1A": _1a_5m_gene_ok, "1B": _1b_5m_gene_ok, "5A": _5a_5m_gene_ok}[letter]
+    gene = {
+        "1A": _1a_5m_gene_ok,
+        "1B": _1b_5m_gene_ok,
+        "5A": _5a_5m_gene_ok,
+        "1C": _1c_5m_gene_ok,
+        "9A": _9a_5m_gene_ok,
+        "5B": _5b_5m_gene_ok,
+        "2B": _2b_5m_gene_ok,
+        "5C": _5c_5m_gene_ok,
+        "8A": _8a_5m_gene_ok,
+        "6A": _6a_5m_gene_ok,
+        "2C": _2c_5m_gene_ok,
+        "2D": _2d_5m_gene_ok,
+        "2A": _2a_5m_gene_ok,
+        "1D": _1d_5m_gene_ok,
+        "4A": _4a_5m_gene_ok,
+        "6B": _6b_5m_gene_ok,
+        "8B": _8b_5m_gene_ok,
+        "3A": _3a_5m_gene_ok,
+        "9B": _9b_5m_gene_ok,
+    }[letter]
     _ = last_px
     return _1m_live_fill_now(
         line, f"{letter} (5M)", gene_ok=gene(slices), wait="wait suited tape"
+    )
+
+
+def _15m_spec_entry_ready(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    *,
+    last_px: float,
+    letter: str,
+    session_state: Any = None,
+) -> tuple[bool, str]:
+    ticker = str(line.get("ticker") or "").upper()
+    cool = _15m_spec_cool_until(session_state, letter, ticker)
+    now = _5b_now(session_state)
+    if cool is not None and now < cool:
+        mins = max(1, int((cool - now).total_seconds() // 60))
+        return False, f"{letter} (15M) · cool {mins}m after stop"
+    if _15m_spec_used_today(session_state, letter, ticker):
+        return False, f"{letter} (15M) · first of day already used"
+    if letter == "1A":
+        ok = _1a_15m_gene_ok(slices)
+    else:
+        ok = _15m_origin_gene_ok(slices)
+    _ = last_px
+    return _1m_live_fill_now(
+        line, f"{letter} (15M)", gene_ok=ok, wait="wait suited tape"
     )
 
 
@@ -5451,6 +6687,167 @@ def _entry_trigger_ready(
             last_px=last_px,
             letter="5A",
             skip_until=FIVE_A_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_1c_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="1C",
+            skip_until=ONE_C_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_9a_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="9A",
+            skip_until=NINE_A_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_5b_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="5B",
+            skip_until=FIVE_B_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_2b_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="2B",
+            skip_until=TWO_B_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_5c_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="5C",
+            skip_until=FIVE_C_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_8a_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="8A",
+            skip_until=EIGHT_A_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_6a_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="6A",
+            skip_until=SIX_A_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_2c_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="2C",
+            skip_until=TWO_C_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_2d_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="2D",
+            skip_until=TWO_D_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_2a_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="2A",
+            skip_until=TWO_A_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_1d_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="1D",
+            skip_until=ONE_D_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_4a_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="4A",
+            skip_until=FOUR_A_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_6b_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="6B",
+            skip_until=SIX_B_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_8b_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="8B",
+            skip_until=EIGHT_B_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_3a_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="3A",
+            skip_until=THREE_A_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_9b_5m(strategy, tf):
+        return _5m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="9B",
+            skip_until=NINE_B_5M_SKIP_UNTIL,
+            session_state=session_state,
+        )
+    if _is_1a_15m(strategy, tf):
+        return _15m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter="1A",
+            session_state=session_state,
+        )
+    origin_15m = _is_15m_origin_letter(strategy, tf)
+    if origin_15m:
+        return _15m_spec_entry_ready(
+            line,
+            slices,
+            last_px=last_px,
+            letter=origin_15m,
             session_state=session_state,
         )
     return _ph_entry_ready(

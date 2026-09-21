@@ -1,0 +1,16 @@
+---
+description: Room 3 — 9A (5M) above-VWAP dump-bounce tactics (locked 2026-09-21)
+alwaysApply: true
+---
+
+# 9A (5M) — locked 2026-09-21
+
+Detect is still **9A nearest, ≥85%, same TF**. Do not treat every 85% print as 9A. Not 5A (that letter is the **under-VWAP** dump bounce, last bar **≥2%**).
+
+**Hunt extra:** 5-bar window still down **≥2%**, last bar **green** and range **≥2.5%**, close loc **≥0.50**, live print **above VWAP**. Not 5A / 1A / 1B / 1C.
+
+**Tactics:** skip **9:30–9:45 ET**; **first 9A of the day** on that name; **fill now**; stop under the **3-bar lookback low** (floor 2%, **no 3.5% cap**); **7.5% target**. 15 min cool after a stop. Market in RTH; limit outside RTH.
+
+Local until Cloud push.
+
+**Sep 2–11 belt (Yahoo 5m):** a firing day about **+5.7% on $1,000** · **win rate 78% (7 of 9)** · fire **5 of 7**. Prior 7% / no loc was +4.3 · 70% (7 of 10). 8% broke WR. Not live Alpaca.

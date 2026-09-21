@@ -6,6 +6,11 @@ Not live Alpaca. Not Cloud. Hunt extras stand in for ≥85% nearest
 15m cool / 3A noon cut / locked stops and targets. Dip does not block.
 2D match ≥91 is not scored (no DNA). Purgatory never fires.
 
+Sim exits (not live Cloud): 1m stays the locked letter book. Trailing stops
+are off on 1m / 5m / 15m — lookback stop and hard targets only. 5m hard clip
++15%. 15m hard clip +20%. Live 1A trip trail and 5m placeholder trail stay
+on Cloud. Sim size tests: iceberg clips and loud-stretch entries.
+
   python3 room3_walkforward.py
 """
 
@@ -27,6 +32,41 @@ import room3_precursor as precursor
 ET = ZoneInfo("America/New_York")
 
 LOCKED_1M = ("5B", "2A", "1A", "2D", "2B", "2C", "3A", "4A", "3B", "5A", "7A", "3C", "4D", "4B", "6A", "4C", "4E", "6B", "3D", "7B", "3G", "3F", "8A", "7C", "3E", "6C")
+LOCKED_5M = ("1A", "1B", "5A", "1C", "9A", "5B", "2B", "5C", "8A", "6A", "2C", "2D", "2A", "1D", "4A", "6B", "8B", "3A", "9B")
+# All live 5m letters (recluster). All 19 have Hunt extras.
+LOCKED_5M_LIVE = (
+    "1A",
+    "1B",
+    "1C",
+    "1D",
+    "2A",
+    "2B",
+    "2C",
+    "2D",
+    "3A",
+    "4A",
+    "5A",
+    "5B",
+    "5C",
+    "6A",
+    "6B",
+    "8A",
+    "8B",
+    "9A",
+    "9B",
+)
+# Live 15m letters (recluster). 1A leftover Hunt extras; 1B/1C/1D/2A/2B/6A/9A origin extras.
+# 8A/8B stay placeholder dip-hold.
+LOCKED_15M = ("1A", "1B", "1C", "1D", "2A", "2B", "6A", "9A")
+LOCKED_15M_LIVE = ("1A", "1B", "1C", "1D", "2A", "2B", "6A", "8A", "8B", "9A")
+SIM_5M_TARGET_FRAC = 0.15
+SIM_5M_TRAIL_FRAC = 0.08  # unused in sim — trails off (2026-09-21)
+SIM_5M_EXIT_STYLE = "sim_5m_trail"
+SIM_NO_TRAIL = True
+SIM_15M_TARGET_FRAC = 0.20
+SIM_ICEBERG_FRAC = 0.02
+SIM_LOUD_PCT = 90.0
+SIM_LOUD_MIN_PRIOR = 15
 SESS_START = date(2026, 9, 2)
 SESS_END = date(2026, 9, 11)
 # Sep 7 2026 is Labor Day — RTH closed. Not a missing-tape day.
@@ -105,12 +145,64 @@ def belt_for(sess: date) -> tuple[str, ...]:
     return BELT_BY_DAY.get(sess) or BELT_UNION
 
 
-def _letter_token(letter: str) -> str:
-    return f"{letter} (1M)"
+def _letter_token(letter: str, tf: str = "1m") -> str:
+    tf_n = str(tf or "1m").strip().lower()
+    tag = "5M" if tf_n == "5m" else ("15M" if tf_n == "15m" else "1M")
+    return f"{letter} ({tag})"
 
 
-def gene_ok(letter: str, slices: list[dict[str, Any]]) -> bool:
-    """Hunt extras as detect. Wallpaper does not fire."""
+def gene_ok(letter: str, slices: list[dict[str, Any]], tf: str = "1m") -> bool:
+    """Hunt extras as detect. Wallpaper does not fire.
+
+    15m 8A/8B may reach the placeholder Handle (dip then hold). That is not a Match% ≥85% claim.
+    """
+    tf_n = str(tf or "1m").strip().lower()
+    if tf_n == "15m":
+        if letter == "1A":
+            return bool(m._1a_15m_gene_ok(slices))
+        if letter in ("1B", "1C", "1D", "2A", "2B", "6A", "9A"):
+            return bool(m._15m_origin_gene_ok(slices))
+        return letter in LOCKED_15M_LIVE
+    if tf_n == "5m":
+        if letter == "1A":
+            return bool(m._1a_5m_gene_ok(slices))
+        if letter == "1B":
+            return bool(m._1b_5m_gene_ok(slices))
+        if letter == "5A":
+            return bool(m._5a_5m_gene_ok(slices))
+        if letter == "1C":
+            return bool(m._1c_5m_gene_ok(slices))
+        if letter == "9A":
+            return bool(m._9a_5m_gene_ok(slices))
+        if letter == "5B":
+            return bool(m._5b_5m_gene_ok(slices))
+        if letter == "2B":
+            return bool(m._2b_5m_gene_ok(slices))
+        if letter == "5C":
+            return bool(m._5c_5m_gene_ok(slices))
+        if letter == "8A":
+            return bool(m._8a_5m_gene_ok(slices))
+        if letter == "6A":
+            return bool(m._6a_5m_gene_ok(slices))
+        if letter == "2C":
+            return bool(m._2c_5m_gene_ok(slices))
+        if letter == "2D":
+            return bool(m._2d_5m_gene_ok(slices))
+        if letter == "2A":
+            return bool(m._2a_5m_gene_ok(slices))
+        if letter == "1D":
+            return bool(m._1d_5m_gene_ok(slices))
+        if letter == "4A":
+            return bool(m._4a_5m_gene_ok(slices))
+        if letter == "6B":
+            return bool(m._6b_5m_gene_ok(slices))
+        if letter == "8B":
+            return bool(m._8b_5m_gene_ok(slices))
+        if letter == "3A":
+            return bool(m._3a_5m_gene_ok(slices))
+        if letter == "9B":
+            return bool(m._9b_5m_gene_ok(slices))
+        return letter in LOCKED_5M_LIVE
     if letter == "5B":
         return bool(m._5b_gene_ok(slices))
     if letter == "2A":
@@ -283,16 +375,56 @@ def _pack_exits(
     return m._ph_pack_exits(slices, fill, 0.0, "1m")
 
 
+def five_m_pack_exits(
+    slices: list[dict[str, Any]],
+    fill: float,
+    letter: str = "1A",
+) -> tuple[float, float, float]:
+    """Sim 5m: lookback-low stop (letter floor, no 3.5 cap), +15% hard clip. No trail."""
+    floor = {"1A": 2.0, "1B": 3.5, "5A": 3.5, "1C": 2.0, "9A": 2.0, "5B": 2.0, "2B": 2.0, "5C": 3.5, "8A": 2.0, "6A": 3.5, "2C": 2.0, "2D": 2.0, "2A": 2.0, "1D": 2.0, "4A": 2.0, "6B": 2.0, "8B": 2.0, "3A": 2.0, "9B": 2.0}.get(
+        str(letter or ""), 2.0
+    )
+    tgt = {"1C": 0.14, "9A": 0.075, "5B": 0.08, "2B": 0.10, "5C": 0.08, "8A": 0.08, "6A": 0.09, "2C": 0.08, "2D": 0.08, "2A": 0.08, "1D": 0.08, "4A": 0.08, "6B": 0.08, "8B": 0.08, "3A": 0.08, "9B": 0.08}.get(str(letter or ""), SIM_5M_TARGET_FRAC)
+    return m._5m_spec_pack_exits(
+        slices, fill, floor_pct=floor, tgt_frac=tgt
+    )
+
+
 def fifteen_m_pack_exits(
     slices: list[dict[str, Any]],
     fill: float,
     structural_move_pct: float = 0.0,
+    letter: str = "",
 ) -> tuple[float, float, float]:
-    """Sim/live 15m placeholder: locked 12% target, lookback-low stop."""
-    return m._ph_pack_exits(slices, fill, structural_move_pct, "15m")
+    """Sim 15m: lookback-low stop. Specialized 1A clips 8%; other specialized 12%; leftover sim 20%."""
+    _ = structural_move_pct
+    px = float(fill or 0)
+    if px <= 0:
+        return 0.0, 0.0, 0.02
+    stop_px, stop_frac = m._lookback_stop_px(px, slices, 3, 2.0, cap_pct=None)
+    if letter == "1A":
+        tgt = 0.08
+    elif letter in ("1B", "1C", "1D", "2A", "2B", "6A", "9A"):
+        tgt = 0.12
+    else:
+        tgt = SIM_15M_TARGET_FRAC
+    return stop_px, px * (1.0 + tgt), stop_frac
 
 
-def _mark_fill(ss: _SS, letter: str, ticker: str) -> None:
+def _mark_fill(ss: _SS, letter: str, ticker: str, tf: str = "1m") -> None:
+    tf_n = str(tf or "1m").strip().lower()
+    if tf_n == "15m":
+        if letter in LOCKED_15M:
+            m._15m_spec_mark_used(ss, letter, ticker)
+        else:
+            m._ph_mark_used(ss, ticker, _letter_token(letter, "15m"))
+        return
+    if tf_n == "5m":
+        if letter in ("1A", "1B", "5A", "1C", "9A", "5B", "2B", "5C", "8A", "6A", "2C", "2D", "2A", "1D", "4A", "6B", "8B", "3A", "9B"):
+            m._5m_spec_mark_used(ss, letter, ticker)
+        else:
+            m._ph_mark_used(ss, ticker, _letter_token(letter, "5m"))
+        return
     if letter == "5B":
         m._5b_mark_used(ss, ticker)
     elif letter == "2A":
@@ -386,6 +518,38 @@ def bars_from_frame(frame: Any, sess: date) -> list[dict[str, Any]]:
         out.append({"ts": stamp, "o": o, "h": h, "l": lo, "c": c, "v": v})
     out.sort(key=lambda b: b["ts"])
     return out
+
+
+def resample_bars(bars: list[dict[str, Any]], minutes: int) -> list[dict[str, Any]]:
+    """Bucket 1m prints into 5m / 15m RTH bars."""
+    if minutes < 2 or not bars:
+        return list(bars)
+    buckets: dict[datetime, dict[str, Any]] = {}
+    order: list[datetime] = []
+    for bar in bars:
+        ts = bar.get("ts")
+        if not isinstance(ts, datetime):
+            continue
+        minute = (ts.minute // minutes) * minutes
+        key = ts.replace(minute=minute, second=0, microsecond=0)
+        o = float(bar.get("o") or 0)
+        h = float(bar.get("h") or 0)
+        lo = float(bar.get("l") or 0)
+        c = float(bar.get("c") or 0)
+        v = float(bar.get("v") or 0)
+        if key not in buckets:
+            buckets[key] = {"ts": key, "o": o, "h": h, "l": lo, "c": c, "v": v}
+            order.append(key)
+            continue
+        agg = buckets[key]
+        if h > float(agg["h"]):
+            agg["h"] = h
+        if lo > 0 and (float(agg["l"]) <= 0 or lo < float(agg["l"])):
+            agg["l"] = lo
+        if c > 0:
+            agg["c"] = c
+        agg["v"] = float(agg["v"]) + v
+    return [buckets[k] for k in order]
 
 
 def load_day_bars(ticker: str, sess: date) -> list[dict[str, Any]]:
@@ -484,8 +648,10 @@ def _lot_exit(
     lot: dict[str, Any],
     bar: dict[str, Any],
     last_px: float,
+    *,
+    trails: bool = False,
 ) -> tuple[str, float]:
-    """Stop / target / 1A trip trail. Does not use wall-clock day-close."""
+    """Lookback stop and hard target. Trails only if `trails` (sim search)."""
     entry = float(lot.get("entry_px") or 0)
     if entry <= 0:
         return "", 0.0
@@ -494,7 +660,21 @@ def _lot_exit(
     style = str(lot.get("exit_style") or "")
     lo = float(bar.get("l") or last_px or 0)
     hi = float(bar.get("h") or last_px or 0)
-    if style == m.ONE_A_EXIT_TRIP:
+    if trails and style == SIM_5M_EXIT_STYLE:
+        peak = max(float(lot.get("exit_high_px") or entry), hi if hi > 0 else 0.0, last_px or 0.0)
+        lot["exit_high_px"] = peak
+        arm_px = tgt_px if tgt_px > 0 else entry * (1.0 + SIM_5M_TARGET_FRAC)
+        if arm_px > 0 and peak >= arm_px:
+            lot["exit_runner_on"] = True
+        if lot.get("exit_runner_on"):
+            trail = peak * (1.0 - SIM_5M_TRAIL_FRAC)
+            if trail > stop_px:
+                stop_px = trail
+                lot["exit_stop_px"] = stop_px
+        if lo > 0 and lo <= stop_px:
+            return ("runner" if lot.get("exit_runner_on") else "stop"), stop_px
+        return "", 0.0
+    if trails and style == m.ONE_A_EXIT_TRIP:
         peak = max(float(lot.get("exit_high_px") or entry), hi if hi > 0 else 0.0, last_px or 0.0)
         lot["exit_high_px"] = peak
         if peak >= entry * (1.0 + m.ONE_A_TRIP_ARM_FRAC):
@@ -522,20 +702,82 @@ def _open_letters(lots: list[dict[str, Any]], ticker: str) -> set[str]:
     }
 
 
+def _bar_dollar(bar: dict[str, Any]) -> float:
+    c = float(bar.get("c") or 0)
+    v = float(bar.get("v") or 0)
+    if c <= 0 or v <= 0:
+        return 0.0
+    return c * v
+
+
+def _is_loud_stretch(
+    printed: list[dict[str, Any]],
+    pct: float = SIM_LOUD_PCT,
+    min_prior: int = SIM_LOUD_MIN_PRIOR,
+) -> bool:
+    """True if this bar's $ volume is at/above `pct` of prior bars this session."""
+    if len(printed) < min_prior + 1:
+        return False
+    prior = [_bar_dollar(b) for b in printed[:-1]]
+    prior = [x for x in prior if x > 0]
+    if len(prior) < min_prior:
+        return False
+    last = _bar_dollar(printed[-1])
+    if last <= 0:
+        return False
+    prior.sort()
+    i = min(len(prior) - 1, max(0, int(float(pct) / 100.0 * (len(prior) - 1))))
+    return last + 1e-9 >= prior[i]
+
+
+def _impact_px(px: float, qty: int, bar_v: float, side: str, *, k: float, cap: float) -> float:
+    if px <= 0 or qty < 1 or bar_v <= 0 or k <= 0:
+        return px
+    slip = min(float(cap), float(k) * min(1.0, qty / bar_v))
+    if side == "buy":
+        return px * (1.0 + slip)
+    return px * (1.0 - slip)
+
+
 def replay_session(
     sess: date,
     bars_by_ticker: dict[str, list[dict[str, Any]]],
     *,
     book: float = START_BOOK,
-    letters: tuple[str, ...] = LOCKED_1M,
+    letters: tuple[str, ...] | None = None,
+    tf: str = "1m",
+    part_frac: float | None = None,
+    impact_k: float = 0.0,
+    impact_cap: float = 0.03,
+    iceberg_frac: float | None = None,
+    loud_pct: float | None = None,
+    trails: bool = False,
+    ticket_frac: float | None = None,
+    min_bar_usd: float | None = None,
 ) -> dict[str, Any]:
-    """One ET session. Book resets to `book`. Overnight flat at the last RTH print."""
+    """One ET session. Book resets to `book`. Overnight flat at the last RTH print.
+
+    Optional size layer: `part_frac` of this bar's shares, plus linear impact
+    `impact_k * (qty/bar vol)` capped at `impact_cap` on buy and sell.
+    `iceberg_frac`: work a full ticket in clips of that fraction of each bar.
+    `loud_pct`: new entries only if this bar's $ vol is at/above that percentile
+    of prior bars (needs SIM_LOUD_MIN_PRIOR). Sim only — not live icebergs.
+    """
+    tf_n = str(tf or "1m").strip().lower()
+    if letters is None:
+        if tf_n == "5m":
+            letters = LOCKED_5M
+        elif tf_n == "15m":
+            letters = LOCKED_15M
+        else:
+            letters = LOCKED_1M
     ss = _SS(_now_et=datetime(sess.year, sess.month, sess.day, 9, 30, tzinfo=ET))
     cash = float(book)
-    ticket_cap = float(book) * TICKET_FRAC
+    ticket_cap = float(book) * float(TICKET_FRAC if ticket_frac is None else ticket_frac)
     open_lots: list[dict[str, Any]] = []
     closed: list[dict[str, Any]] = []
     slices: dict[str, list[dict[str, Any]]] = {t: [] for t in bars_by_ticker}
+    armed_lines: dict[tuple[str, str], dict[str, Any]] = {}
 
     events: list[tuple[datetime, str, dict[str, Any]]] = []
     for ticker, bars in bars_by_ticker.items():
@@ -543,10 +785,12 @@ def replay_session(
             events.append((bar["ts"], ticker, bar))
     events.sort(key=lambda e: (e[0], e[1]))
 
-    def close_lot(lot: dict[str, Any], reason: str, px: float, when: datetime) -> None:
+    def close_lot(
+        lot: dict[str, Any], reason: str, px: float, when: datetime, bar_v: float = 0.0
+    ) -> None:
         qty = int(lot.get("qty") or 0)
         entry = float(lot.get("entry_px") or 0)
-        exit_px = float(px or 0)
+        exit_px = _impact_px(float(px or 0), qty, bar_v, "sell", k=impact_k, cap=impact_cap)
         pnl = (exit_px - entry) * qty if qty and entry and exit_px else 0.0
         nonlocal cash
         cash += exit_px * qty
@@ -573,9 +817,9 @@ def replay_session(
             if str(lot.get("ticker") or "") != ticker:
                 still.append(lot)
                 continue
-            reason, px = _lot_exit(lot, bar, last_px)
+            reason, px = _lot_exit(lot, bar, last_px, trails=trails)
             if reason:
-                close_lot(lot, reason, px, ts)
+                close_lot(lot, reason, px, ts, float(bar.get("v") or 0))
             else:
                 still.append(lot)
         open_lots = still
@@ -583,15 +827,66 @@ def replay_session(
         slice_bar = {k: bar[k] for k in ("o", "h", "l", "c", "v")}
         slices[ticker].append(slice_bar)
         printed = slices[ticker]
+        last_px = float(bar.get("c") or 0)
+        bar_v = float(bar.get("v") or 0)
         live = _open_letters(open_lots, ticker)
+
+        def clip_buy(size_usd: float) -> tuple[int, float]:
+            cap = float(size_usd)
+            if last_px <= 0:
+                return 0, 0.0
+            if iceberg_frac is not None and bar_v > 0:
+                cap = min(cap, float(iceberg_frac) * bar_v * last_px)
+            elif part_frac is not None and bar_v > 0:
+                cap = min(cap, float(part_frac) * bar_v * last_px)
+            qty = int(cap / last_px)
+            if qty < 1:
+                return 0, 0.0
+            fill_px = _impact_px(last_px, qty, bar_v, "buy", k=impact_k, cap=impact_cap)
+            if qty * fill_px > cash + 1e-9:
+                return 0, 0.0
+            return qty, fill_px
+
+        if iceberg_frac is not None:
+            for lot in open_lots:
+                if str(lot.get("ticker") or "") != ticker:
+                    continue
+                remain = float(lot.get("remain_usd") or 0)
+                if remain <= last_px or last_px <= 0:
+                    continue
+                add_qty, add_px = clip_buy(min(remain, cash))
+                if add_qty < 1:
+                    continue
+                old_qty = int(lot.get("qty") or 0)
+                old_px = float(lot.get("entry_px") or add_px)
+                cost = add_qty * add_px
+                cash -= cost
+                new_qty = old_qty + add_qty
+                lot["entry_px"] = (
+                    (old_px * old_qty + add_px * add_qty) / new_qty if new_qty else add_px
+                )
+                lot["qty"] = new_qty
+                lot["remain_usd"] = max(0.0, remain - cost)
+                lot["iceberg_clips"] = int(lot.get("iceberg_clips") or 1) + 1
+                hi = float(bar.get("h") or last_px or 0)
+                lot["exit_high_px"] = max(float(lot.get("exit_high_px") or 0), hi, last_px)
 
         for letter in letters:
             if letter in live:
                 continue
-            if not gene_ok(letter, printed):
+            if tf_n == "15m":
+                n15 = sum(
+                    1
+                    for lot in list(open_lots) + closed
+                    if str(lot.get("ticker") or "") == ticker
+                )
+                if n15 >= 2:
+                    continue
+            if not gene_ok(letter, printed, tf=tf_n):
                 continue
-            line: dict[str, Any] = {"ticker": ticker}
-            if letter == "1A":
+            line = armed_lines.setdefault((ticker, letter), {"ticker": ticker})
+            handle = ""
+            if tf_n == "1m" and letter == "1A":
                 handle = m._1a_classify(printed)
                 if not handle:
                     continue
@@ -600,47 +895,62 @@ def replay_session(
                 line,
                 printed,
                 last_px=last_px,
-                tf="1m",
-                strategy=_letter_token(letter),
+                tf=tf_n,
+                strategy=_letter_token(letter, tf_n),
                 layout_id="WALKFORWARD",
                 structural=0.0,
                 session_state=ss,
             )
             if not ready:
                 continue
-            fill = last_px
-            if fill <= 0:
+            if last_px <= 0:
                 continue
-            size = min(ticket_cap, cash)
-            qty = int(size / fill)
+            if loud_pct is not None and not _is_loud_stretch(printed, loud_pct):
+                continue
+            if min_bar_usd is not None and _bar_dollar(bar) < float(min_bar_usd):
+                continue
+            parent = min(ticket_cap, cash)
+            qty, fill_px = clip_buy(parent)
             if qty < 1:
                 continue
-            cost = qty * fill
-            if cost > cash + 1e-9:
-                continue
+            cost = qty * fill_px
             handle = str(line.get("1a_handle") or "")
-            stop_px, tgt_px, stop_frac = _pack_exits(letter, printed, fill, handle)
+            if tf_n == "5m":
+                stop_px, tgt_px, stop_frac = five_m_pack_exits(printed, fill_px, letter)
+                style = SIM_5M_EXIT_STYLE
+            elif tf_n == "15m":
+                stop_px, tgt_px, stop_frac = fifteen_m_pack_exits(
+                    printed, fill_px, letter=letter
+                )
+                style = m.PH_EXIT_STYLE
+            else:
+                stop_px, tgt_px, stop_frac = _pack_exits(letter, printed, fill_px, handle)
+                style = _exit_style(letter, handle)
             cash -= cost
+            remain = max(0.0, parent - cost) if iceberg_frac is not None else 0.0
+            armed_lines.pop((ticker, letter), None)
             lot = {
                 "ticker": ticker,
                 "letter": letter,
-                "strategy": _letter_token(letter),
-                "tf": "1m",
+                "strategy": _letter_token(letter, tf_n),
+                "tf": tf_n,
                 "qty": qty,
-                "entry_px": fill,
+                "entry_px": fill_px,
                 "entry_ts": ts.isoformat(),
                 "entry_note": note,
                 "exit_stop_px": stop_px,
                 "exit_tgt_px": tgt_px,
                 "exit_r_frac": stop_frac,
-                "exit_style": _exit_style(letter, handle),
+                "exit_style": style,
                 "1a_handle": handle,
-                "exit_high_px": fill,
+                "exit_high_px": fill_px,
                 "exit_runner_on": False,
                 "session": sess.isoformat(),
+                "remain_usd": remain,
+                "iceberg_clips": 1 if iceberg_frac is not None else 0,
             }
             open_lots.append(lot)
-            _mark_fill(ss, letter, ticker)
+            _mark_fill(ss, letter, ticker, tf=tf_n)
             live.add(letter)
 
     if events:
@@ -649,8 +959,9 @@ def replay_session(
     for lot in list(open_lots):
         ticker = str(lot.get("ticker") or "")
         bars = bars_by_ticker.get(ticker) or []
-        px = float((bars[-1].get("c") if bars else 0) or lot.get("entry_px") or 0)
-        close_lot(lot, "eod flatten", px, ss._now_et)
+        last = bars[-1] if bars else {}
+        px = float((last.get("c") if last else 0) or lot.get("entry_px") or 0)
+        close_lot(lot, "eod flatten", px, ss._now_et, float(last.get("v") or 0))
     open_lots = []
 
     wins = [t for t in closed if float(t.get("pnl_usd") or 0) > 0]

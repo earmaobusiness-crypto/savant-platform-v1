@@ -7,7 +7,7 @@ alwaysApply: true
 
 Detect is still **5A nearest, ≥85%, same TF**. Do not treat every 85% print as 5A. Not 1A / 1B (those are the up-rips). Not 5A (1M).
 
-**Hunt extra:** 5-bar window still down **≥2%**, last bar **green** and range **≥2%**, live print **under VWAP**. Not 1A / 1B.
+**Hunt extra:** 5-bar window still down **≥2%**, last bar **green** and range **≥2%**, live print **under VWAP**. Not 1A / 1B / **5B climax** / **6A** (vel5 still down **≥3.5%**).
 
 **Tactics:** skip **9:30–10:00 ET**; **first 5A of the day** on that name; **fill now**; stop under the **3-bar lookback low** (**floor 3.5%**, **no 3.5% cap**); **6.5% target**. 15 min cool after a stop. Market in RTH; limit outside RTH.
 

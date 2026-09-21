@@ -74,7 +74,7 @@ def test_15m_placeholder_does_not_skip_open():
         [_bar(1, 1.01, 0.99, 1.0, v=100)] * 4,
         last_px=1.0,
         tf="15m",
-        strategy="1A (15M)",
+        strategy="8A (15M)",
         layout_id="1",
         structural=16.0,
         session_state=ss,
@@ -321,7 +321,7 @@ def test_5m_pack_target_is_75_structural():
 
 def test_5m_trails_8_after_target_no_hard_clip():
     lot = {
-        "strategy": "6A (5M)",
+        "strategy": "3B (5M)",
         "tf": "5m",
         "exit_style": m.PH_5M_EXIT_STYLE,
         "entry_px": 1.00,

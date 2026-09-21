@@ -103,13 +103,14 @@ def test_handle_stamps_on_vault_layout_without_mutating_vector():
 
 
 def test_5m_placeholder_handle_is_dip_hold():
-    spec = r.handle_execution_for("6A (5M)", "5m", structural_move_pct=12.0)
+    spec = r.handle_execution_for("3B (5M)", "5m", structural_move_pct=12.0)
     assert spec["entry"] == "dip_hold"
     assert spec["skip_until"] == "09:45"
     assert abs(float(spec["dip_frac"]) - 0.006) < 1e-9
     assert abs(float(spec["target_pct"]) - 9.0) < 1e-9
     assert abs(float(spec["trail_after_target_pct"]) - 8.0) < 1e-9
-    fifteen = r.handle_execution_for("1D (15M)", "15m", structural_move_pct=12.0)
+    fifteen = r.handle_execution_for("8A (15M)", "15m", structural_move_pct=12.0)
+    assert fifteen["entry"] == "dip_hold"
     assert abs(float(fifteen["target_pct"]) - 12.0) < 1e-9
     assert "trail_after_target_pct" not in fifteen
 
@@ -263,18 +264,128 @@ def test_operator_clips_locked_2026_09_19():
     a1_5 = r.handle_execution_for("1A (5M)", "5m")
     b1_5 = r.handle_execution_for("1B (5M)", "5m")
     a5_5 = r.handle_execution_for("5A (5M)", "5m")
+    c1_5 = r.handle_execution_for("1C (5M)", "5m")
+    a9_5 = r.handle_execution_for("9A (5M)", "5m")
+    b5_5 = r.handle_execution_for("5B (5M)", "5m")
+    b2_5 = r.handle_execution_for("2B (5M)", "5m")
+    c5_5 = r.handle_execution_for("5C (5M)", "5m")
+    a8_5 = r.handle_execution_for("8A (5M)", "5m")
+    a6_5 = r.handle_execution_for("6A (5M)", "5m")
+    c2_5 = r.handle_execution_for("2C (5M)", "5m")
+    d2_5 = r.handle_execution_for("2D (5M)", "5m")
+    a2_5 = r.handle_execution_for("2A (5M)", "5m")
+    d1_5 = r.handle_execution_for("1D (5M)", "5m")
+    a4_5 = r.handle_execution_for("4A (5M)", "5m")
+    b6_5 = r.handle_execution_for("6B (5M)", "5m")
+    b8_5 = r.handle_execution_for("8B (5M)", "5m")
+    a3_5 = r.handle_execution_for("3A (5M)", "5m")
+    b9_5 = r.handle_execution_for("9B (5M)", "5m")
+    a1_15 = r.handle_execution_for("1A (15M)", "15m")
+    b1_15 = r.handle_execution_for("1B (15M)", "15m")
     assert a1_5["entry"] == "fill_now"
     assert b1_5["entry"] == "fill_now"
     assert a5_5["entry"] == "fill_now"
+    assert c1_5["entry"] == "fill_now"
+    assert a9_5["entry"] == "fill_now"
+    assert b5_5["entry"] == "fill_now"
+    assert b2_5["entry"] == "fill_now"
+    assert c5_5["entry"] == "fill_now"
+    assert a8_5["entry"] == "fill_now"
+    assert a6_5["entry"] == "fill_now"
+    assert c2_5["entry"] == "fill_now"
+    assert d2_5["entry"] == "fill_now"
+    assert a2_5["entry"] == "fill_now"
+    assert d1_5["entry"] == "fill_now"
+    assert a4_5["entry"] == "fill_now"
+    assert b6_5["entry"] == "fill_now"
+    assert b8_5["entry"] == "fill_now"
+    assert a3_5["entry"] == "fill_now"
+    assert b9_5["entry"] == "fill_now"
+    assert a1_15["entry"] == "fill_now"
+    assert b1_15["entry"] == "fill_now"
     assert a1_5["specialized"] is True
     assert b1_5["specialized"] is True
     assert a5_5["specialized"] is True
+    assert c1_5["specialized"] is True
+    assert a9_5["specialized"] is True
+    assert b5_5["specialized"] is True
+    assert b2_5["specialized"] is True
+    assert c5_5["specialized"] is True
+    assert a8_5["specialized"] is True
+    assert a6_5["specialized"] is True
+    assert c2_5["specialized"] is True
+    assert d2_5["specialized"] is True
+    assert a2_5["specialized"] is True
+    assert d1_5["specialized"] is True
+    assert a4_5["specialized"] is True
+    assert b6_5["specialized"] is True
+    assert a1_15["specialized"] is True
+    assert b1_15["specialized"] is True
     assert a1_5["skip_until"] == "09:45"
     assert b1_5["skip_until"] == "09:45"
     assert a5_5["skip_until"] == "10:00"
+    assert c1_5["skip_until"] == "09:45"
+    assert a9_5["skip_until"] == "09:45"
+    assert b5_5["skip_until"] == "10:00"
+    assert b2_5["skip_until"] == "09:45"
+    assert c5_5["skip_until"] == "09:45"
+    assert a8_5["skip_until"] == "09:45"
+    assert a6_5["skip_until"] == "10:00"
+    assert c2_5["skip_until"] == "09:45"
+    assert d2_5["skip_until"] == "09:45"
+    assert a2_5["skip_until"] == "09:45"
+    assert d1_5["skip_until"] == "09:45"
+    assert a4_5["skip_until"] == "09:45"
+    assert b6_5["skip_until"] == "09:45"
+    assert a1_15["skip_until"] == ""
+    assert b1_15["skip_until"] == ""
     assert abs(float(a1_5["target_pct"]) - 16.0) < 1e-9
     assert abs(float(b1_5["target_pct"]) - 8.0) < 1e-9
     assert abs(float(a5_5["target_pct"]) - 6.5) < 1e-9
+    assert abs(float(c1_5["target_pct"]) - 14.0) < 1e-9
+    assert abs(float(a9_5["target_pct"]) - 7.5) < 1e-9
+    assert abs(float(b5_5["target_pct"]) - 8.0) < 1e-9
+    assert abs(float(b2_5["target_pct"]) - 10.0) < 1e-9
+    assert abs(float(c5_5["target_pct"]) - 8.0) < 1e-9
+    assert abs(float(a8_5["target_pct"]) - 8.0) < 1e-9
+    assert abs(float(a6_5["target_pct"]) - 9.0) < 1e-9
+    assert abs(float(c2_5["target_pct"]) - 8.0) < 1e-9
+    assert abs(float(d2_5["target_pct"]) - 8.0) < 1e-9
+    assert abs(float(a2_5["target_pct"]) - 8.0) < 1e-9
+    assert abs(float(d1_5["target_pct"]) - 8.0) < 1e-9
+    assert abs(float(a4_5["target_pct"]) - 8.0) < 1e-9
+    assert abs(float(b6_5["target_pct"]) - 8.0) < 1e-9
+    assert abs(float(b9_5["target_pct"]) - 8.0) < 1e-9
+    assert abs(float(a1_15["target_pct"]) - 8.0) < 1e-9
+    assert abs(float(b1_15["target_pct"]) - 12.0) < 1e-9
     assert abs(float(b1_5["stop_floor_pct"]) - 3.5) < 1e-9
     assert abs(float(a5_5["stop_floor_pct"]) - 3.5) < 1e-9
+    assert abs(float(a9_5["stop_floor_pct"]) - 2.0) < 1e-9
+    assert abs(float(b5_5["stop_floor_pct"]) - 2.0) < 1e-9
+    assert abs(float(b2_5["stop_floor_pct"]) - 2.0) < 1e-9
+    assert abs(float(c5_5["stop_floor_pct"]) - 3.5) < 1e-9
+    assert abs(float(a8_5["stop_floor_pct"]) - 2.0) < 1e-9
+    assert abs(float(a6_5["stop_floor_pct"]) - 3.5) < 1e-9
+    assert abs(float(c2_5["stop_floor_pct"]) - 2.0) < 1e-9
+    assert abs(float(d2_5["stop_floor_pct"]) - 2.0) < 1e-9
+    assert abs(float(a2_5["stop_floor_pct"]) - 2.0) < 1e-9
+    assert abs(float(d1_5["stop_floor_pct"]) - 2.0) < 1e-9
+    assert abs(float(a4_5["stop_floor_pct"]) - 2.0) < 1e-9
+    assert r.order_style_for("1C (5M)", "5m") == "market"
+    assert r.order_style_for("9A (5M)", "5m") == "market"
+    assert r.order_style_for("5B (5M)", "5m") == "market"
+    assert r.order_style_for("2B (5M)", "5m") == "market"
+    assert r.order_style_for("5C (5M)", "5m") == "market"
+    assert r.order_style_for("8A (5M)", "5m") == "market"
+    assert r.order_style_for("6A (5M)", "5m") == "market"
+    assert r.order_style_for("2C (5M)", "5m") == "market"
+    assert r.order_style_for("2D (5M)", "5m") == "market"
+    assert r.order_style_for("2A (5M)", "5m") == "market"
+    assert r.order_style_for("1D (5M)", "5m") == "market"
+    assert r.order_style_for("4A (5M)", "5m") == "market"
+    assert r.order_style_for("6B (5M)", "5m") == "market"
+    assert r.order_style_for("9B (5M)", "5m") == "market"
+    assert r.order_style_for("1A (15M)", "15m") == "market"
+    assert r.order_style_for("2A (15M)", "15m") == "market"
+    assert r.order_style_for("8A (15M)", "15m") == "limit"
     assert r.order_style_for("1A (5M)", "5m") == "market"
