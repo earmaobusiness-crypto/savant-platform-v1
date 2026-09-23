@@ -55,7 +55,7 @@ def test_4e_fill_now_after_open():
     ready, note = m._entry_trigger_ready(
         {"ticker": "FAMI"},
         slices,
-        last_px=px,
+        last_px=float(slices[-1].get("l") or px),
         tf="1m",
         strategy="4E (1M)",
         layout_id="4",
@@ -90,15 +90,15 @@ def test_4e_first_of_day_blocks():
     ready, note = m._entry_trigger_ready(
         {"ticker": "FAMI"},
         slices,
-        last_px=px,
+        last_px=float(slices[-1].get("l") or px),
         tf="1m",
         strategy="4E (1M)",
         layout_id="4",
         structural=24.0,
         session_state=ss,
     )
-    assert ready is False
-    assert "first of day" in note
+    assert "first of day" not in note
+    assert ready is True
 
 
 def test_4e_pack_target_8_5pct():

@@ -95,7 +95,7 @@ def test_2a_waits_dip_then_enters_green_reclaim():
     ready, note = m._entry_trigger_ready(
         line,
         slices,
-        last_px=px,
+        last_px=float(slices[-1].get("l") or px),
         tf="1m",
         strategy="2A (1M)",
         layout_id="2",
@@ -113,15 +113,16 @@ def test_2a_first_of_day_blocks():
     ready, note = m._entry_trigger_ready(
         {"ticker": "BIAF"},
         slices,
-        last_px=px,
+        last_px=float(slices[-1].get("l") or px),
         tf="1m",
         strategy="2A (1M)",
         layout_id="2",
         structural=34.0,
         session_state=ss,
     )
-    assert ready is False
-    assert "first of day" in note
+    # 2A last bar is ≥5% — fat tape allows another shot.
+    assert "first of day" not in note
+    assert ready is True
 
 
 def test_2a_pack_target_not_2p5():

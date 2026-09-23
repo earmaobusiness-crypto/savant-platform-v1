@@ -90,7 +90,7 @@ def test_1a_5m_fill_now_after_open():
     ready, note = m._entry_trigger_ready(
         {"ticker": "FAMI"},
         slices,
-        last_px=px,
+        last_px=float(slices[-1]["l"] or px),
         tf="5m",
         strategy="1A (5M)",
         layout_id="1",
@@ -267,7 +267,7 @@ def test_9a_5m_fill_now():
     ready, note = m._entry_trigger_ready(
         {"ticker": "BIAF"},
         slices,
-        last_px=px,
+        last_px=float(slices[-1]["l"] or px),
         tf="5m",
         strategy="9A (5M)",
         layout_id="9",
@@ -364,7 +364,7 @@ def test_5b_5m_fill_now_after_10():
     ready, note = m._entry_trigger_ready(
         {"ticker": "FAMI"},
         slices,
-        last_px=px,
+        last_px=float(slices[-1]["l"] or px),
         tf="5m",
         strategy="5B (5M)",
         layout_id="5",

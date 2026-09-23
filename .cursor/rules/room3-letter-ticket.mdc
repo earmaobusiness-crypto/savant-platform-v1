@@ -1,0 +1,22 @@
+---
+description: Room 3 — per-letter ticket caps so extra capital stays with letters that scale
+alwaysApply: true
+---
+
+# Letter ticket cap (locked 2026-09-21)
+
+When Trading today grows, **do not** give every live letter the same TF-slot dollars. Detect stays nearest ≥85% same TF. The cap is Handle / size only.
+
+**None** = TF slot may grow with the book. **0** = do not fire. A number = clip the ticket there; leftover TF cash stays for uncapped letters on that name/day.
+
+Cap the letters the **live detector actually nominates** (nearest ≥85% on as-of vault DNA), not the ones an extras-as-detect sim liked. Those two paths pick different letters — on 409 extras-say-1A bars the vault called them 1B/2C/3A/4A and 1A only 4 times.
+
+**Uncapped (10-day $2M ice book):** 15m **1A / 2B** (2B carried 91% of real-path P/L). 5m **1A / 8A / 1B / 9A / 2B**. 1m **3G / 3B / 7B**.
+
+**$2M working tickets (2026-09-22):** 1m **$100k** · 5m **$200k** · 15m **$300k**. That is the muscle. A smaller Set $ uses the TF slot (slot < cap, so the cap does not bind). Iceberg still clips a thin bar.
+
+**Measured caps:** 5m **1C / 6A / 5B $200k** · **5C $0**.
+
+**Real-path bleeders (2026-09-21):** 5m **3A $0** · 5m **4A $0** · 15m **8B $0**. 15m **9A $300k**.
+
+Resize only from a size pile (same ice / impact / belt days), not from the $1,000 yardstick. Do not dump extra book into a letter that went red at the larger size. Local until Cloud push.

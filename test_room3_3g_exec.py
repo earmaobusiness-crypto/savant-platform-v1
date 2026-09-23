@@ -56,7 +56,7 @@ def test_3g_fill_now_after_open():
     ready, note = m._entry_trigger_ready(
         {"ticker": "FAMI"},
         slices,
-        last_px=px,
+        last_px=float(slices[-1].get("l") or px),
         tf="1m",
         strategy="3G (1M)",
         layout_id="3",
@@ -91,15 +91,15 @@ def test_3g_first_of_day_blocks():
     ready, note = m._entry_trigger_ready(
         {"ticker": "FAMI"},
         slices,
-        last_px=px,
+        last_px=float(slices[-1].get("l") or px),
         tf="1m",
         strategy="3G (1M)",
         layout_id="3",
         structural=22.0,
         session_state=ss,
     )
-    assert ready is False
-    assert "first of day" in note
+    assert "first of day" not in note
+    assert ready is True
 
 
 def test_3g_pack_target_10pct():

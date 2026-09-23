@@ -1,0 +1,14 @@
+---
+description: Room 3 simulations are always blind tests (no lookahead).
+alwaysApply: true
+---
+
+# Blind test (locked 2026-09-23)
+
+When the operator says **simulation / sim / run it / rundown / what would it make**, that is a **blind test**.
+
+Blind = trade as if you were live that day. No future bars, no future volume, no knowing which window is “the one,” no forcing their clocks. Detect, fire floor, size, iceberg, Handle — only what is already printed.
+
+Their in/out clocks are for **review** (what to look at, what Handle to try). They are not the fill.
+
+A second scratch that uses information you would not have had at the bar is not a blind test. Say so if you run one.

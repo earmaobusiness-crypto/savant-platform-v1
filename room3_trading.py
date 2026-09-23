@@ -2522,7 +2522,12 @@ def _reconcile_watch_book_with_broker() -> int:
                     "exit_stop_px": line.get("exit_stop_px"),
                     "exit_tgt_px": line.get("exit_tgt_px"),
                     "1a_handle": line.get("1a_handle"),
+                    "fat_tape": line.get("fat_tape"),
+                    "exit_source": line.get("exit_source"),
+                    "hold_minutes": line.get("hold_minutes"),
+                    "exit_on_letter_flip": line.get("exit_on_letter_flip"),
                     "entry_time": line.get("entry_time") or line.get("filled_at"),
+                    "entry_ts": line.get("entry_ts"),
                 },
             )
         n += 1
@@ -5856,9 +5861,16 @@ def _room3_heartbeat_tick() -> None:
                             "exit_stop_px": sig.get("exit_stop_px") or line.get("exit_stop_px"),
                             "exit_tgt_px": sig.get("exit_tgt_px") or line.get("exit_tgt_px"),
                             "1a_handle": sig.get("1a_handle") or line.get("1a_handle"),
+                            "fat_tape": sig.get("fat_tape") or line.get("fat_tape"),
+                            "exit_source": sig.get("exit_source") or line.get("exit_source"),
+                            "hold_minutes": sig.get("hold_minutes") or line.get("hold_minutes"),
+                            "exit_on_letter_flip": sig.get("exit_on_letter_flip")
+                            or line.get("exit_on_letter_flip"),
                             "order_id": str(result.get("order_id") or ""),
                             "entry_time": result.get("filled_at")
                             or datetime.now(ET).strftime("%H:%M:%S"),
+                            "entry_ts": result.get("filled_at")
+                            or datetime.now(ET).isoformat(),
                         },
                     )
                     _persist_screener_to_disk()

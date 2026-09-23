@@ -9,6 +9,8 @@ alwaysApply: true
 
 **Match:** `match_spatial` z-scores against the current same-TF library using **median + MAD** (not mean/std). Z is hard-clipped to **±5**. Dead (near-zero MAD) dims stay z=0. **No raw-vector fallback.** Score is **weighted cosine** (weighted dot / weighted L2) with static `FEATURE_MATCH_WEIGHTS` — velocity slots 0–2 and volume slots 3–4 lead; VWAP/Pearson sit back; SEC weight 0. Size still cuts when two strategies are almost equally close. **Same-TF only.**
 
+**Detect ≥85%, fire ≥88% (2026-09-21):** `MATCH_THRESHOLD_PCT` stays 85 — family, watch book, letter locks. `FIRE_FLOOR_PCT` = 88 gates the actual ticket in `_entry_trigger_ready`. Do not "fix" the letter rules to say 88; the gene did not move.
+
 **Handle on layouts:** each vault-sourced layout bucket gets `handle_execution` at hydrate. DNA vectors are not mutated. Supabase stays read-only.
 
 **Related:** Job 1 Yahoo screener is parked (`BUILTIN_SCREENER_ENABLED = False`).

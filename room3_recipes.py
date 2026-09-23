@@ -377,6 +377,174 @@ def _letter_head(strategy: str) -> str:
     return raw.split("(")[0].strip().replace(" ", "")
 
 
+# --- Pooled exits (locked 2026-09-21) -------------------------------------
+# Per-letter targets/stops are not estimable from the data that exists. The
+# 20,196 nominations behind them collapse to 233 stock-days, and the best 1%
+# of outcomes carry 43% of all gain — fat tails on ~30 independent episodes
+# per letter. Every per-letter fit died out of sample.
+#
+# These two numbers per TF are fitted across ALL 233 stock-days and chosen on
+# the MEDIAN old day (so one tail day cannot pick them). Per-trade edge, old
+# -> untouched fresh days: 15m +8.3% -> +5.9% · 5m +1.28% -> +1.29% ·
+# 1m +1.20% -> +1.19%. First thing that transferred.
+#
+# The letter still decides WHETHER to enter. It no longer decides the exit.
+POOLED_EXITS_ON = True
+POOLED_EXITS: dict[str, tuple[float, float]] = {
+    "15m": (30.0, 10.0),  # target %, hard stop %
+    "5m": (8.0, 8.0),
+    "1m": (25.0, 10.0),
+}
+# Caps stay on so $0 letters still do not fire. Working tickets are $2M-scale
+# (1m $100k · 5m $200k · 15m $300k). A smaller Set $ uses the TF slot instead
+# — the cap only binds when the slot is bigger than the ticket.
+LETTER_CAPS_ON = True
+
+# Fat-tape Handle (locked 2026-09-22). Same letter. This temperament.
+# Last bar ≥4.5% → wider stop, 20-minute hold or letter-flip, wick fill,
+# another shot allowed. Not a TNON gene and not +20% as the exit.
+FAT_BAR_PCT = 4.5
+FAT_STOP_MIN_PCT = 8.0
+FAT_HOLD_MINUTES = 20
+FAT_WICK_LOC = 0.40
+
+
+def last_bar_range_pct(slices: list[dict[str, Any]] | None) -> float:
+    last = (slices or [None])[-1] or {}
+    c = float(last.get("c") or 0)
+    h = float(last.get("h") or 0)
+    lo = float(last.get("l") or 0)
+    if c <= 0:
+        return 0.0
+    return (h - lo) / c * 100.0
+
+
+def tape_is_fat(slices: list[dict[str, Any]] | None) -> bool:
+    return last_bar_range_pct(slices) + 1e-12 >= FAT_BAR_PCT
+
+
+def fat_stop_pct(slices: list[dict[str, Any]] | None) -> float:
+    return max(FAT_STOP_MIN_PCT, last_bar_range_pct(slices))
+
+
+def wick_fill_px(slices: list[dict[str, Any]] | None, last_px: float = 0.0) -> float:
+    """Buy the wick, not the close."""
+    last = (slices or [None])[-1] or {}
+    lo = float(last.get("l") or 0)
+    if lo > 0:
+        return lo
+    return float(last_px or last.get("c") or 0)
+
+
+def wick_touch_ok(
+    slices: list[dict[str, Any]] | None,
+    last_px: float,
+    *,
+    bar_complete: bool = False,
+) -> bool:
+    """Completed bars already printed the wick. A live bar waits for the low."""
+    if not tape_is_fat(slices):
+        return True
+    if bar_complete:
+        return True
+    last = (slices or [None])[-1] or {}
+    lo = float(last.get("l") or 0)
+    hi = float(last.get("h") or 0)
+    if lo <= 0 or hi <= lo:
+        return True
+    px = float(last_px or last.get("c") or 0)
+    if px <= 0:
+        return True
+    return px <= lo + FAT_WICK_LOC * (hi - lo)
+
+
+def letter_flipped(entry_letter: str, now_letter: str) -> bool:
+    a = _letter_head(entry_letter)
+    b = _letter_head(now_letter)
+    return bool(a and b and a != b)
+
+
+def apply_fat_to_handle(
+    payload: dict[str, Any],
+    slices: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Overlay fat-tape temperament on a Handle stamp. DNA / letter stay."""
+    out = dict(payload or {})
+    if not tape_is_fat(slices):
+        return out
+    stop = fat_stop_pct(slices)
+    out["fat_tape"] = True
+    out["first_of_day"] = False
+    out["cool_sec"] = 0
+    out["entry"] = "wick"
+    out["order_style_rth"] = "limit"
+    out["stop"] = "hard_pct"
+    out["stop_floor_pct"] = float(stop)
+    out.pop("stop_cap_pct", None)
+    out.pop("target_pct", None)
+    out["exit_tgt_px"] = 0.0
+    out["hold_minutes"] = FAT_HOLD_MINUTES
+    out["exit_on_letter_flip"] = True
+    out["exit_source"] = "fat_tape"
+    return out
+
+
+def pooled_exit_pcts(timeframe: str = "") -> tuple[float, float] | None:
+    """(target %, hard stop %) for this TF, or None when pooled exits are off."""
+    if not POOLED_EXITS_ON:
+        return None
+    return POOLED_EXITS.get(normalize_tf(timeframe))
+
+
+# Ticket cap vs Trading-today growth. None = TF slot may grow. 0 = do not fire.
+# Keyed to the letters the live detector actually nominates (nearest ≥85% on
+# as-of vault DNA), not to the extras-as-detect sim. 10-day $2M ice book
+# (Jul 30–31, Sep 1–3/10–11/15–17). Resize only from a larger size pile.
+_5M_FULL_SLOT = frozenset({"1A", "8A", "1B", "9A", "2B"})
+_15M_FULL_SLOT = frozenset({"1A", "2B"})
+_1M_FULL_SLOT = frozenset({"3G", "3B", "7B"})
+_LETTER_MAX_TICKET_USD: dict[tuple[str, str], float] = {
+    ("5m", "1C"): 200_000.0,
+    ("5m", "5B"): 200_000.0,
+    ("5m", "5C"): 0.0,
+    ("5m", "6A"): 200_000.0,
+    ("5m", "3A"): 0.0,
+    ("5m", "4A"): 0.0,
+    ("15m", "8B"): 0.0,
+    ("15m", "9A"): 300_000.0,
+}
+# Comfortable $2M tickets. Scale-down: TF slot is smaller than these, so it wins.
+_UNSIZED_5M_CAP = 200_000.0
+_UNSIZED_1M_CAP = 100_000.0
+_UNSIZED_15M_CAP = 300_000.0
+
+
+def letter_max_ticket_usd(timeframe: str = "", strategy: str = "") -> float | None:
+    """Per-letter ticket ceiling. Extra Trading-today cash stays for uncapped letters."""
+    tf = normalize_tf(timeframe)
+    head = _letter_head(strategy)
+    if not LETTER_CAPS_ON:
+        return None
+    if not head or head.startswith("P"):
+        return None
+    keyed = _LETTER_MAX_TICKET_USD.get((tf, head))
+    if keyed is not None:
+        return float(keyed)
+    if tf == "5m":
+        if head in _5M_FULL_SLOT:
+            return None
+        return float(_UNSIZED_5M_CAP)
+    if tf == "1m":
+        if head in _1M_FULL_SLOT:
+            return None
+        return float(_UNSIZED_1M_CAP)
+    if tf == "15m":
+        if head in _15M_FULL_SLOT:
+            return None
+        return float(_UNSIZED_15M_CAP)
+    return None
+
+
 def handle_execution_for(
     strategy: str = "",
     timeframe: str = "5m",
@@ -389,10 +557,27 @@ def handle_execution_for(
     1m fill-now after Hunt extra (2026-09-20). 5m all live letters fill-now after Hunt extra.
     15m 1A/1B/1C/1D/2A/2B/6A/9A fill-now after Hunt extra. 8A/8B (15M) still dip-hold.
     Other 5m/15m placeholder still dip-hold.
+    Ticket cap: letter_max_ticket_usd — extra book does not flow into letters
+    that went red at $2M on the Jul/Sep size pile.
+    Fat tape (last bar ≥4.5%) is applied live from slices, not here.
     """
     _ = layout_id
     tf = normalize_tf(timeframe)
     head = _letter_head(strategy)
+
+    def _finish(payload: dict[str, Any]) -> dict[str, Any]:
+        cap = letter_max_ticket_usd(tf, head)
+        if cap is not None:
+            payload["max_ticket_usd"] = float(cap)
+        pooled = pooled_exit_pcts(tf)
+        if pooled:
+            target, stop = pooled
+            payload["target_pct"] = float(target)
+            payload["stop"] = "hard_pct"
+            payload["stop_floor_pct"] = float(stop)
+            payload["stop_cap_pct"] = float(stop)
+            payload["exit_source"] = "pooled_tf"
+        return payload
     specialized_1m = frozenset({"5B", "2A", "1A", "2D", "2B", "2C", "3A", "4A", "3B", "5A", "7A", "3C", "4D", "4B", "6A", "4C", "4E", "6B", "3D", "7B", "3G", "3F", "8A", "7C", "3E", "6C"})
     specialized_5m = frozenset({"1A", "1B", "5A", "1C", "9A", "5B", "2B", "5C", "8A", "6A", "2C", "2D", "2A", "1D", "4A", "6B", "8B", "3A", "9B"})
     specialized_15m = frozenset({"1A", "1B", "1C", "1D", "2A", "2B", "6A", "9A"})
@@ -492,7 +677,7 @@ def handle_execution_for(
         if head in specialized_1m:
             base["specialized"] = True
         base["name_shots_max"] = 3
-        return base
+        return _finish(base)
     if tf == "5m" and head in specialized_5m:
         base.update(
             {
@@ -571,7 +756,7 @@ def handle_execution_for(
             base["skip_until"] = "10:00"
             base["target_pct"] = 6.5
             base["stop_floor_pct"] = 3.5
-        return base
+        return _finish(base)
     if tf == "15m" and head in specialized_15m:
         base.update(
             {
@@ -588,7 +773,7 @@ def handle_execution_for(
             base["target_pct"] = 8.0
         else:
             base["target_pct"] = 12.0
-        return base
+        return _finish(base)
     dip = 0.006 if tf == "5m" else 0.008
     if tf == "5m":
         base["skip_until"] = "09:45"
@@ -614,7 +799,7 @@ def handle_execution_for(
     if tf == "5m":
         base["trail_after_target_pct"] = 8.0
         base["exit"] = "trail_8_after_target"
-    return base
+    return _finish(base)
 
 
 def attach_recipe(layout_entry: dict[str, Any]) -> dict[str, Any]:

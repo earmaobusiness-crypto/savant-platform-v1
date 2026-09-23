@@ -17,6 +17,11 @@ import room3_review_learn
 room3_lots = room3_engine.lots
 
 MATCH_THRESHOLD_PCT = 85
+# Detect/display stay at 85 (that is the gene, and every letter lock says so).
+# Firing is Handle: on the 10-day $2M no-lookahead book the 85–87% band was
+# almost all losers, so a ticket needs 88 to actually go. Neighbouring floors
+# (87/89) ran +5.0/+3.2 vs +5.9 here — treat ~+4.7 as the honest expectation.
+FIRE_FLOOR_PCT = 88
 CHILD_READY_PCT = 84  # show a strategy sub-lane; fire still waits for MATCH_THRESHOLD
 EXIT_MATCH_FLOOR_PCT = 65
 STOP_LOSS_PCT = 2.5
@@ -533,9 +538,12 @@ PLACEHOLDER_LAYOUTS = frozenset(
 )
 
 # Day book split — these three add to 100% of Trading today.
-TF_BUCKET_FRAC: dict[str, float] = {"15m": 0.50, "5m": 0.30, "1m": 0.20}
-# Expected fills (opening reservation). Caps stay under ~50 combined max.
-TF_PROJECTED_PRIOR: dict[str, int] = {"15m": 3, "5m": 6, "1m": 5}
+# 15m-heavy: on the no-lookahead book 2B (15M) was the only letter the live
+# detector both nominated often and won on. 68–78% to 15m is a flat plateau.
+TF_BUCKET_FRAC: dict[str, float] = {"15m": 0.75, "5m": 0.175, "1m": 0.075}
+# First fire of a TF takes the working slot, not 1/N crumbs. Extra fills
+# pull leftover. $2M muscle: one 15m / 5m / 1m ticket at a time from the pot.
+TF_PROJECTED_PRIOR: dict[str, int] = {"15m": 1, "5m": 1, "1m": 1}
 TF_PROJECTED_CAP: dict[str, int] = {"15m": 6, "5m": 12, "1m": 10}
 SCALE_IN_MAX = 1  # one add onto a live winner
 SCALE_IN_TARGET_FRAC = 0.50  # add only while P/L is still under half the layout move
@@ -562,12 +570,14 @@ def size_explain(session_state: Any | None = None) -> str:
         f"Layouts project about {p.get('15m', 3)} fifteen-minute fills, "
         f"{p.get('5m', 6)} five-minute, {p.get('1m', 5)} one-minute today — "
         f"each full-match 15m therefore starts at 1/{n15} of the 15m bucket "
-        f"({slot_frac:.0%} of that 50%). "
+        f"({slot_frac:.0%} of that {TF_BUCKET_FRAC['15m']:.0%}). "
         "Those percents are the opening reservation, not walls. "
         "If a TF prints more than expected, it collects leftover from buckets that are "
         "not hot (live < projected). A live 15m that is still in the move can add once "
         "from that same idle cash. If 5m or 1m is the hot book, leftover flows there "
         "instead of sitting in 15m. "
+        f"A family prints at ≥{MATCH_THRESHOLD_PCT}% but a ticket only fires at "
+        f"≥{FIRE_FLOOR_PCT}% — the {MATCH_THRESHOLD_PCT}–{FIRE_FLOOR_PCT - 1}% band watches, it does not buy. "
         "Weaker match uses less of its slot. "
         "Uniqueness still cuts size when two strategies are almost equally close. "
         "Match uses median/MAD z-scores (clip ±5) then weighted cosine "
@@ -577,7 +587,11 @@ def size_explain(session_state: Any | None = None) -> str:
 
 
 SIZE_EXPLAIN = (
-    "Trading today opens 50% 15m / 30% 5m / 20% 1m. "
+    f"Trading today opens {TF_BUCKET_FRAC['15m']:.0%} 15m / {TF_BUCKET_FRAC['5m']:.1%} 5m / "
+    f"{TF_BUCKET_FRAC['1m']:.1%} 1m, and a ticket fires at ≥{FIRE_FLOOR_PCT}% (not {MATCH_THRESHOLD_PCT}%). "
+    "At $2M the working tickets are 1m $100k · 5m $200k · 15m $300k; letters that earned "
+    "the full slot may take it. Iceberg still clips a thin bar. A smaller Set $ uses the "
+    "same percents — the slot shrinks, the cap does not bind. "
     "Leftover is fluid: extra fills and a still-moving 15m collect idle cash "
     "from buckets that are not hot. A hot 5m/1m keeps its pot and can pull quiet 15m leftover."
 )
@@ -1336,6 +1350,8 @@ def _5m_spec_bag_token(letter: str, ticker: str) -> str:
 
 
 def _5m_spec_cool_until(session_state: Any, letter: str, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None or not letter:
         return None
     try:
@@ -1386,6 +1402,8 @@ def _5m_spec_mark_stop_cool(session_state: Any, letter: str, ticker: str) -> Non
 
 
 def _5m_spec_used_today(session_state: Any, letter: str, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None or not letter:
         return False
     try:
@@ -1411,6 +1429,8 @@ def _15m_spec_bag_token(letter: str, ticker: str) -> str:
 
 
 def _15m_spec_cool_until(session_state: Any, letter: str, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None or not letter:
         return None
     try:
@@ -1440,6 +1460,8 @@ def _15m_spec_mark_stop_cool(session_state: Any, letter: str, ticker: str) -> No
 
 
 def _15m_spec_used_today(session_state: Any, letter: str, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None or not letter:
         return False
     try:
@@ -1469,6 +1491,22 @@ def _5b_now(session_state: Any = None) -> datetime:
     except Exception:
         pass
     return datetime.now(room3_engine.ET)
+
+
+def _tape_fat(session_state: Any) -> bool:
+    try:
+        return bool(session_state is not None and session_state.get("_tape_fat"))
+    except Exception:
+        return False
+
+
+def _set_tape_fat(session_state: Any, fat: bool) -> None:
+    if session_state is None:
+        return
+    try:
+        session_state["_tape_fat"] = bool(fat)
+    except Exception:
+        pass
 
 
 def _rth_before(session_state: Any, until: dtime) -> bool:
@@ -1601,6 +1639,8 @@ def _6c_open_chop(session_state: Any = None) -> bool:
 
 
 def _5b_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -1642,6 +1682,8 @@ def _5b_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _pack_mark_stop_cool(session_state: Any, ticker: str, lot: dict[str, Any]) -> None:
+    if lot.get("fat_tape") or str(lot.get("exit_source") or "") == "fat_tape":
+        return
     strat = str(lot.get("strategy") or lot.get("letter") or "")
     tf = str(lot.get("tf") or lot.get("timeframe") or "1m")
     style = str(lot.get("exit_style") or "")
@@ -1801,6 +1843,8 @@ def _5b_day_key(session_state: Any = None) -> str:
 
 
 def _5b_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -1815,6 +1859,8 @@ def _5b_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _2a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -1839,6 +1885,8 @@ def _2a_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _2a_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -1853,6 +1901,8 @@ def _2a_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _2b_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -1877,6 +1927,8 @@ def _2b_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _2b_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -1891,6 +1943,8 @@ def _2b_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _2c_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -1915,6 +1969,8 @@ def _2c_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _2c_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -1929,6 +1985,8 @@ def _2c_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _3a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -1953,6 +2011,8 @@ def _3a_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _3a_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -1967,6 +2027,8 @@ def _3a_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _4a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -1991,6 +2053,8 @@ def _4a_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _4a_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2005,6 +2069,8 @@ def _4a_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _3b_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2029,6 +2095,8 @@ def _3b_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _3b_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2043,6 +2111,8 @@ def _3b_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _5a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2067,6 +2137,8 @@ def _5a_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _5a_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2081,6 +2153,8 @@ def _5a_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _7a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2105,6 +2179,8 @@ def _7a_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _7a_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2119,6 +2195,8 @@ def _7a_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _3c_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2143,6 +2221,8 @@ def _3c_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _3c_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2157,6 +2237,8 @@ def _3c_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _4d_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2181,6 +2263,8 @@ def _4d_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _4d_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2195,6 +2279,8 @@ def _4d_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _4b_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2219,6 +2305,8 @@ def _4b_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _4b_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2233,6 +2321,8 @@ def _4b_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _6a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2257,6 +2347,8 @@ def _6a_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _6a_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2271,6 +2363,8 @@ def _6a_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _4c_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2295,6 +2389,8 @@ def _4c_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _4c_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2309,6 +2405,8 @@ def _4c_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _4e_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2333,6 +2431,8 @@ def _4e_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _4e_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2347,6 +2447,8 @@ def _4e_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _6b_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2371,6 +2473,8 @@ def _6b_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _6b_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2385,6 +2489,8 @@ def _6b_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _3d_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2409,6 +2515,8 @@ def _3d_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _3d_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2423,6 +2531,8 @@ def _3d_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _7b_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2447,6 +2557,8 @@ def _7b_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _7b_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2461,6 +2573,8 @@ def _7b_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _3g_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2485,6 +2599,8 @@ def _3g_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _3g_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2499,6 +2615,8 @@ def _3g_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _3f_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2523,6 +2641,8 @@ def _3f_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _3f_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2537,6 +2657,8 @@ def _3f_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _8a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2561,6 +2683,8 @@ def _8a_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _8a_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2575,6 +2699,8 @@ def _8a_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _7c_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2599,6 +2725,8 @@ def _7c_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _7c_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2613,6 +2741,8 @@ def _7c_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _3e_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2637,6 +2767,8 @@ def _3e_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _3e_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2651,6 +2783,8 @@ def _3e_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _6c_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2675,6 +2809,8 @@ def _6c_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _6c_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2689,6 +2825,8 @@ def _6c_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _1a_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2713,6 +2851,8 @@ def _1a_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _1a_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2727,6 +2867,8 @@ def _1a_mark_used(session_state: Any, ticker: str) -> None:
 
 
 def _2d_cool_until(session_state: Any, ticker: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -2751,6 +2893,8 @@ def _2d_mark_stop_cool(session_state: Any, ticker: str) -> None:
 
 
 def _2d_used_today(session_state: Any, ticker: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2831,6 +2975,8 @@ def _ph_token(ticker: str, strategy: str) -> str:
 
 
 def _ph_used_today(session_state: Any, ticker: str, strategy: str) -> bool:
+    if _tape_fat(session_state):
+        return False
     if session_state is None:
         return False
     try:
@@ -2850,6 +2996,8 @@ def _ph_mark_used(session_state: Any, ticker: str, strategy: str) -> None:
 
 
 def _ph_cool_until(session_state: Any, ticker: str, strategy: str) -> datetime | None:
+    if _tape_fat(session_state):
+        return None
     if session_state is None:
         return None
     try:
@@ -4890,9 +5038,14 @@ def _try_queue_child_entry(
             best_cosine=float(child.get("cosine_similarity") or match.get("cosine_similarity") or 0),
             layouts=layouts,
             exclude_ticker=ticker if add_lot else "",
+            strategy=strategy,
         )
         if qty < 1 or notional <= 0:
-            child["patience_note"] = "size $0 — not enough room or price too high"
+            cap = room3_recipes.letter_max_ticket_usd(tf, strategy)
+            if cap is not None and float(cap) <= 0:
+                child["patience_note"] = "letter cap $0 — not sized for this book"
+            else:
+                child["patience_note"] = "size $0 — not enough room or price too high"
             continue
         _claim_cash(session_state, notional)
         room3_watcher.queue_entry_signal(
@@ -5572,6 +5725,8 @@ def _try_queue_child_entry(
                 stamped["exit_stop_px"] = stop_px
                 stamped["exit_tgt_px"] = tgt_px
                 _ph_mark_used(session_state, ticker, strategy)
+            if room3_recipes.tape_is_fat(slices):
+                _apply_fat_exits(stamped, sig, slices, last_px)
             if room3_recipes.normalize_tf(tf) == "1m":
                 _1m_mark_name_shot(session_state, ticker)
         line["nearest_strategy"] = strategy
@@ -5579,6 +5734,70 @@ def _try_queue_child_entry(
         line.pop("patience_note", None)
         return True
     return False
+
+
+def _apply_fat_exits(
+    stamped: dict[str, Any],
+    sig: dict[str, Any] | None,
+    slices: list[dict[str, Any]],
+    last_px: float,
+) -> None:
+    stop_pct = room3_recipes.fat_stop_pct(slices)
+    fill = float(last_px or 0)
+    stop_px = fill * (1.0 - stop_pct / 100.0) if fill > 0 else 0.0
+    stamped["fat_tape"] = True
+    stamped["exit_source"] = "fat_tape"
+    stamped["exit_stop_px"] = stop_px
+    stamped["exit_tgt_px"] = 0.0
+    stamped["hold_minutes"] = room3_recipes.FAT_HOLD_MINUTES
+    stamped["exit_on_letter_flip"] = True
+    if isinstance(sig, dict):
+        sig["fat_tape"] = True
+        sig["exit_source"] = "fat_tape"
+        sig["exit_stop_px"] = stop_px
+        sig["exit_tgt_px"] = 0.0
+        sig["order_style"] = "limit"
+        sig["hold_minutes"] = room3_recipes.FAT_HOLD_MINUTES
+        sig["exit_on_letter_flip"] = True
+
+
+def _fat_lot_should_exit(
+    lot: dict[str, Any],
+    *,
+    last_px: float,
+    bar: dict[str, Any] | None = None,
+    session_state: Any = None,
+) -> str:
+    entry_px = float(lot.get("entry_px") or 0)
+    stop_px = float(lot.get("exit_stop_px") or 0)
+    if entry_px > 0 and stop_px <= 0:
+        stop_px = entry_px * (1.0 - room3_recipes.FAT_STOP_MIN_PCT / 100.0)
+    lo = float((bar or {}).get("l") or last_px or 0)
+    if stop_px > 0 and lo > 0 and lo <= stop_px:
+        pnl = ((stop_px - entry_px) / entry_px * 100.0) if entry_px > 0 else 0.0
+        return f"stop fat-bar {pnl:.1f}%"
+    if last_px > 0 and stop_px > 0 and last_px <= stop_px:
+        pnl = ((last_px - entry_px) / entry_px * 100.0) if entry_px > 0 else 0.0
+        return f"stop fat-bar {pnl:.1f}%"
+    now_letter = str(lot.get("_now_letter") or "")
+    entry_letter = str(lot.get("letter") or lot.get("strategy") or "")
+    if room3_recipes.letter_flipped(entry_letter, now_letter):
+        return "letter flipped"
+    raw = lot.get("entry_ts") or lot.get("entry_time") or lot.get("opened_at")
+    now = _5b_now(session_state)
+    if raw and now:
+        try:
+            et = datetime.fromisoformat(str(raw))
+            if et.tzinfo is None:
+                et = et.replace(tzinfo=room3_engine.ET)
+            hold = float(lot.get("hold_minutes") or room3_recipes.FAT_HOLD_MINUTES)
+            if (now - et).total_seconds() >= hold * 60.0:
+                return "time box 20m"
+        except (TypeError, ValueError):
+            pass
+    if _approaching_day_close():
+        return "day close · second-best exit"
+    return ""
 
 
 def _lot_should_exit(
@@ -5590,6 +5809,10 @@ def _lot_should_exit(
     bar: dict[str, Any] | None = None,
     session_state: Any = None,
 ) -> str:
+    if lot.get("fat_tape") or str(lot.get("exit_source") or "") == "fat_tape":
+        return _fat_lot_should_exit(
+            lot, last_px=last_px, bar=bar, session_state=session_state
+        )
     if _5b_lot_exit(lot):
         return _5b_should_exit(lot, last_px=last_px, bar=bar, session_state=session_state)
     entry_px = float(lot.get("entry_px") or 0)
@@ -5838,6 +6061,26 @@ def _5b_gene_ok(slices: list[dict[str, Any]]) -> bool:
     return bool(_5b_climax_ok(slices) and _5b_tape_rvol(slices) >= FIVE_B_RVOL_MIN)
 
 
+def _fat_wick_gate(
+    line: dict[str, Any],
+    slices: list[dict[str, Any]],
+    last_px: float,
+    ready: bool,
+    note: str,
+) -> tuple[bool, str]:
+    if not ready:
+        return ready, note
+    if not room3_recipes.tape_is_fat(slices):
+        return ready, note
+    line["fat_tape"] = True
+    if not line.get("_fat_bar_complete"):
+        px = float(last_px or line.get("_last_px") or 0)
+        if not room3_recipes.wick_touch_ok(slices, px):
+            tag = note.split(" · ")[0] if " · " in note else note
+            return False, f"{tag} · fat tape · wait the wick"
+    return ready, note
+
+
 def _1m_live_fill_now(
     line: dict[str, Any],
     tag: str,
@@ -5845,9 +6088,19 @@ def _1m_live_fill_now(
     gene_ok: bool = True,
     wait: str = "wait suited tape",
 ) -> tuple[bool, str]:
-    """Fill now on the print. Specialized letters pass gene_ok first (operator 2026-09-20)."""
+    """Fill now on the print. Specialized letters pass gene_ok first (operator 2026-09-20).
+    Fat tape waits for the wick on a live bar; completed-bar sims fill the low."""
     if not gene_ok:
         return False, f"{tag} · {wait}"
+    slices = list(line.get("_slices") or line.get("slices") or [])
+    last_px = float(line.get("_last_px") or 0)
+    if room3_recipes.tape_is_fat(slices):
+        line["fat_tape"] = True
+        if not line.get("_fat_bar_complete"):
+            if last_px <= 0 and slices:
+                last_px = float(slices[-1].get("c") or 0)
+            if not room3_recipes.wick_touch_ok(slices, last_px):
+                return False, f"{tag} · fat tape · wait the wick"
     line["trigger_phase"] = "ready"
     return True, f"{tag} · enter now"
 
@@ -6562,7 +6815,9 @@ def _ph_entry_ready(
     else:
         dip_frac = PH_DIP_FRAC_1M
     if phase == "ready":
-        return True, f"{strategy} · dip-reclaim · enter now"
+        return _fat_wick_gate(
+            line, slices, last_px, True, f"{strategy} · dip-reclaim · enter now"
+        )
     if phase == "wait_dip":
         if last_l <= armed_px * (1.0 - dip_frac) or last_c < armed_px:
             line["trigger_phase"] = "wait_reclaim"
@@ -6575,14 +6830,22 @@ def _ph_entry_ready(
         if tf_n in ("5m", "15m"):
             if last_c > pb and last_c >= armed_px * 0.997:
                 line["trigger_phase"] = "ready"
-                return True, f"{strategy} · {tf_n} hold after pullback"
+                return _fat_wick_gate(
+                    line,
+                    slices,
+                    last_px,
+                    True,
+                    f"{strategy} · {tf_n} hold after pullback",
+                )
             return False, f"{strategy} · waiting hold after dip"
         green = last_c > last_o
         if not green:
             return False, f"{strategy} · waiting green reclaim"
         if last_c > pb and (prior_h <= 0 or last_c >= prior_h):
             line["trigger_phase"] = "ready"
-            return True, f"{strategy} · dip-reclaim · enter now"
+            return _fat_wick_gate(
+                line, slices, last_px, True, f"{strategy} · dip-reclaim · enter now"
+            )
         return False, f"{strategy} · waiting reclaim after dip"
     return False, f"{strategy} · waiting trigger"
 
@@ -6597,6 +6860,7 @@ def _entry_trigger_ready(
     layout_id: str,
     structural: float,
     session_state: Any = None,
+    match_pct: int | None = None,
 ) -> tuple[bool, str]:
     """
     ≥85% = family. Fill = letter style, else TF fallback.
@@ -6606,6 +6870,18 @@ def _entry_trigger_ready(
         return False, "late · skipped · wait next pattern"
     if last_px <= 0:
         return False, "no last print"
+    fat = room3_recipes.tape_is_fat(slices)
+    _set_tape_fat(session_state, fat)
+    line["_slices"] = slices
+    line["_last_px"] = last_px
+    if session_state is not None:
+        try:
+            line["_fat_bar_complete"] = bool(session_state.get("_fat_bar_complete"))
+        except Exception:
+            line["_fat_bar_complete"] = False
+    cur = int(match_pct if match_pct is not None else (line.get("match_pct") or 0))
+    if cur and cur < FIRE_FLOOR_PCT:
+        return False, f"family at {cur}% · fires at ≥{FIRE_FLOOR_PCT}%"
     if room3_recipes.normalize_tf(tf) == "1m" and _1m_name_shots_blocked(
         session_state, str(line.get("ticker") or "")
     ):
@@ -7162,6 +7438,7 @@ def stamp_line_size(
         best_cosine=cos,
         layouts=layouts,
         exclude_ticker=exclude,
+        strategy=str(line.get("strategy") or line.get("nearest_strategy") or ""),
     )
     line["size_usd"] = float(preview.get("notional") or 0)
     line["size_qty"] = float(preview.get("qty") or 0)
@@ -7178,10 +7455,12 @@ def compute_entry_plan(
     best_cosine: float | None = None,
     layouts: list[dict[str, Any]] | None = None,
     exclude_ticker: str = "",
+    strategy: str = "",
 ) -> dict[str, Any]:
     """
     Size from TF bucket → projected count slot → match → uniqueness → borrow.
-    Never more than remaining Trading-today cash.
+    Never more than remaining Trading-today cash. Letter ticket cap clips last
+    so extra book does not land on letters that failed at $2M.
     """
     tf = _normalize_watch_tf(timeframe)
     if tf not in TF_BUCKET_FRAC:
@@ -7229,6 +7508,15 @@ def compute_entry_plan(
         pass
     room = max(0.0, tradable - deployed - claimed)
     notional = min(raw, room)
+    letter_cap = room3_recipes.letter_max_ticket_usd(tf, strategy)
+    cap_bit = ""
+    if letter_cap is not None:
+        if float(letter_cap) <= 0:
+            notional = 0.0
+            cap_bit = " · letter cap $0 (not sized for this book)"
+        elif notional > float(letter_cap):
+            notional = float(letter_cap)
+            cap_bit = f" · letter cap ${letter_cap:,.0f}"
     qty = 0.0
     if price > 0 and notional >= price:
         qty = math.floor(notional / price)
@@ -7237,7 +7525,7 @@ def compute_entry_plan(
     note = (
         f"{tf} bucket {TF_BUCKET_FRAC[tf]:.0%} · slot ${slot:,.0f} of "
         f"{projected[tf]} projected · match {match_scale:.0%} · "
-        f"unique {distinct:.0%}{borrow_bit} · ${notional:,.0f}"
+        f"unique {distinct:.0%}{borrow_bit}{cap_bit} · ${notional:,.0f}"
     )
     return {
         "qty": qty,
@@ -7251,6 +7539,7 @@ def compute_entry_plan(
         "note": note,
         "idle_cash": round(leftover_other, 2),
         "taker_hot": taker_hot,
+        "letter_cap": letter_cap,
     }
 
 
@@ -7265,6 +7554,7 @@ def _compute_entry_qty(
     max_positions: int = 5,
     layouts: list[dict[str, Any]] | None = None,
     exclude_ticker: str = "",
+    strategy: str = "",
 ) -> tuple[float, float]:
     """Return (qty, notional). max_positions kept for call-site compat; unused."""
     _ = max_positions
@@ -7277,6 +7567,7 @@ def _compute_entry_qty(
         best_cosine=best_cosine,
         layouts=layouts,
         exclude_ticker=exclude_ticker,
+        strategy=strategy,
     )
     return float(plan["qty"]), float(plan["notional"])
 
@@ -7291,10 +7582,13 @@ def compute_scale_in_plan(
     best_cosine: float | None = None,
     layouts: list[dict[str, Any]] | None = None,
     exclude_ticker: str = "",
+    strategy: str = "",
+    existing_notional: float = 0.0,
 ) -> dict[str, Any]:
     """
     Add to a live winner using idle leftover from buckets that are not hot.
     Capped at one full-match slot. Does not spend a hot book's leftover.
+    Letter ticket cap still binds the add.
     """
     plan = compute_entry_plan(
         price=price,
@@ -7305,10 +7599,17 @@ def compute_scale_in_plan(
         best_cosine=best_cosine,
         layouts=layouts,
         exclude_ticker=exclude_ticker,
+        strategy=strategy,
     )
     idle = float(plan.get("idle_cash") or 0)
     slot = float(plan.get("slot") or 0)
     add = min(idle, slot)
+    letter_cap = room3_recipes.letter_max_ticket_usd(timeframe, strategy)
+    if letter_cap is not None:
+        if float(letter_cap) <= 0:
+            add = 0.0
+        else:
+            add = min(add, max(0.0, float(letter_cap) - float(existing_notional or 0)))
     qty = 0.0
     if price > 0 and add >= price:
         qty = math.floor(add / price)
@@ -7406,6 +7707,12 @@ def maybe_queue_matrix_signals(
                 letter = str(lot.get("letter") or "")
                 child = children_by.get(letter) or {}
                 lot_match = int(child.get("match_pct") or line.get("match_pct") or 0)
+                lot["_now_letter"] = str(
+                    line.get("nearest_strategy")
+                    or line.get("strategy")
+                    or line.get("entry_strategy")
+                    or ""
+                )
                 exit_reason = _lot_should_exit(
                     lot,
                     cur_match=lot_match,
@@ -7536,6 +7843,8 @@ def maybe_queue_matrix_signals(
                 best_cosine=float(match.get("cosine_similarity") or 0),
                 layouts=layouts,
                 exclude_ticker=ticker,
+                strategy=str(line.get("entry_strategy") or line.get("strategy") or ""),
+                existing_notional=float(line.get("qty") or 0) * float(line.get("entry_price") or 0),
             )
             add_qty = float(add.get("qty") or 0)
             add_usd = float(add.get("notional") or 0)

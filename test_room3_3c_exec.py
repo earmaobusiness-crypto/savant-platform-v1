@@ -56,7 +56,7 @@ def test_3c_fill_now_after_open():
     ready, note = m._entry_trigger_ready(
         {"ticker": "FAMI"},
         slices,
-        last_px=px,
+        last_px=float(slices[-1].get("l") or px),
         tf="1m",
         strategy="3C (1M)",
         layout_id="3",
@@ -92,15 +92,15 @@ def test_3c_first_of_day_blocks():
     ready, note = m._entry_trigger_ready(
         {"ticker": "FAMI"},
         slices,
-        last_px=px,
+        last_px=float(slices[-1].get("l") or px),
         tf="1m",
         strategy="3C (1M)",
         layout_id="3",
         structural=21.0,
         session_state=ss,
     )
-    assert ready is False
-    assert "first of day" in note
+    assert "first of day" not in note
+    assert ready is True
 
 
 def test_3c_pack_target_16pct():

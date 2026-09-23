@@ -1060,14 +1060,17 @@ def _why_not_firing(line: dict[str, Any], book: dict[str, Any] | None = None) ->
     note = str(line.get("patience_note") or "").strip()
     if note:
         return note[:48]
+    fire = room3_matrix.FIRE_FLOOR_PCT
     if match >= room3_matrix.MATCH_THRESHOLD_PCT:
+        if match < fire:
+            return f"family at {match}% · fires at ≥{fire}% — watching"
         if book and book.get("engine_armed"):
             if book.get("pause_entries"):
-                return "≥85% · Pause is on — no new entries"
+                return f"≥{fire}% · Pause is on — no new entries"
             if book.get("entries_allowed") is False:
-                return "≥85% · session gate off"
-            return "≥85% · firing"
-        return "≥85% · ready · Arm is OFF — flip Arm to send"
+                return f"≥{fire}% · session gate off"
+            return f"≥{fire}% · firing"
+        return f"≥{fire}% · ready · Arm is OFF — flip Arm to send"
     if match >= STICKY_MIN_MATCH_PCT:
         return f"warming {match}% · need ≥{room3_matrix.MATCH_THRESHOLD_PCT}%"
     return "scanning"

@@ -28,6 +28,7 @@ import requests
 
 import room3_matrix as m
 import room3_precursor as precursor
+import room3_recipes
 
 ET = ZoneInfo("America/New_York")
 
@@ -651,9 +652,34 @@ def _lot_exit(
     *,
     trails: bool = False,
 ) -> tuple[str, float]:
-    """Lookback stop and hard target. Trails only if `trails` (sim search)."""
+    """Lookback stop and hard target. Trails only if `trails` (sim search).
+    Fat tape: stop only, 20-minute hold, letter flip — no +20% take."""
     entry = float(lot.get("entry_px") or 0)
     if entry <= 0:
+        return "", 0.0
+    if lot.get("fat_tape") or str(lot.get("exit_source") or "") == "fat_tape":
+        stop_px = float(lot.get("exit_stop_px") or 0)
+        lo = float(bar.get("l") or last_px or 0)
+        if lo > 0 and stop_px > 0 and lo <= stop_px:
+            return "stop", stop_px
+        live = str(lot.get("_now_letter") or "")
+        if room3_recipes.letter_flipped(str(lot.get("letter") or ""), live):
+            return "letter flipped", last_px or lo
+        raw = lot.get("entry_ts")
+        ts = bar.get("ts")
+        if raw and ts:
+            try:
+                et = datetime.fromisoformat(str(raw))
+                now = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts))
+                if et.tzinfo is None:
+                    et = et.replace(tzinfo=ET)
+                if getattr(now, "tzinfo", None) is None:
+                    now = now.replace(tzinfo=ET)
+                hold = float(lot.get("hold_minutes") or room3_recipes.FAT_HOLD_MINUTES)
+                if (now - et).total_seconds() >= hold * 60.0:
+                    return "time box", last_px or lo
+            except (TypeError, ValueError):
+                pass
         return "", 0.0
     stop_px = float(lot.get("exit_stop_px") or 0)
     tgt_px = float(lot.get("exit_tgt_px") or 0)
@@ -754,6 +780,16 @@ def replay_session(
     trails: bool = False,
     ticket_frac: float | None = None,
     min_bar_usd: float | None = None,
+    entry_after: time | None = None,
+    leftover_cut: time | None = None,
+    leftover_all_day: tuple[str, ...] | None = None,
+    no_leftover_after: str | None = None,
+    tf_name_shots_max: int | None = None,
+    tf_name_shots_exempt: tuple[str, ...] | None = None,
+    max_iceberg_clips: int | None = None,
+    name_loss_stop_usd: float | None = None,
+    name_stop_streak: int | None = None,
+    day_loss_stop_usd: float | None = None,
 ) -> dict[str, Any]:
     """One ET session. Book resets to `book`. Overnight flat at the last RTH print.
 
@@ -762,6 +798,8 @@ def replay_session(
     `iceberg_frac`: work a full ticket in clips of that fraction of each bar.
     `loud_pct`: new entries only if this bar's $ vol is at/above that percentile
     of prior bars (needs SIM_LOUD_MIN_PRIOR). Sim only — not live icebergs.
+    Optional prove-gates (all off by default): `entry_after`, leftover clock,
+    name-shot cap, max iceberg clips.
     """
     tf_n = str(tf or "1m").strip().lower()
     if letters is None:
@@ -771,11 +809,16 @@ def replay_session(
             letters = LOCKED_15M
         else:
             letters = LOCKED_1M
-    ss = _SS(_now_et=datetime(sess.year, sess.month, sess.day, 9, 30, tzinfo=ET))
+    ss = _SS(
+        _now_et=datetime(sess.year, sess.month, sess.day, 9, 30, tzinfo=ET),
+        _fat_bar_complete=True,
+    )
     cash = float(book)
     ticket_cap = float(book) * float(TICKET_FRAC if ticket_frac is None else ticket_frac)
     open_lots: list[dict[str, Any]] = []
     closed: list[dict[str, Any]] = []
+    name_pnl: dict[str, float] = {}
+    name_stops: dict[str, int] = {}
     slices: dict[str, list[dict[str, Any]]] = {t: [] for t in bars_by_ticker}
     armed_lines: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -804,6 +847,11 @@ def replay_session(
         }
         closed.append(row)
         ticker = str(lot.get("ticker") or "")
+        name_pnl[ticker] = float(name_pnl.get(ticker) or 0.0) + pnl
+        if reason.startswith("stop") or reason == "runner":
+            name_stops[ticker] = int(name_stops.get(ticker) or 0) + 1
+        elif reason.startswith("target"):
+            name_stops[ticker] = 0
         if reason.startswith("stop") or reason == "runner":
             m._pack_mark_stop_cool(ss, ticker, lot)
         elif reason.startswith("target"):
@@ -850,6 +898,12 @@ def replay_session(
         if iceberg_frac is not None:
             for lot in open_lots:
                 if str(lot.get("ticker") or "") != ticker:
+                    continue
+                if (
+                    max_iceberg_clips is not None
+                    and int(lot.get("iceberg_clips") or 0) >= int(max_iceberg_clips)
+                ):
+                    lot["remain_usd"] = 0.0
                     continue
                 remain = float(lot.get("remain_usd") or 0)
                 if remain <= last_px or last_px <= 0:
@@ -909,12 +963,66 @@ def replay_session(
                 continue
             if min_bar_usd is not None and _bar_dollar(bar) < float(min_bar_usd):
                 continue
+            if entry_after is not None and ts.time() < entry_after:
+                continue
+            if name_loss_stop_usd is not None and float(name_pnl.get(ticker) or 0.0) <= -abs(
+                float(name_loss_stop_usd)
+            ):
+                continue
+            if name_stop_streak is not None and int(name_stops.get(ticker) or 0) >= int(
+                name_stop_streak
+            ):
+                continue
+            if day_loss_stop_usd is not None:
+                booked = sum(float(t.get("pnl_usd") or 0) for t in closed)
+                if booked <= -abs(float(day_loss_stop_usd)):
+                    continue
+            all_day = frozenset(leftover_all_day or ())
+            if leftover_cut is not None and letter not in all_day and ts.time() >= leftover_cut:
+                continue
+            if no_leftover_after and letter not in all_day:
+                stacked = any(
+                    str(lot.get("ticker") or "") == ticker
+                    and str(lot.get("letter") or "") == no_leftover_after
+                    for lot in list(open_lots) + closed
+                )
+                if stacked:
+                    continue
+            if tf_name_shots_max is not None:
+                exempt = frozenset(tf_name_shots_exempt or ())
+                if letter not in exempt:
+                    n_shots = sum(
+                        1
+                        for lot in list(open_lots) + closed
+                        if str(lot.get("ticker") or "") == ticker
+                        and str(lot.get("letter") or "") not in exempt
+                    )
+                    if n_shots >= int(tf_name_shots_max):
+                        continue
             parent = min(ticket_cap, cash)
+            letter_cap = room3_recipes.letter_max_ticket_usd(tf_n, letter)
+            if letter_cap is not None:
+                if float(letter_cap) <= 0:
+                    continue
+                parent = min(parent, float(letter_cap))
+            if (
+                max_iceberg_clips is not None
+                and iceberg_frac is not None
+                and bar_v > 0
+                and last_px > 0
+            ):
+                clip_usd = float(iceberg_frac) * bar_v * last_px
+                if clip_usd > 0 and parent > clip_usd * float(max_iceberg_clips) + 1e-9:
+                    continue
             qty, fill_px = clip_buy(parent)
             if qty < 1:
                 continue
-            cost = qty * fill_px
             handle = str(line.get("1a_handle") or "")
+            fat = room3_recipes.tape_is_fat(printed)
+            if fat:
+                wick = room3_recipes.wick_fill_px(printed, fill_px)
+                if wick > 0:
+                    fill_px = wick
             if tf_n == "5m":
                 stop_px, tgt_px, stop_frac = five_m_pack_exits(printed, fill_px, letter)
                 style = SIM_5M_EXIT_STYLE
@@ -926,6 +1034,12 @@ def replay_session(
             else:
                 stop_px, tgt_px, stop_frac = _pack_exits(letter, printed, fill_px, handle)
                 style = _exit_style(letter, handle)
+            if fat:
+                stop_pct = room3_recipes.fat_stop_pct(printed)
+                stop_px = fill_px * (1.0 - stop_pct / 100.0) if fill_px > 0 else 0.0
+                tgt_px = 0.0
+                stop_frac = stop_pct / 100.0
+            cost = qty * fill_px
             cash -= cost
             remain = max(0.0, parent - cost) if iceberg_frac is not None else 0.0
             armed_lines.pop((ticker, letter), None)
@@ -948,6 +1062,10 @@ def replay_session(
                 "session": sess.isoformat(),
                 "remain_usd": remain,
                 "iceberg_clips": 1 if iceberg_frac is not None else 0,
+                "fat_tape": fat,
+                "exit_source": "fat_tape" if fat else "",
+                "hold_minutes": room3_recipes.FAT_HOLD_MINUTES if fat else 0,
+                "exit_on_letter_flip": bool(fat),
             }
             open_lots.append(lot)
             _mark_fill(ss, letter, ticker, tf=tf_n)

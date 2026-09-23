@@ -376,6 +376,13 @@ class lots:
             "structural_move_pct": float(payload.get("structural_move_pct") or 0),
             "status": "open",
         }
+        fat = bool(payload.get("fat_tape") or payload.get("exit_source") == "fat_tape")
+        if fat:
+            row["fat_tape"] = True
+            row["exit_source"] = "fat_tape"
+            row["hold_minutes"] = payload.get("hold_minutes") or 20
+            row["exit_on_letter_flip"] = True
+            row["exit_tgt_px"] = 0.0
         fill = float(row["entry_px"] or 0)
         frac = payload.get("exit_r_frac")
         style = str(payload.get("exit_style") or "")
@@ -482,7 +489,7 @@ class lots:
                 frac_f = float(frac if frac is not None else 0.02)
             except (TypeError, ValueError):
                 frac_f = 0.02
-            frac_f = max(frac_f, 0.035 if (is_3a or is_3b or is_7a or is_3c or is_6a or is_6b or is_3d or is_7b or is_3g or is_3f or is_8a or is_7c or is_3e or is_6c or is_1b_5m or is_5a_5m) else 0.02)
+            frac_f = max(frac_f, 0.035 if (not fat and (is_3a or is_3b or is_7a or is_3c or is_6a or is_6b or is_3d or is_7b or is_3g or is_3f or is_8a or is_7c or is_3e or is_6c or is_1b_5m or is_5a_5m)) else 0.02)
             one_m = (not tf or tf == "1m") and not (is_1a_5m or is_1b_5m or is_5a_5m) and (
                 pack_style
                 or is_5b
@@ -512,7 +519,7 @@ class lots:
                 or is_3e
                 or is_6c
             )
-            if one_m:
+            if one_m and not fat:
                 frac_f = min(frac_f, 0.035)
             if style:
                 row["exit_style"] = style
@@ -590,7 +597,7 @@ class lots:
                     row["exit_stop_px"] = stop_f
                 else:
                     row["exit_stop_px"] = fill * (1.0 - frac_f)
-                if one_m:
+                if one_m and not fat:
                     cap_px = fill * (1.0 - 0.035)
                     if float(row.get("exit_stop_px") or 0) < cap_px:
                         row["exit_stop_px"] = cap_px
@@ -598,7 +605,9 @@ class lots:
                         0.0,
                         (fill - float(row.get("exit_stop_px") or 0)) / fill,
                     )
-                if str(row["exit_style"]) == "1a_trip":
+                if fat:
+                    row["exit_tgt_px"] = 0.0
+                elif str(row["exit_style"]) == "1a_trip":
                     row["exit_tgt_px"] = 0.0
                 elif tgt_f > 0:
                     row["exit_tgt_px"] = tgt_f
@@ -1633,7 +1642,12 @@ class lots:
                     "exit_stop_px": line.get("exit_stop_px"),
                     "exit_tgt_px": line.get("exit_tgt_px"),
                     "1a_handle": line.get("1a_handle"),
+                    "fat_tape": line.get("fat_tape"),
+                    "exit_source": line.get("exit_source"),
+                    "hold_minutes": line.get("hold_minutes"),
+                    "exit_on_letter_flip": line.get("exit_on_letter_flip"),
                     "entry_time": line.get("entry_time") or line.get("filled_at"),
+                    "entry_ts": line.get("entry_ts"),
                 },
             )
             n += 1
