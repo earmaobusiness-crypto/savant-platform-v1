@@ -65,6 +65,19 @@ def test_fat_detects_four_point_five():
     assert r.fat_stop_pct(slices) >= r.last_bar_range_pct(slices)
 
 
+def test_fat_uses_this_print_not_tf_envelope():
+    envelope, _ = _fat_15m()
+    quiet_print = {"o": 10.20, "h": 10.22, "l": 10.18, "c": 10.21, "v": 1_000}
+    assert r.tape_is_fat(envelope) is True
+    assert r.tape_is_fat(envelope, print_bar=quiet_print) is False
+    assert r.fat_stop_pct(envelope, print_bar=quiet_print) == r.FAT_STOP_MIN_PCT
+    assert abs(r.fat_entry_px(envelope, 10.21, print_bar=quiet_print) - 10.21) < 1e-9
+    fat_print = {"o": 10.00, "h": 10.80, "l": 9.90, "c": 10.60, "v": 2_000}
+    assert r.tape_is_fat(envelope, print_bar=fat_print) is True
+    assert abs(r.fat_entry_px(envelope, 10.60, print_bar=fat_print) - 9.90) < 1e-9
+    assert r.fat_stop_pct(envelope, print_bar=fat_print) >= 8.0
+
+
 def test_handle_overlay_is_temperament_not_a_letter():
     base = r.handle_execution_for("2B (15M)", "15m")
     assert base.get("first_of_day") is True
@@ -255,3 +268,18 @@ def test_walkforward_fat_exit_ignores_target():
     reason, px = wf._lot_exit(lot, later, 11.0)
     assert reason == "time box"
     assert px == 11.0
+
+
+def test_1m_uses_letter_clip_not_pooled():
+    assert r.pooled_exit_pcts("1m") is None
+    assert r.pooled_exit_pcts("5m") == (8.0, 8.0)
+    assert r.pooled_exit_pcts("15m") == (30.0, 10.0)
+    a5 = r.handle_execution_for("5A (1M)", "1m")
+    assert abs(float(a5["target_pct"]) - 10.0) < 1e-9
+    assert a5.get("exit_source") != "pooled_tf"
+    five = r.handle_execution_for("2C (5M)", "5m")
+    assert five.get("exit_source") == "pooled_tf"
+    assert abs(float(five["target_pct"]) - 8.0) < 1e-9
+    fifteen = r.handle_execution_for("2B (15M)", "15m")
+    assert fifteen.get("exit_source") == "pooled_tf"
+    assert abs(float(fifteen["target_pct"]) - 30.0) < 1e-9

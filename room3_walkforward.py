@@ -881,16 +881,17 @@ def replay_session(
 
         def clip_buy(size_usd: float) -> tuple[int, float]:
             cap = float(size_usd)
-            if last_px <= 0:
+            px = room3_recipes.fat_entry_px(printed, last_px, print_bar=bar)
+            if px <= 0:
                 return 0, 0.0
             if iceberg_frac is not None and bar_v > 0:
                 cap = min(cap, float(iceberg_frac) * bar_v * last_px)
             elif part_frac is not None and bar_v > 0:
                 cap = min(cap, float(part_frac) * bar_v * last_px)
-            qty = int(cap / last_px)
+            qty = int(cap / px)
             if qty < 1:
                 return 0, 0.0
-            fill_px = _impact_px(last_px, qty, bar_v, "buy", k=impact_k, cap=impact_cap)
+            fill_px = _impact_px(px, qty, bar_v, "buy", k=impact_k, cap=impact_cap)
             if qty * fill_px > cash + 1e-9:
                 return 0, 0.0
             return qty, fill_px
@@ -954,6 +955,7 @@ def replay_session(
                 layout_id="WALKFORWARD",
                 structural=0.0,
                 session_state=ss,
+                print_bar=bar,
             )
             if not ready:
                 continue
@@ -1018,11 +1020,7 @@ def replay_session(
             if qty < 1:
                 continue
             handle = str(line.get("1a_handle") or "")
-            fat = room3_recipes.tape_is_fat(printed)
-            if fat:
-                wick = room3_recipes.wick_fill_px(printed, fill_px)
-                if wick > 0:
-                    fill_px = wick
+            fat = room3_recipes.tape_is_fat(printed, print_bar=bar)
             if tf_n == "5m":
                 stop_px, tgt_px, stop_frac = five_m_pack_exits(printed, fill_px, letter)
                 style = SIM_5M_EXIT_STYLE
@@ -1035,7 +1033,7 @@ def replay_session(
                 stop_px, tgt_px, stop_frac = _pack_exits(letter, printed, fill_px, handle)
                 style = _exit_style(letter, handle)
             if fat:
-                stop_pct = room3_recipes.fat_stop_pct(printed)
+                stop_pct = room3_recipes.fat_stop_pct(printed, print_bar=bar)
                 stop_px = fill_px * (1.0 - stop_pct / 100.0) if fill_px > 0 else 0.0
                 tgt_px = 0.0
                 stop_frac = stop_pct / 100.0

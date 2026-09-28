@@ -41,6 +41,25 @@ def test_family_band_watches_and_does_not_buy():
         assert "fires at ≥88%" in note
 
 
+def test_fat_eighty_five_clears_fire_floor():
+    """Quiet 85–87 watches. This-print fat 85–87 may fire. Gene stays 85."""
+    assert m.fat_clears_fire_floor(86, fat=False) is False
+    assert m.fat_clears_fire_floor(86, fat=True) is True
+    fat_print = {"o": 10.0, "h": 10.80, "l": 9.90, "c": 10.60, "v": 2_000}
+    _ready, note = m._entry_trigger_ready(
+        {"ticker": "MEDS"},
+        _slices(),
+        last_px=10.60,
+        tf="15m",
+        strategy="2B (15M)",
+        layout_id="L2",
+        structural=12.0,
+        match_pct=86,
+        print_bar=fat_print,
+    )
+    assert "fires at ≥88%" not in note
+
+
 def test_eighty_eight_is_past_the_floor():
     """88 clears the money gate — whatever the letter's own Hunt then decides."""
     _ready, note = m._entry_trigger_ready(

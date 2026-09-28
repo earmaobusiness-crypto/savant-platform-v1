@@ -1062,15 +1062,20 @@ def _why_not_firing(line: dict[str, Any], book: dict[str, Any] | None = None) ->
         return note[:48]
     fire = room3_matrix.FIRE_FLOOR_PCT
     if match >= room3_matrix.MATCH_THRESHOLD_PCT:
-        if match < fire:
+        fat = room3_recipes.tape_is_fat(
+            line.get("slices") or [],
+            print_bar=line.get("_print_bar"),
+        )
+        if match < fire and not room3_matrix.fat_clears_fire_floor(match, fat=fat):
             return f"family at {match}% · fires at ≥{fire}% — watching"
+        gate = f"fat tape · {match}%" if match < fire else f"≥{fire}%"
         if book and book.get("engine_armed"):
             if book.get("pause_entries"):
-                return f"≥{fire}% · Pause is on — no new entries"
+                return f"{gate} · Pause is on — no new entries"
             if book.get("entries_allowed") is False:
-                return f"≥{fire}% · session gate off"
-            return f"≥{fire}% · firing"
-        return f"≥{fire}% · ready · Arm is OFF — flip Arm to send"
+                return f"{gate} · session gate off"
+            return f"{gate} · firing"
+        return f"{gate} · ready · Arm is OFF — flip Arm to send"
     if match >= STICKY_MIN_MATCH_PCT:
         return f"warming {match}% · need ≥{room3_matrix.MATCH_THRESHOLD_PCT}%"
     return "scanning"

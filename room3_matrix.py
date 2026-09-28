@@ -18,10 +18,17 @@ room3_lots = room3_engine.lots
 
 MATCH_THRESHOLD_PCT = 85
 # Detect/display stay at 85 (that is the gene, and every letter lock says so).
-# Firing is Handle: on the 10-day $2M no-lookahead book the 85–87% band was
-# almost all losers, so a ticket needs 88 to actually go. Neighbouring floors
-# (87/89) ran +5.0/+3.2 vs +5.9 here — treat ~+4.7 as the honest expectation.
+# Firing is Handle: quiet tape still needs 88. Fat this-print (2026-09-27) may
+# fire at 85 — other names covered the TNON nick on Aug 12 / Aug 19.
 FIRE_FLOOR_PCT = 88
+
+
+def fat_clears_fire_floor(match_pct: int | None, *, fat: bool) -> bool:
+    """Quiet 85–87 watches. This-print fat 85–87 may fire. Gene stays 85."""
+    cur = int(match_pct or 0)
+    if cur >= FIRE_FLOOR_PCT:
+        return True
+    return bool(fat and cur >= MATCH_THRESHOLD_PCT)
 CHILD_READY_PCT = 84  # show a strategy sub-lane; fire still waits for MATCH_THRESHOLD
 EXIT_MATCH_FLOOR_PCT = 65
 STOP_LOSS_PCT = 2.5
@@ -576,8 +583,9 @@ def size_explain(session_state: Any | None = None) -> str:
         "not hot (live < projected). A live 15m that is still in the move can add once "
         "from that same idle cash. If 5m or 1m is the hot book, leftover flows there "
         "instead of sitting in 15m. "
-        f"A family prints at ≥{MATCH_THRESHOLD_PCT}% but a ticket only fires at "
-        f"≥{FIRE_FLOOR_PCT}% — the {MATCH_THRESHOLD_PCT}–{FIRE_FLOOR_PCT - 1}% band watches, it does not buy. "
+        f"A family prints at ≥{MATCH_THRESHOLD_PCT}% but a quiet ticket only fires at "
+        f"≥{FIRE_FLOOR_PCT}% — the {MATCH_THRESHOLD_PCT}–{FIRE_FLOOR_PCT - 1}% band watches unless "
+        "this print is fat. "
         "Weaker match uses less of its slot. "
         "Uniqueness still cuts size when two strategies are almost equally close. "
         "Match uses median/MAD z-scores (clip ±5) then weighted cosine "
@@ -588,7 +596,8 @@ def size_explain(session_state: Any | None = None) -> str:
 
 SIZE_EXPLAIN = (
     f"Trading today opens {TF_BUCKET_FRAC['15m']:.0%} 15m / {TF_BUCKET_FRAC['5m']:.1%} 5m / "
-    f"{TF_BUCKET_FRAC['1m']:.1%} 1m, and a ticket fires at ≥{FIRE_FLOOR_PCT}% (not {MATCH_THRESHOLD_PCT}%). "
+    f"{TF_BUCKET_FRAC['1m']:.1%} 1m, and a quiet ticket fires at ≥{FIRE_FLOOR_PCT}% "
+    f"(fat tape may fire at ≥{MATCH_THRESHOLD_PCT}%). "
     "At $2M the working tickets are 1m $100k · 5m $200k · 15m $300k; letters that earned "
     "the full slot may take it. Iceberg still clips a thin bar. A smaller Set $ uses the "
     "same percents — the slot shrinks, the cap does not bind. "
@@ -5012,6 +5021,7 @@ def _try_queue_child_entry(
                 child["patience_note"] = f"warming {pct}% · need ≥{int(floor)}%"
             continue
         structural = float(child.get("structural_move_pct") or 0)
+        print_bar = _this_print_bar(book, ticker, slices)
         ready, trigger_note = _entry_trigger_ready(
             child,
             slices,
@@ -5021,6 +5031,7 @@ def _try_queue_child_entry(
             layout_id=layout_id,
             structural=structural,
             session_state=session_state,
+            print_bar=print_bar,
         )
         child["patience_note"] = trigger_note
         if not ready:
@@ -5725,8 +5736,8 @@ def _try_queue_child_entry(
                 stamped["exit_stop_px"] = stop_px
                 stamped["exit_tgt_px"] = tgt_px
                 _ph_mark_used(session_state, ticker, strategy)
-            if room3_recipes.tape_is_fat(slices):
-                _apply_fat_exits(stamped, sig, slices, last_px)
+            if room3_recipes.tape_is_fat(slices, print_bar=print_bar):
+                _apply_fat_exits(stamped, sig, slices, last_px, print_bar=print_bar)
             if room3_recipes.normalize_tf(tf) == "1m":
                 _1m_mark_name_shot(session_state, ticker)
         line["nearest_strategy"] = strategy
@@ -5736,13 +5747,31 @@ def _try_queue_child_entry(
     return False
 
 
+def _this_print_bar(
+    book: dict[str, Any] | None,
+    ticker: str,
+    slices: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """1m that just printed. Do not treat a 5m/15m envelope as this bar."""
+    import room3_watcher
+
+    one = ((book or {}).get("lines") or {}).get(room3_watcher.line_key(ticker, "1m")) or {}
+    one_sl = list(one.get("slices") or [])
+    if one_sl:
+        return one_sl[-1]
+    last = (slices or [None])[-1]
+    return last if last else None
+
+
 def _apply_fat_exits(
     stamped: dict[str, Any],
     sig: dict[str, Any] | None,
     slices: list[dict[str, Any]],
     last_px: float,
+    *,
+    print_bar: dict[str, Any] | None = None,
 ) -> None:
-    stop_pct = room3_recipes.fat_stop_pct(slices)
+    stop_pct = room3_recipes.fat_stop_pct(slices, print_bar=print_bar)
     fill = float(last_px or 0)
     stop_px = fill * (1.0 - stop_pct / 100.0) if fill > 0 else 0.0
     stamped["fat_tape"] = True
@@ -6070,12 +6099,13 @@ def _fat_wick_gate(
 ) -> tuple[bool, str]:
     if not ready:
         return ready, note
-    if not room3_recipes.tape_is_fat(slices):
+    print_bar = line.get("_print_bar")
+    if not room3_recipes.tape_is_fat(slices, print_bar=print_bar):
         return ready, note
     line["fat_tape"] = True
     if not line.get("_fat_bar_complete"):
         px = float(last_px or line.get("_last_px") or 0)
-        if not room3_recipes.wick_touch_ok(slices, px):
+        if not room3_recipes.wick_touch_ok(slices, px, print_bar=print_bar):
             tag = note.split(" · ")[0] if " · " in note else note
             return False, f"{tag} · fat tape · wait the wick"
     return ready, note
@@ -6094,12 +6124,13 @@ def _1m_live_fill_now(
         return False, f"{tag} · {wait}"
     slices = list(line.get("_slices") or line.get("slices") or [])
     last_px = float(line.get("_last_px") or 0)
-    if room3_recipes.tape_is_fat(slices):
+    print_bar = line.get("_print_bar")
+    if room3_recipes.tape_is_fat(slices, print_bar=print_bar):
         line["fat_tape"] = True
         if not line.get("_fat_bar_complete"):
             if last_px <= 0 and slices:
                 last_px = float(slices[-1].get("c") or 0)
-            if not room3_recipes.wick_touch_ok(slices, last_px):
+            if not room3_recipes.wick_touch_ok(slices, last_px, print_bar=print_bar):
                 return False, f"{tag} · fat tape · wait the wick"
     line["trigger_phase"] = "ready"
     return True, f"{tag} · enter now"
@@ -6861,6 +6892,7 @@ def _entry_trigger_ready(
     structural: float,
     session_state: Any = None,
     match_pct: int | None = None,
+    print_bar: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """
     ≥85% = family. Fill = letter style, else TF fallback.
@@ -6870,17 +6902,18 @@ def _entry_trigger_ready(
         return False, "late · skipped · wait next pattern"
     if last_px <= 0:
         return False, "no last print"
-    fat = room3_recipes.tape_is_fat(slices)
+    fat = room3_recipes.tape_is_fat(slices, print_bar=print_bar)
     _set_tape_fat(session_state, fat)
     line["_slices"] = slices
     line["_last_px"] = last_px
+    line["_print_bar"] = print_bar
     if session_state is not None:
         try:
             line["_fat_bar_complete"] = bool(session_state.get("_fat_bar_complete"))
         except Exception:
             line["_fat_bar_complete"] = False
     cur = int(match_pct if match_pct is not None else (line.get("match_pct") or 0))
-    if cur and cur < FIRE_FLOOR_PCT:
+    if cur and not fat_clears_fire_floor(cur, fat=fat):
         return False, f"family at {cur}% · fires at ≥{FIRE_FLOOR_PCT}%"
     if room3_recipes.normalize_tf(tf) == "1m" and _1m_name_shots_blocked(
         session_state, str(line.get("ticker") or "")

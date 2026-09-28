@@ -388,12 +388,13 @@ def _letter_head(strategy: str) -> str:
 # -> untouched fresh days: 15m +8.3% -> +5.9% · 5m +1.28% -> +1.29% ·
 # 1m +1.20% -> +1.19%. First thing that transferred.
 #
-# The letter still decides WHETHER to enter. It no longer decides the exit.
+# The letter still decides WHETHER to enter. 5m / 15m still use these exits.
+# 1m uses the letter clip (2026-09-27). Pooled 25% sat BQ 07:22–10:31 for a
+# 10% 5A that printed at 07:53. Operator: 1m quick bursts; 5m/15m hold.
 POOLED_EXITS_ON = True
 POOLED_EXITS: dict[str, tuple[float, float]] = {
     "15m": (30.0, 10.0),  # target %, hard stop %
     "5m": (8.0, 8.0),
-    "1m": (25.0, 10.0),
 }
 # Caps stay on so $0 letters still do not fire. Working tickets are $2M-scale
 # (1m $100k · 5m $200k · 15m $300k). A smaller Set $ uses the TF slot instead
@@ -409,8 +410,22 @@ FAT_HOLD_MINUTES = 20
 FAT_WICK_LOC = 0.40
 
 
-def last_bar_range_pct(slices: list[dict[str, Any]] | None) -> float:
-    last = (slices or [None])[-1] or {}
+def _fat_bar(
+    slices: list[dict[str, Any]] | None,
+    print_bar: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """This print, not a 5m/15m envelope that already ran earlier minutes."""
+    if print_bar:
+        return print_bar
+    return (slices or [None])[-1] or {}
+
+
+def last_bar_range_pct(
+    slices: list[dict[str, Any]] | None,
+    *,
+    print_bar: dict[str, Any] | None = None,
+) -> float:
+    last = _fat_bar(slices, print_bar)
     c = float(last.get("c") or 0)
     h = float(last.get("h") or 0)
     lo = float(last.get("l") or 0)
@@ -419,21 +434,56 @@ def last_bar_range_pct(slices: list[dict[str, Any]] | None) -> float:
     return (h - lo) / c * 100.0
 
 
-def tape_is_fat(slices: list[dict[str, Any]] | None) -> bool:
-    return last_bar_range_pct(slices) + 1e-12 >= FAT_BAR_PCT
+def tape_is_fat(
+    slices: list[dict[str, Any]] | None,
+    *,
+    print_bar: dict[str, Any] | None = None,
+) -> bool:
+    return last_bar_range_pct(slices, print_bar=print_bar) + 1e-12 >= FAT_BAR_PCT
 
 
-def fat_stop_pct(slices: list[dict[str, Any]] | None) -> float:
-    return max(FAT_STOP_MIN_PCT, last_bar_range_pct(slices))
+def fat_stop_pct(
+    slices: list[dict[str, Any]] | None,
+    *,
+    print_bar: dict[str, Any] | None = None,
+) -> float:
+    return max(FAT_STOP_MIN_PCT, last_bar_range_pct(slices, print_bar=print_bar))
 
 
-def wick_fill_px(slices: list[dict[str, Any]] | None, last_px: float = 0.0) -> float:
-    """Buy the wick, not the close."""
-    last = (slices or [None])[-1] or {}
-    lo = float(last.get("l") or 0)
+def wick_fill_px(
+    slices: list[dict[str, Any]] | None,
+    last_px: float = 0.0,
+    *,
+    print_bar: dict[str, Any] | None = None,
+) -> float:
+    """Buy this print's wick, not a stale 5m/15m envelope low from earlier minutes."""
+    bar = _fat_bar(slices, print_bar)
+    lo = float(bar.get("l") or 0)
     if lo > 0:
         return lo
-    return float(last_px or last.get("c") or 0)
+    last = (slices or [None])[-1] or {}
+    sl_lo = float(last.get("l") or 0)
+    if sl_lo > 0:
+        return sl_lo
+    return float(last_px or last.get("c") or bar.get("c") or 0)
+
+
+def fat_entry_px(
+    slices: list[dict[str, Any]] | None,
+    last_px: float = 0.0,
+    *,
+    print_bar: dict[str, Any] | None = None,
+) -> float:
+    """Size and fill at this print. Fat = this wick. Not the TF envelope."""
+    raw = float(last_px or 0)
+    if tape_is_fat(slices, print_bar=print_bar):
+        wick = wick_fill_px(slices, raw, print_bar=print_bar)
+        if wick > 0:
+            return wick
+    if raw > 0:
+        return raw
+    last = _fat_bar(slices, print_bar)
+    return float(last.get("c") or 0)
 
 
 def wick_touch_ok(
@@ -441,13 +491,14 @@ def wick_touch_ok(
     last_px: float,
     *,
     bar_complete: bool = False,
+    print_bar: dict[str, Any] | None = None,
 ) -> bool:
     """Completed bars already printed the wick. A live bar waits for the low."""
-    if not tape_is_fat(slices):
+    if not tape_is_fat(slices, print_bar=print_bar):
         return True
     if bar_complete:
         return True
-    last = (slices or [None])[-1] or {}
+    last = _fat_bar(slices, print_bar)
     lo = float(last.get("l") or 0)
     hi = float(last.get("h") or 0)
     if lo <= 0 or hi <= lo:
@@ -467,12 +518,14 @@ def letter_flipped(entry_letter: str, now_letter: str) -> bool:
 def apply_fat_to_handle(
     payload: dict[str, Any],
     slices: list[dict[str, Any]] | None,
+    *,
+    print_bar: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Overlay fat-tape temperament on a Handle stamp. DNA / letter stay."""
     out = dict(payload or {})
-    if not tape_is_fat(slices):
+    if not tape_is_fat(slices, print_bar=print_bar):
         return out
-    stop = fat_stop_pct(slices)
+    stop = fat_stop_pct(slices, print_bar=print_bar)
     out["fat_tape"] = True
     out["first_of_day"] = False
     out["cool_sec"] = 0
@@ -490,10 +543,13 @@ def apply_fat_to_handle(
 
 
 def pooled_exit_pcts(timeframe: str = "") -> tuple[float, float] | None:
-    """(target %, hard stop %) for this TF, or None when pooled exits are off."""
+    """(target %, hard stop %) for this TF, or None when pooled is off / 1m."""
     if not POOLED_EXITS_ON:
         return None
-    return POOLED_EXITS.get(normalize_tf(timeframe))
+    tf = normalize_tf(timeframe)
+    if tf == "1m":
+        return None
+    return POOLED_EXITS.get(tf)
 
 
 # Ticket cap vs Trading-today growth. None = TF slot may grow. 0 = do not fire.
