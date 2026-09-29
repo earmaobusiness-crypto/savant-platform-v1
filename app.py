@@ -110,8 +110,9 @@ WINDOW4_ANCHOR_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?<!\*)\b(Net\s+margin[^.\n]{0,30})", re.I), r"**\1**"),
     (re.compile(r"(?<!\*)\b(Vault\s+state[^.\n]{0,30})", re.I), r"**\1**"),
 ]
-PRIMARY_MODEL = "llama-3.3-70b-versatile"
-FALLBACK_MODEL = "llama3-8b-8192"
+# Groq retired llama-3.3-70b-versatile / llama-3.1-8b-instant on 2026-08-16.
+PRIMARY_MODEL = "openai/gpt-oss-120b"
+FALLBACK_MODEL = "openai/gpt-oss-20b"
 MACRO_DRIVERS = [("GC=F", "GOLD"), ("CL=F", "OIL"), ("^TNX", "TNX"), ("SPY", "SPY")]
 ROOM2_INVALID_INPUT_MESSAGE = (
     "⚠️ INVALID INPUT: Verify your Ticker is filled out and your Timestamps match "
@@ -2672,11 +2673,15 @@ def _groq_should_fallback(err: str) -> bool:
     low = err.lower()
     return (
         "429" in err
+        or "404" in err
         or "rate" in low
         or "limit" in low
         or "token" in low
         or "context" in low
         or "exhaust" in low
+        or "model_not_found" in low
+        or "does not exist" in low
+        or "decommission" in low
     )
 
 

@@ -3890,6 +3890,23 @@ def _9b_5m_gene_ok(slices: list[dict[str, Any]]) -> bool:
     return True
 
 
+def _slice_last_green(slices: list[dict[str, Any]]) -> bool:
+    if not slices:
+        return False
+    last = slices[-1]
+    try:
+        return float(last.get("c") or 0) >= float(last.get("o") or 0)
+    except Exception:
+        return False
+
+
+def _15m_last_red_blocks(slices: list[dict[str, Any]], tag: str) -> tuple[bool, str] | None:
+    """Handle: 15m fill waits for a green last bar. Detect still does not require last-green."""
+    if _slice_last_green(slices):
+        return None
+    return False, f"{tag} · last red"
+
+
 def _1a_15m_gene_ok(slices: list[dict[str, Any]]) -> bool:
     """Leftover 1A (15M): vel5 ≥12%, last range ≥2%. Last-green is not required."""
     if len(slices) < 3:
@@ -6758,6 +6775,10 @@ def _15m_spec_entry_ready(
         ok = _1a_15m_gene_ok(slices)
     else:
         ok = _15m_origin_gene_ok(slices)
+    if ok:
+        blocked = _15m_last_red_blocks(slices, f"{letter} (15M)")
+        if blocked is not None:
+            return blocked
     _ = last_px
     return _1m_live_fill_now(
         line, f"{letter} (15M)", gene_ok=ok, wait="wait suited tape"
@@ -6846,6 +6867,10 @@ def _ph_entry_ready(
     else:
         dip_frac = PH_DIP_FRAC_1M
     if phase == "ready":
+        if tf_n == "15m":
+            blocked = _15m_last_red_blocks(slices, strategy)
+            if blocked is not None:
+                return blocked
         return _fat_wick_gate(
             line, slices, last_px, True, f"{strategy} · dip-reclaim · enter now"
         )
@@ -6860,6 +6885,10 @@ def _ph_entry_ready(
         line["pullback_low"] = pb
         if tf_n in ("5m", "15m"):
             if last_c > pb and last_c >= armed_px * 0.997:
+                if tf_n == "15m":
+                    blocked = _15m_last_red_blocks(slices, strategy)
+                    if blocked is not None:
+                        return blocked
                 line["trigger_phase"] = "ready"
                 return _fat_wick_gate(
                     line,

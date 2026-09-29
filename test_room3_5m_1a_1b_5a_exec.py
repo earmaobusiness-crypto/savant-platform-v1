@@ -919,10 +919,25 @@ def test_1a_15m_gene_and_fill_now():
         structural=50.0,
         session_state=ss,
     )
-    assert ready is True
-    assert "enter now" in note
-    _stop, tgt, _frac = m._1a_15m_pack_exits(slices, px)
-    assert abs(tgt / px - 1.08) < 1e-9
+    assert ready is False
+    assert "last red" in note
+    green = dict(last)
+    green["c"] = float(green["h"])
+    slices[-1] = green
+    ready_g, note_g = m._entry_trigger_ready(
+        {"ticker": "FAMI"},
+        slices,
+        last_px=float(green["c"]),
+        tf="15m",
+        strategy="1A (15M)",
+        layout_id="1",
+        structural=50.0,
+        session_state=ss,
+    )
+    assert ready_g is True
+    assert "enter now" in note_g
+    _stop, tgt, _frac = m._1a_15m_pack_exits(slices, float(green["c"]))
+    assert abs(tgt / float(green["c"]) - 1.08) < 1e-9
 
 
 def test_15m_origin_fill_now_12():
