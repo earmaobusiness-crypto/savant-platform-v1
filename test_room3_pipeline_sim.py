@@ -1,4 +1,4 @@
-"""Pre-paper sim: 168h centroid → MAD match → live gates (size, Arm, belt, TF, Handle)."""
+"""Pre-paper sim: vault DNA → MAD match → live gates (size, Arm, belt, TF, Handle)."""
 
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -123,12 +123,25 @@ def _run(line, layouts, ss, book, *, armed: bool = True, entries: bool = True):
     return line
 
 
-def test_stale_vault_starves_match_and_does_not_queue():
+def test_stale_live_vault_still_matches():
     book, line = _book()
     vec = m.build_live_feature_vector(line)
     layouts = b._aggregate_rows_into_layouts(
         [_vault_row(strategy="6A (1M)", tf="1m", vector=list(vec), ts=_stale_ts())]
     )
+    assert layouts
+    ss = _ss(tradable=1000)
+    _run(line, layouts, ss, book)
+    assert int(line.get("match_pct") or 0) >= 85
+    assert line.get("nearest_strategy") == "6A (1M)"
+
+
+def test_stale_incubation_starves_match_and_does_not_queue():
+    book, line = _book()
+    vec = m.build_live_feature_vector(line)
+    row = _vault_row(strategy="6A (1M)", tf="1m", vector=list(vec), ts=_stale_ts())
+    row["state"] = "incubation"
+    layouts = b._aggregate_rows_into_layouts([row])
     assert layouts == []
     ss = _ss(tradable=1000)
     _run(line, layouts, ss, book)

@@ -316,7 +316,12 @@ def init_room3_session_state() -> None:
         if not st.session_state.get("room3_layout_hydrated_once"):
             import room3_bridge
 
-            room3_bridge.ensure_layout_library(st.session_state, allow_network=False)
+            # Cloud has no gitignored cache — gulp vault or Match% stays 0.
+            cached_rows = room3_bridge._vault_rows_from_cache_file()
+            room3_bridge.ensure_layout_library(
+                st.session_state,
+                allow_network=not cached_rows,
+            )
             st.session_state.pop("room3_repertoire_cache", None)
             st.session_state.room3_layout_hydrated_once = True
         _maybe_roll_trading_session()

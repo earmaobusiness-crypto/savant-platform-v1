@@ -213,6 +213,10 @@ def _parse_row_timestamp(raw: Any) -> datetime | None:
     return ts.astimezone(timezone.utc)
 
 
+def _row_is_incubation(row: dict[str, Any]) -> bool:
+    return str(row.get("state") or "").strip().lower() == "incubation"
+
+
 def _row_in_centroid_window(row: dict[str, Any], cutoff: datetime) -> bool:
     ts = _parse_row_timestamp(
         row.get("timestamp") if isinstance(row, dict) else None
@@ -226,12 +230,33 @@ def _filter_rows_to_centroid_window(
     rows: list[dict[str, Any]],
     cutoff: datetime | None = None,
 ) -> list[dict[str, Any]]:
+    """Incubation-only 168h clip. Prefer `_filter_rows_for_hydrate` for Room 3."""
     cut = cutoff if cutoff is not None else _centroid_cutoff_utc()
     return [
         r
         for r in (rows or [])
         if isinstance(r, dict) and _row_in_centroid_window(r, cut)
     ]
+
+
+def _filter_rows_for_hydrate(
+    rows: list[dict[str, Any]],
+    cutoff: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Live/active letters stay. Unfinished incubation still uses the 168h window."""
+    cut = cutoff if cutoff is not None else _centroid_cutoff_utc()
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if _row_is_incubation(row):
+            if _row_in_centroid_window(row, cut):
+                out.append(row)
+            continue
+        if _parse_row_timestamp(row.get("timestamp")) is None:
+            continue
+        out.append(row)
+    return out
 
 
 def _normalize_tf(raw: str) -> str:
@@ -323,9 +348,9 @@ def _aggregate_rows_into_layouts(rows: list[dict[str, Any]]) -> list[dict[str, A
     """
     Collapse pattern saves into layout + strategy + timeframe buckets.
     Many stocks → Layout 1 / 1A (5M) / 5m is its own DNA bucket, separate from 1B (1M), etc.
-    Only in-window saves (timestamp >= now−168h UTC) count. Empty window → starve.
+    Live/active DNA does not expire. Incubation still uses the 168h window.
     """
-    windowed = _filter_rows_to_centroid_window(rows)
+    windowed = _filter_rows_for_hydrate(rows)
     buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in windowed:
         if not isinstance(row, dict):
@@ -404,7 +429,38 @@ def _vault_rows_from_cache_file(
     except Exception:
         return []
     rows = [r for r in (cache.get("patterns") or []) if isinstance(r, dict)]
-    return _filter_rows_to_centroid_window(rows, cutoff)
+    return _filter_rows_for_hydrate(rows, cutoff)
+
+
+def _rest_vault_rows(
+    *,
+    url: str,
+    table: str,
+    headers: dict[str, str],
+    extra_qs: str,
+) -> list[dict[str, Any]]:
+    select = (
+        "macro_weather_layout,ticker,timeframe_resolution,master_signature_json,"
+        "metric_envelopes_json,structural_move_pct,execution_strategy,layout_match_pct,"
+        "bar_count,vault_track,state,timestamp"
+    )
+    try:
+        resp = requests.get(
+            f"{url}/rest/v1/{table}"
+            f"?select={select}"
+            "&macro_weather_layout=not.is.null"
+            f"{extra_qs}"
+            f"&order=timestamp.desc&limit={VAULT_FETCH_LIMIT}",
+            headers=headers,
+            timeout=VAULT_FETCH_TIMEOUT_SEC,
+        )
+        if resp.ok:
+            body = resp.json()
+            if isinstance(body, list):
+                return [r for r in body if isinstance(r, dict)]
+    except Exception:
+        return []
+    return []
 
 
 def _fetch_vault_rows() -> list[dict[str, Any]]:
@@ -414,35 +470,29 @@ def _fetch_vault_rows() -> list[dict[str, Any]]:
     if _VAULT_ROWS_MEM is not None and (now - _VAULT_ROWS_AT) < _VAULT_ROWS_TTL:
         return _VAULT_ROWS_MEM
     cutoff = _centroid_cutoff_utc()
-    cutoff_iso = _centroid_cutoff_iso(cutoff)
     secrets = _load_secrets()
     headers = _supabase_headers(secrets)
     url = secrets.get("SUPABASE_URL", "").rstrip("/")
     rows: list[dict[str, Any]] = []
     if headers and url:
         table = secrets.get("SUPABASE_PATTERN_TABLE") or "forensic_patterns"
-        select = (
-            "macro_weather_layout,ticker,timeframe_resolution,master_signature_json,"
-            "metric_envelopes_json,structural_move_pct,execution_strategy,layout_match_pct,"
-            "bar_count,vault_track,state,timestamp"
+        cutoff_iso = quote(_centroid_cutoff_iso(cutoff), safe="")
+        live = _rest_vault_rows(
+            url=url,
+            table=table,
+            headers=headers,
+            extra_qs="&or=(state.is.null,state.eq.active)",
         )
-        try:
-            resp = requests.get(
-                f"{url}/rest/v1/{table}"
-                f"?select={select}"
-                "&macro_weather_layout=not.is.null"
-                "&or=(state.is.null,state.eq.active,state.eq.incubation)"
-                f"&timestamp=gte.{quote(cutoff_iso, safe='')}"
-                f"&order=timestamp.desc&limit={VAULT_FETCH_LIMIT}",
-                headers=headers,
-                timeout=VAULT_FETCH_TIMEOUT_SEC,
-            )
-            if resp.ok:
-                body = resp.json()
-                if isinstance(body, list):
-                    rows = _filter_rows_to_centroid_window(body, cutoff)
-        except Exception:
-            rows = []
+        incubation = _rest_vault_rows(
+            url=url,
+            table=table,
+            headers=headers,
+            extra_qs=(
+                "&state=eq.incubation"
+                f"&timestamp=gte.{cutoff_iso}"
+            ),
+        )
+        rows = _filter_rows_for_hydrate(live + incubation, cutoff)
     if not rows:
         rows = _vault_rows_from_cache_file(cutoff)
     _VAULT_ROWS_MEM = rows
@@ -712,6 +762,8 @@ def matrix_repertoire(session_state: Any, *, allow_network: bool = True) -> dict
 def matrix_snapshot(session_state: Any) -> dict[str, Any]:
     """Safe peek — never throws if Room 2 state is missing or reshaped."""
     rep = matrix_repertoire(session_state, allow_network=False)
+    if not (rep.get("layouts") or []):
+        rep = matrix_repertoire(session_state, allow_network=True)
     return {
         "layout_count": rep.get("layout_count", 0),
         "deploy_count": rep.get("deploy_count", 0),
