@@ -409,6 +409,12 @@ FAT_STOP_MIN_PCT = 8.0
 FAT_HOLD_MINUTES = 20
 FAT_WICK_LOC = 0.40
 
+# Quiet 15m 2B (2026-10-02). Same gene. After the letter's +12%, trail 10%
+# off the high so GELS/GIPR/SSM-style holds do not give a tagged winner back
+# to the pooled 10% stop. Fat 2B stays the 20-minute time box.
+TWO_B_15M_TRAIL_ARM_PCT = 12.0
+TWO_B_15M_TRAIL_OFF_HIGH_PCT = 10.0
+
 
 def _fat_bar(
     slices: list[dict[str, Any]] | None,
@@ -513,6 +519,47 @@ def letter_flipped(entry_letter: str, now_letter: str) -> bool:
     a = _letter_head(entry_letter)
     b = _letter_head(now_letter)
     return bool(a and b and a != b)
+
+
+def quiet_15m_2b_trail_ok(lot: dict[str, Any] | None) -> bool:
+    """True when this lot is 15m 2B and not fat-tape."""
+    if not lot:
+        return False
+    if lot.get("fat_tape") or str(lot.get("exit_source") or "") == "fat_tape":
+        return False
+    tf = normalize_tf(str(lot.get("tf") or lot.get("timeframe") or ""))
+    head = _letter_head(str(lot.get("letter") or lot.get("strategy") or ""))
+    return tf == "15m" and head == "2B"
+
+
+def apply_quiet_15m_2b_trail(
+    lot: dict[str, Any],
+    *,
+    hi: float,
+    last_px: float,
+) -> float | None:
+    """After +12%, raise the stop to 10% off the printed high. Returns stop or None."""
+    if not quiet_15m_2b_trail_ok(lot):
+        return None
+    entry = float(lot.get("entry_px") or 0)
+    if entry <= 0:
+        return None
+    peak = max(
+        float(lot.get("exit_high_px") or entry),
+        hi if hi > 0 else 0.0,
+        last_px or 0.0,
+    )
+    lot["exit_high_px"] = peak
+    if peak >= entry * (1.0 + TWO_B_15M_TRAIL_ARM_PCT / 100.0):
+        lot["exit_runner_on"] = True
+    if not lot.get("exit_runner_on"):
+        return None
+    trail = peak * (1.0 - TWO_B_15M_TRAIL_OFF_HIGH_PCT / 100.0)
+    stop = float(lot.get("exit_stop_px") or 0)
+    if trail > stop:
+        lot["exit_stop_px"] = trail
+        return trail
+    return stop if stop > 0 else trail
 
 
 def apply_fat_to_handle(
@@ -829,6 +876,10 @@ def handle_execution_for(
             base["target_pct"] = 8.0
         else:
             base["target_pct"] = 12.0
+        if head == "2B":
+            base["trail_arm_pct"] = TWO_B_15M_TRAIL_ARM_PCT
+            base["trail_off_high_pct"] = TWO_B_15M_TRAIL_OFF_HIGH_PCT
+            base["exit"] = "trail_10_after_12"
         return _finish(base)
     dip = 0.006 if tf == "5m" else 0.008
     if tf == "5m":

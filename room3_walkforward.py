@@ -686,6 +686,9 @@ def _lot_exit(
     style = str(lot.get("exit_style") or "")
     lo = float(bar.get("l") or last_px or 0)
     hi = float(bar.get("h") or last_px or 0)
+    trailed = room3_recipes.apply_quiet_15m_2b_trail(lot, hi=hi, last_px=last_px or 0)
+    if trailed is not None:
+        stop_px = float(trailed)
     if trails and style == SIM_5M_EXIT_STYLE:
         peak = max(float(lot.get("exit_high_px") or entry), hi if hi > 0 else 0.0, last_px or 0.0)
         lot["exit_high_px"] = peak

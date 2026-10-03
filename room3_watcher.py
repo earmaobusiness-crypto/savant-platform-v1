@@ -1043,6 +1043,14 @@ def _why_not_firing(line: dict[str, Any], book: dict[str, Any] | None = None) ->
     match = int(line.get("match_pct") or 0)
     state = _display_state(line, book)
     if state == "in":
+        lot = {
+            "tf": str(line.get("timeframe") or ""),
+            "letter": str(line.get("entry_strategy") or line.get("nearest_strategy") or ""),
+            "fat_tape": line.get("fat_tape"),
+            "exit_source": line.get("exit_source"),
+        }
+        if room3_recipes.quiet_15m_2b_trail_ok(lot):
+            return "live trade · trail after +12%"
         return "live trade"
     if state == "queued":
         return "order stamped · waiting fill"
@@ -1137,7 +1145,16 @@ def book_status_rows(book: dict[str, Any]) -> list[dict[str, Any]]:
             )
             note = str(child.get("patience_note") or "")[:52]
             if cstate == "in":
-                note = note or "live lot · exits on this letter"
+                lot = {
+                    "tf": tf,
+                    "letter": letter,
+                    "fat_tape": line.get("fat_tape"),
+                    "exit_source": line.get("exit_source"),
+                }
+                if room3_recipes.quiet_15m_2b_trail_ok(lot):
+                    note = note or "live lot · trail after +12%"
+                else:
+                    note = note or "live lot · exits on this letter"
             rows.append(
                 {
                     "Line": f"{pad}{letter}",

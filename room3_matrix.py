@@ -6007,6 +6007,9 @@ def _5b_should_exit(
         if _approaching_day_close():
             return "day close · second-best exit"
         return ""
+    trailed = room3_recipes.apply_quiet_15m_2b_trail(lot, hi=hi, last_px=last_px or 0)
+    if trailed is not None:
+        stop_px = float(trailed)
     if lo > 0 and lo <= stop_px:
         pnl_pct = (stop_px - entry_px) / entry_px * 100.0
         return f"stop {pnl_pct:.1f}%"
