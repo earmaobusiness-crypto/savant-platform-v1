@@ -557,6 +557,10 @@ def _append_slice(line: dict[str, Any], snap: dict[str, Any]) -> bool:
         return False
     diet = TF_DIET.get(str(line.get("timeframe") or "1m")) or TF_DIET["1m"]
     slices = list(line.get("slices") or [])
+    if str(line.get("timeframe") or "1m") == "1m":
+        line["session_dvol"] = float(line.get("session_dvol") or 0) + (
+            float(snap.get("c") or 0) * float(snap.get("v") or 0)
+        )
     slices.append(
         {
             "saved_at": datetime.now(ET).strftime("%H:%M:%S"),
@@ -937,7 +941,9 @@ def tick_watcher(
                 _clear_sticky_watch(line)
 
         else:
-            room3_matrix.stamp_line_size(line, session_state, repertoire=repertoire)
+            room3_matrix.stamp_line_size(
+                line, session_state, repertoire=repertoire, book=book
+            )
 
         if trade_ok:
             sig = evaluate_line_signals(line)

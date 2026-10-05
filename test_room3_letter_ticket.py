@@ -110,3 +110,31 @@ def test_one_a_keeps_the_grown_slot():
     assert float(a1["notional"]) > 200_000.0
     assert float(a1["notional"]) > float(b5["notional"])
     assert a1.get("letter_cap") is None
+
+
+def test_participation_is_five_percent_of_tape():
+    assert abs(r.PARTICIPATION_CAP - 0.05) < 1e-12
+    assert abs(r.participation_clip_usd(300_000.0) - 300_000.0) < 1e-6
+    assert abs(r.participation_clip_usd(300_000.0, session_dvol=2_000_000.0) - 100_000.0) < 1e-6
+    assert abs(r.participation_clip_usd(300_000.0, print_dvol=40_000.0) - 2_000.0) < 1e-6
+    assert (
+        abs(
+            r.participation_clip_usd(
+                300_000.0, session_dvol=12_000_000.0, print_dvol=80_000.0
+            )
+            - 4_000.0
+        )
+        < 1e-6
+    )
+    assert r.participation_clip_usd(300_000.0, session_dvol=0.0, print_dvol=0.0) == 0.0
+    fat = m.compute_entry_plan(
+        price=2.0,
+        timeframe="15m",
+        match_pct=90.0,
+        session_state=_ss(),
+        strategy="2B (15M)",
+        session_dvol=1_000_000.0,
+        print_dvol=200_000.0,
+    )
+    assert float(fat["notional"]) <= 10_000.0 + 1e-6
+    assert "5% of tape" in str(fat["note"])

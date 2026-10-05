@@ -590,6 +590,7 @@ def size_explain(session_state: Any | None = None) -> str:
         "Uniqueness still cuts size when two strategies are almost equally close. "
         "Match uses median/MAD z-scores (clip ±5) then weighted cosine "
         "(velocity + volume dims lead). "
+        "Ticket ≤ 5% of that name’s session $vol so far and ≤ 5% of this 1m print. "
         "Watch-book Size $ is the planned amount, not a fill."
     )
 
@@ -599,7 +600,8 @@ SIZE_EXPLAIN = (
     f"{TF_BUCKET_FRAC['1m']:.1%} 1m, and a quiet ticket fires at ≥{FIRE_FLOOR_PCT}% "
     f"(fat tape may fire at ≥{MATCH_THRESHOLD_PCT}%). "
     "At $2M the working tickets are 1m $100k · 5m $200k · 15m $300k; letters that earned "
-    "the full slot may take it. Iceberg still clips a thin bar. A smaller Set $ uses the "
+    "the full slot may take it. Ticket ≤ 5% of that name’s session $vol so far and "
+    "≤ 5% of this 1m print. A smaller Set $ uses the "
     "same percents — the slot shrinks, the cap does not bind. "
     "Leftover is fluid: extra fills and a still-moving 15m collect idle cash "
     "from buckets that are not hot. A hot 5m/1m keeps its pot and can pull quiet 15m leftover."
@@ -1518,7 +1520,20 @@ def _set_tape_fat(session_state: Any, fat: bool) -> None:
         pass
 
 
+# Operator 2026-10-04: 9:30–10 is open. Letter skip windows off.
+# Tests may set this False to pin old letter-skip DNA.
+OPEN_RTH_930 = True
+
+
 def _rth_before(session_state: Any, until: dtime) -> bool:
+    if OPEN_RTH_930:
+        try:
+            if session_state is not None and session_state.get("_force_930_skip"):
+                pass
+            else:
+                return False
+        except Exception:
+            return False
     now = _5b_now(session_state)
     try:
         if room3_engine.detect_session_window(now) != room3_engine.SESSION_RTH:
@@ -5057,6 +5072,7 @@ def _try_queue_child_entry(
         if tf == "15m" and not _15m_can_open_lot(session_state, ticker, scale_in=False):
             child["patience_note"] = "15m add already used · wait exit"
             continue
+        session_dvol, print_dvol = _tape_participation_dvols(book, ticker, print_bar)
         qty, notional = _compute_entry_qty(
             price=last_px,
             session_state=session_state,
@@ -5067,6 +5083,8 @@ def _try_queue_child_entry(
             layouts=layouts,
             exclude_ticker=ticker if add_lot else "",
             strategy=strategy,
+            session_dvol=session_dvol,
+            print_dvol=print_dvol,
         )
         if qty < 1 or notional <= 0:
             cap = room3_recipes.letter_max_ticket_usd(tf, strategy)
@@ -7478,6 +7496,7 @@ def stamp_line_size(
     last_px: float | None = None,
     second_cosine: float | None = None,
     best_cosine: float | None = None,
+    book: dict[str, Any] | None = None,
 ) -> None:
     """Size $ follows Trading today now — do not wait for a 5m/15m tape pulse."""
     slices = list(line.get("slices") or [])
@@ -7494,6 +7513,21 @@ def stamp_line_size(
     )
     layouts = list((repertoire or {}).get("layouts") or []) or _layouts_from_session(session_state)
     cos = float(best_cosine if best_cosine is not None else (raw_match / 100.0))
+    if not isinstance(book, dict):
+        book = (session_state or {}).get("room3_watch_book") or (session_state or {}).get(
+            "watch_book"
+        )
+    session_dvol, print_dvol = _tape_participation_dvols(
+        book if isinstance(book, dict) else None,
+        ticker,
+        slices[-1] if slices else None,
+    )
+    if session_dvol is None and str(line.get("timeframe") or "") == "1m":
+        session_dvol, print_dvol = _tape_participation_dvols(
+            {"lines": {f"{ticker}:1m": line}},
+            ticker,
+            slices[-1] if slices else None,
+        )
     preview = compute_entry_plan(
         price=float(last_px or 0),
         timeframe=tf,
@@ -7504,10 +7538,33 @@ def stamp_line_size(
         layouts=layouts,
         exclude_ticker=exclude,
         strategy=str(line.get("strategy") or line.get("nearest_strategy") or ""),
+        session_dvol=session_dvol,
+        print_dvol=print_dvol,
     )
     line["size_usd"] = float(preview.get("notional") or 0)
     line["size_qty"] = float(preview.get("qty") or 0)
     line["size_note"] = str(preview.get("note") or "")
+
+
+def _tape_participation_dvols(
+    book: dict[str, Any] | None,
+    ticker: str,
+    print_bar: dict[str, Any] | None = None,
+) -> tuple[float | None, float | None]:
+    """Session $vol so far (1m line) and this 1m print. None if tape is missing."""
+    import room3_watcher
+
+    one = ((book or {}).get("lines") or {}).get(room3_watcher.line_key(ticker, "1m")) or {}
+    session = float(one.get("session_dvol") or 0)
+    if session <= 0:
+        session = room3_recipes.session_dollar_vol(one.get("slices") or [])
+    pr = room3_recipes.bar_dollar_vol(print_bar)
+    if pr <= 0:
+        sl = list(one.get("slices") or [])
+        pr = room3_recipes.bar_dollar_vol(sl[-1] if sl else None)
+    if session <= 0 and pr <= 0:
+        return None, None
+    return session, pr
 
 
 def compute_entry_plan(
@@ -7521,11 +7578,14 @@ def compute_entry_plan(
     layouts: list[dict[str, Any]] | None = None,
     exclude_ticker: str = "",
     strategy: str = "",
+    session_dvol: float | None = None,
+    print_dvol: float | None = None,
 ) -> dict[str, Any]:
     """
     Size from TF bucket → projected count slot → match → uniqueness → borrow.
     Never more than remaining Trading-today cash. Letter ticket cap clips last
     so extra book does not land on letters that failed at $2M.
+    Ticket then ≤ 5% of session $vol so far and ≤ 5% of this 1m print.
     """
     tf = _normalize_watch_tf(timeframe)
     if tf not in TF_BUCKET_FRAC:
@@ -7582,6 +7642,17 @@ def compute_entry_plan(
         elif notional > float(letter_cap):
             notional = float(letter_cap)
             cap_bit = f" · letter cap ${letter_cap:,.0f}"
+    tape_bit = ""
+    clipped = room3_recipes.participation_clip_usd(
+        notional, session_dvol=session_dvol, print_dvol=print_dvol
+    )
+    if clipped + 1e-9 < notional:
+        notional = clipped
+        tape_bit = " · 5% of tape"
+    elif session_dvol is not None or print_dvol is not None:
+        if clipped <= 0:
+            notional = 0.0
+            tape_bit = " · 5% of tape $0"
     qty = 0.0
     if price > 0 and notional >= price:
         qty = math.floor(notional / price)
@@ -7590,7 +7661,7 @@ def compute_entry_plan(
     note = (
         f"{tf} bucket {TF_BUCKET_FRAC[tf]:.0%} · slot ${slot:,.0f} of "
         f"{projected[tf]} projected · match {match_scale:.0%} · "
-        f"unique {distinct:.0%}{borrow_bit}{cap_bit} · ${notional:,.0f}"
+        f"unique {distinct:.0%}{borrow_bit}{cap_bit}{tape_bit} · ${notional:,.0f}"
     )
     return {
         "qty": qty,
@@ -7620,6 +7691,8 @@ def _compute_entry_qty(
     layouts: list[dict[str, Any]] | None = None,
     exclude_ticker: str = "",
     strategy: str = "",
+    session_dvol: float | None = None,
+    print_dvol: float | None = None,
 ) -> tuple[float, float]:
     """Return (qty, notional). max_positions kept for call-site compat; unused."""
     _ = max_positions
@@ -7633,6 +7706,8 @@ def _compute_entry_qty(
         layouts=layouts,
         exclude_ticker=exclude_ticker,
         strategy=strategy,
+        session_dvol=session_dvol,
+        print_dvol=print_dvol,
     )
     return float(plan["qty"]), float(plan["notional"])
 
@@ -7754,6 +7829,7 @@ def maybe_queue_matrix_signals(
         last_px=last_px,
         second_cosine=float(match.get("second_cosine") or 0),
         best_cosine=float(match.get("cosine_similarity") or 0),
+        book=book,
     )
 
     layouts = list(repertoire.get("layouts") or [])

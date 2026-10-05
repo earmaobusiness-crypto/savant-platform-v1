@@ -621,6 +621,40 @@ _UNSIZED_5M_CAP = 200_000.0
 _UNSIZED_1M_CAP = 100_000.0
 _UNSIZED_15M_CAP = 300_000.0
 
+# Operator 2026-10-03: ticket ≤ 5% of volume at entry.
+# Session $vol so far (that name, 4:00 → now) and this 1m print. No volume → no ticket.
+PARTICIPATION_CAP = 0.05
+
+
+def bar_dollar_vol(bar: dict[str, Any] | None) -> float:
+    if not bar:
+        return 0.0
+    return max(0.0, float(bar.get("c") or 0) * float(bar.get("v") or 0))
+
+
+def session_dollar_vol(bars: list[dict[str, Any]] | None) -> float:
+    return sum(bar_dollar_vol(b) for b in (bars or []))
+
+
+def participation_clip_usd(
+    take: float,
+    *,
+    session_dvol: float | None = None,
+    print_dvol: float | None = None,
+) -> float:
+    """Clip a ticket to 5% of session $vol so far and 5% of this print."""
+    want = max(0.0, float(take or 0))
+    if session_dvol is None and print_dvol is None:
+        return want
+    caps: list[float] = []
+    if session_dvol is not None and float(session_dvol) > 0:
+        caps.append(PARTICIPATION_CAP * float(session_dvol))
+    if print_dvol is not None and float(print_dvol) > 0:
+        caps.append(PARTICIPATION_CAP * float(print_dvol))
+    if not caps:
+        return 0.0
+    return min(want, min(caps))
+
 
 def letter_max_ticket_usd(timeframe: str = "", strategy: str = "") -> float | None:
     """Per-letter ticket ceiling. Extra Trading-today cash stays for uncapped letters."""
