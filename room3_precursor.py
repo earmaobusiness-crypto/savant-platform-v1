@@ -653,9 +653,11 @@ def _live_1m_cached(ticker: str, *, allow_massive: bool) -> tuple[Any, str]:
         ttl = _LIVE_EMPTY_TTL if empty else _LIVE_YF_TTL
         if age < ttl:
             return hit.get("frame"), str(hit.get("source") or "yahoo")
-    frame = _yahoo_1m_live(ticker)
+    frame = None
     source = "yahoo"
-    if _frame_empty(frame) and allow_massive and _massive_live_ok(ticker):
+    # House tape first (17-day book). Same-day Massive often 403 — then Alpaca,
+    # same feed as fills. Yahoo last (delay / v=0 / EOD rewrite).
+    if allow_massive and _massive_live_ok(ticker):
         ms = _massive_today_1m(ticker)
         if not _frame_empty(ms):
             frame = ms
@@ -665,6 +667,9 @@ def _live_1m_cached(ticker: str, *, allow_massive: bool) -> tuple[Any, str]:
         if not _frame_empty(ap):
             frame = ap
             source = "alpaca"
+    if _frame_empty(frame):
+        frame = _yahoo_1m_live(ticker)
+        source = "yahoo"
     _LIVE_1M[ticker] = {"t": now, "frame": frame, "source": source}
     return frame, source
 
@@ -710,7 +715,7 @@ def live_bar_rows(
     bars_keep: int,
     allow_massive: bool = True,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Yahoo 1m first. Massive only if Yahoo is empty and quota lock allows."""
+    """Massive 1m first (same tape as the house). Alpaca if Massive is empty. Yahoo last."""
     tk = str(ticker or "").upper()
     frame, source = _live_1m_cached(tk, allow_massive=allow_massive)
     return _rows_from_1m(frame, tf, bars_keep), source

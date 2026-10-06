@@ -722,6 +722,16 @@ def fetch_closed_trades_today_debug(paper: bool = True) -> dict[str, Any]:
 
 def fetch_today_1m_bars(ticker: str, *, paper: bool = True):
     """Same-session 1m OHLCV from Alpaca (IEX). None if the symbol has no tape."""
+    return fetch_session_1m_bars(ticker, paper=paper)
+
+
+def fetch_session_1m_bars(
+    ticker: str,
+    sess=None,
+    *,
+    paper: bool = True,
+):
+    """1m OHLCV from Alpaca (IEX) for one ET session (4:00 → now or 20:00)."""
     sym = str(ticker or "").strip().upper()
     if not sym:
         return None
@@ -736,9 +746,13 @@ def fetch_today_1m_bars(ticker: str, *, paper: bool = True):
         if not creds.get("key") or not creds.get("secret"):
             return None
         data = StockHistoricalDataClient(creds["key"], creds["secret"])
-        start = datetime.now(ZoneInfo("America/New_York")).replace(
-            hour=4, minute=0, second=0, microsecond=0
-        )
+        now = datetime.now(ZoneInfo("America/New_York"))
+        if sess is not None:
+            start = datetime(
+                sess.year, sess.month, sess.day, 4, 0, tzinfo=ZoneInfo("America/New_York")
+            )
+        else:
+            start = now.replace(hour=4, minute=0, second=0, microsecond=0)
         req = StockBarsRequest(
             symbol_or_symbols=sym,
             timeframe=TimeFrame.Minute,

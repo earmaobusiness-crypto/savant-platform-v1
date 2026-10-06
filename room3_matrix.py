@@ -7582,10 +7582,11 @@ def compute_entry_plan(
     print_dvol: float | None = None,
 ) -> dict[str, Any]:
     """
-    Size from TF bucket → projected count slot → match → uniqueness → borrow.
-    Never more than remaining Trading-today cash. Letter ticket cap clips last
-    so extra book does not land on letters that failed at $2M.
-    Ticket then ≤ 5% of session $vol so far and ≤ 5% of this 1m print.
+    Size from TF remaining pot (first fire takes that pot, not 1/N crumbs)
+    → match → uniqueness → borrow idle TFs. Never more than remaining
+    Trading-today cash. Letter ticket cap clips last so extra book does not
+    land on letters that failed at $2M. Ticket then ≤ 5% of session $vol so
+    far and ≤ 5% of this 1m print.
     """
     tf = _normalize_watch_tf(timeframe)
     if tf not in TF_BUCKET_FRAC:
@@ -7611,12 +7612,9 @@ def compute_entry_plan(
     except (TypeError, ValueError):
         claimed = 0.0
     leftover_other = max(0.0, leftover_other - claimed)
-    remaining_slots = max(1, int(projected[tf]) - int(live.get(tf) or 0))
     full_slot = buckets[tf] / float(max(1, projected[tf]))
-    if remaining[tf] > 1e-6:
-        slot = remaining[tf] / float(remaining_slots)
-    else:
-        slot = full_slot
+    # First fire of a TF takes the remaining pot — not 1/N crumbs.
+    slot = remaining[tf] if remaining[tf] > 1e-6 else full_slot
     want = slot * match_scale * distinct
     from_own = min(want, remaining[tf])
     borrowed = 0.0
@@ -7659,8 +7657,8 @@ def compute_entry_plan(
         notional = qty * price
     borrow_bit = f" · borrowed ${borrowed:,.0f}" if borrowed > 0 else ""
     note = (
-        f"{tf} bucket {TF_BUCKET_FRAC[tf]:.0%} · slot ${slot:,.0f} of "
-        f"{projected[tf]} projected · match {match_scale:.0%} · "
+        f"{tf} bucket {TF_BUCKET_FRAC[tf]:.0%} · first-fire pot ${slot:,.0f} · "
+        f"match {match_scale:.0%} · "
         f"unique {distinct:.0%}{borrow_bit}{cap_bit}{tape_bit} · ${notional:,.0f}"
     )
     return {

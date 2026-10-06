@@ -11,7 +11,11 @@ Operator gives **one stock, one day, start time → end time, one TF**. That is 
 
 **Replay:** `python3 room3_replay.py --write` fills extras onto existing windows. **Reshuffle:** `python3 room3_recluster.py --write` regroups letters from that DNA (same TF, ≥85%, live only at 3+). Does not wipe rows. Snapshot first.
 
-**Purgatory:** First pack sits. A second similar pack (≥~85%) sits **beside** it. **Do not trim. Do not mint. Do not trade.** A letter is not a live strategy until **three** similar packs + real DNA (not a trip-size proxy). Then **trim fat**. Room 3 fires only those live letters, same-TF, ≥85% on the **before-pack**.
+**Chat is a Room 2 door (2026-10-06).** Most reviews land here: belt → blind sim → they compare to the app → clocks / good / bad. After they speak, capture the window (`room2_chat.capture`) onto the Room 2 shelf as **purgatory**. Same gene rules as the Room 2 tab. Vault stay read-only for live DNA. Third similar + DNA still mints **except** the dated S1 dump below.
+
+**Purgatory:** First pack sits. A second similar pack (≥~85%) sits **beside** it. **Do not trim. Do not mint. Do not trade.** A letter is not a live strategy until **three** similar packs + real DNA (not a trip-size proxy). Then **trim fat**. Room 3 fires live letters, same-TF, ≥85% on the **before-pack**.
+
+**S1 dump (2026-10-06, one-time):** the shelf that existed this night (vault incubation + MI chat packs) is treated as the third-pack jump and fires as **S1**. Not a standing “new purgatory fires.” Operator will change purgatory later.
 
 **Layouts:** Market **environment** umbrella — which strategy families fit today. Not one layout only. If another layout/strategy has a real chance, keep it on a **2nd row**. EOD: learn from the names the operator gives.
 

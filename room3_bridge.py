@@ -536,6 +536,19 @@ def _layouts_from_local_cache() -> list[dict[str, Any]]:
     return _aggregate_rows_into_layouts(_vault_rows_from_cache_file())
 
 
+def _with_s1_release(layouts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Dated 2026-10-06 lock: current shelf fires as own-letter S1, as-of today."""
+    try:
+        import room2_shelf
+
+        extra = room2_shelf.layouts_as_of()
+    except Exception:
+        extra = []
+    if not extra:
+        return list(layouts or [])
+    return list(layouts or []) + extra
+
+
 def _layouts_from_supabase() -> list[dict[str, Any]]:
     return _aggregate_rows_into_layouts(_fetch_vault_rows())
 
@@ -629,6 +642,7 @@ def ensure_layout_library(session_state: Any, *, allow_network: bool = True) -> 
     session_layouts = _layouts_from_session_vectors(session_state)
     cache_layouts = _layouts_from_local_cache()
     merged = _merge_layout_libraries(session_layouts, vault_layouts, cache_layouts)
+    merged = _with_s1_release(merged)
     if merged:
         try:
             session_state.layout_master_matrix_index = merged
@@ -688,6 +702,7 @@ def matrix_repertoire(session_state: Any, *, allow_network: bool = True) -> dict
             for e in layouts
             if "purgatory" not in str(e.get("layout_id") or "").strip().lower()
         ]
+    layouts = _with_s1_release(layouts)
     try:
         import room3_recipes
 
@@ -730,7 +745,8 @@ def matrix_repertoire(session_state: Any, *, allow_network: bool = True) -> dict
         dna_note = (
             f"Live strategies: {tradeable_n} (3+ similar packs + real DNA). "
             f"{layout_n} bucket(s) from {pattern_count or len(vault_rows)} save(s). "
-            "Only live letters match and fire."
+            "Dated 2026-10-06: current purgatory shelf fires as S1. "
+            "Purgatory-named rows still do not."
         )
     else:
         dna_note = "Vault connected but no layout buckets found."

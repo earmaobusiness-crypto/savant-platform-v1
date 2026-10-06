@@ -630,17 +630,37 @@ def _massive_range_1m(ticker: str, start: date, end: date):
         return None
 
 
+def fetch_house_1m(ticker: str, start: date, end: date):
+    """Same feed order as live detect: Massive, then Alpaca, Yahoo last."""
+    ms = _massive_range_1m(ticker, start, end)
+    if ms is not None and not getattr(ms, "empty", True):
+        return ms, "massive"
+    try:
+        import room3_alpaca
+
+        if start == end:
+            ap = room3_alpaca.fetch_session_1m_bars(ticker, start, paper=True)
+            if ap is not None and not getattr(ap, "empty", True):
+                return ap, "alpaca"
+    except Exception:
+        pass
+    yf = _yahoo_range_1m(ticker, start, end)
+    return yf, "yahoo"
+
+
 def prefetch_ticker_bars(ticker: str, sessions: list[date]) -> dict[date, list[dict[str, Any]]]:
-    """One Yahoo pull + one Massive pull per name, then slice RTH days."""
+    """Massive first (house tape), Yahoo only if Massive is empty."""
     start = min(sessions) - timedelta(days=1)
     end = max(sessions) + timedelta(days=1)
-    yf_frame = _yahoo_range_1m(ticker, start, end)
     ms_frame = _massive_range_1m(ticker, start, end)
+    yf_frame = None
     out: dict[date, list[dict[str, Any]]] = {}
     for sess in sessions:
-        bars = bars_from_frame(yf_frame, sess)
+        bars = bars_from_frame(ms_frame, sess)
         if not bars:
-            bars = bars_from_frame(ms_frame, sess)
+            if yf_frame is None:
+                yf_frame = _yahoo_range_1m(ticker, start, end)
+            bars = bars_from_frame(yf_frame, sess)
         out[sess] = bars
     return out
 
