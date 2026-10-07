@@ -5780,6 +5780,25 @@ def _room3_heartbeat_tick() -> None:
             f"Universe: {uni} · last tick {book.get('last_tick') or '—'} · "
             f"ticks {book.get('ticks') or 0}"
         )
+        try:
+            import room3_day_memory
+
+            room3_day_memory.remember(st.session_state)
+            snaps = room3_day_memory.load_session()
+            blob = room3_day_memory.tape_bytes()
+            st.caption(f"Session tape · {len(snaps)} snaps · gone 4 PM ET tomorrow")
+            if blob:
+                st.download_button(
+                    "Download session tape",
+                    data=blob,
+                    file_name=f"{room3_day_memory.session_key()}.jsonl",
+                    mime="application/jsonl",
+                    key="room3_session_tape_dl",
+                )
+            with st.expander("session tape", expanded=False):
+                st.text(room3_day_memory.as_text(snaps) or "no tape yet")
+        except Exception:
+            pass
         rows = room3_watcher.book_status_rows(book)
         if rows:
             st.dataframe(rows, use_container_width=True, hide_index=True)

@@ -233,6 +233,49 @@ def between(start: str, end: str, *, sess: str | None = None) -> list[dict[str, 
     return hit
 
 
+def as_text(rows: list[dict[str, Any]], *, limit: int = 240) -> str:
+    """Human tape for a later question or the Cloud expander."""
+    chunk = rows[-limit:] if limit and len(rows) > limit else rows
+    out = []
+    for row in chunk:
+        belt = ",".join(row.get("belt") or []) or "—"
+        arm = "ARMED" if row.get("arm") else "DISARMED"
+        un = " unattended" if row.get("unattended") else ""
+        wr = ""
+        fills = int(row.get("fills") or 0)
+        wins = int(row.get("wins") or 0)
+        if fills:
+            wr = f" WR {wins}/{fills}"
+        out.append(
+            f"{row.get('ts')} {arm}{un} ${row.get('tradable') or 0:.0f} "
+            f"pnl ${row.get('day_pnl') or 0:+.0f}{wr} belt {belt}"
+        )
+        for ln in row.get("lines") or []:
+            out.append(
+                f"  {ln.get('ticker')} {ln.get('tf')} {ln.get('strategy')} "
+                f"{ln.get('match')}% {ln.get('state')} ${ln.get('size') or 0:.0f} "
+                f"{ln.get('why') or ''}".rstrip()
+            )
+            for kid in ln.get("children") or []:
+                out.append(
+                    f"    {kid.get('letter')} {kid.get('match')}% {kid.get('layout')}"
+                )
+        for op in row.get("opens") or []:
+            out.append(
+                f"  OPEN {op.get('ticker')} {op.get('tf')} {op.get('letter')} qty {op.get('qty')}"
+            )
+    if limit and len(rows) > limit:
+        out.insert(0, f"… {len(rows) - limit} earlier snaps omitted")
+    return "\n".join(out) if out else "no tape yet"
+
+
+def tape_bytes(sess: str | None = None) -> bytes:
+    path = _path(sess or session_key())
+    if not path.is_file():
+        return b""
+    return path.read_bytes()
+
+
 def purge(*, now: datetime | None = None) -> list[str]:
     clock = now or datetime.now(ET)
     if clock.tzinfo is None:
