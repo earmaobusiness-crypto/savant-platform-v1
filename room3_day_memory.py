@@ -1,7 +1,8 @@
 """Same-session book memory so a later question can reconstruct the watch book.
 
-Pulse writes compact snapshots (Match%, state, Size$, fills, Arm). Kept until
-16:00 ET the next calendar day, then deleted. Not a forever archive.
+Pulse writes a snapshot on every pass (~15s) from session start to finish
+(Match%, state, Size$, fills, Arm). Kept until 16:00 ET the next calendar
+day, then deleted. Not a forever archive.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from zoneinfo import ZoneInfo
 ET = ZoneInfo("America/New_York")
 MEM_DIR = Path(__file__).resolve().parent / "room3_data" / "day_memory"
 PURGE_HOUR = 16
-MIN_GAP_SEC = 45
+MIN_GAP_SEC = 0
 
 
 def session_key(now: datetime | None = None) -> str:
@@ -175,7 +176,7 @@ def remember(ss: Any, *, now: datetime | None = None) -> Path | None:
                 last_iso = str(prev.get("iso") or "")
                 break
         fp = _fp(snap)
-        if fp == last_fp and last_iso:
+        if MIN_GAP_SEC > 0 and fp == last_fp and last_iso:
             try:
                 prev_t = datetime.fromisoformat(last_iso)
                 clock = datetime.fromisoformat(str(snap["iso"]))
