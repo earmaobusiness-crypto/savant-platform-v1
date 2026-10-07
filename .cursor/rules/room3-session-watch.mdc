@@ -17,7 +17,7 @@ Open the operator’s Cloud Room 3 URL (prefer the last `?hub=3&belt=...` they g
 4. Reply briefly in chat (what changed vs last note, anything alarming).
 
 ## What you missed
-You are not 24/7. After a gap, reconstruct from Cloud (tape, opens, session history, watch book) plus the day log. Say what was seen vs not seen. Do not invent fills.
+You are not 24/7. After a gap, reconstruct from **day memory** (`room3_data/day_memory/YYYY-MM-DD.jsonl` — pulse snapshots of Arm, belt, Match%, state, Size$, opens, log) plus Cloud (tape, opens, session history, watch book) plus the day log. Memory is kept until **16:00 ET the next calendar day**, then deleted. If memory is empty (no Cloud push / pulse off), say so. Do not invent Match% or fills.
 
 ## Forbidden
 - Treating “loop armed” / `sleep` started as the job.

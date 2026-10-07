@@ -613,6 +613,12 @@ def run_pulse(ss: PulseState) -> str:
     )
     ss.room3_worker_note = note
     persist_bag(ss)
+    try:
+        import room3_day_memory
+
+        room3_day_memory.remember(ss)
+    except Exception:
+        pass
     return note
 
 
