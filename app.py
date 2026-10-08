@@ -49,6 +49,14 @@ def _hub_code_from_query() -> str:
     return code if code in _HUB_CODE_TO_LABEL else ""
 
 
+def _agent_mem_requested() -> bool:
+    """Silent tape dump for the agent. Not on the operator Room 3 page."""
+    try:
+        return str(st.query_params.get("mem") or "").strip().lower() in {"1", "true", "yes"}
+    except Exception:
+        return False
+
+
 def _yf():
     """Room 1 only — don't load Yahoo on a Room 3 boot."""
     import yfinance as yf
@@ -7853,6 +7861,20 @@ def _render_hub_recovery_strip() -> None:
             st.session_state.sidebar_collapsed = False
             st.rerun()
 
+
+if _agent_mem_requested():
+    import room3_day_memory
+
+    kept = room3_day_memory.kept_sessions()
+    blocks = []
+    for sess in kept:
+        rows = room3_day_memory.load_session(sess)
+        blocks.append(
+            f"session {sess} · {len(rows)} snaps\n"
+            + (room3_day_memory.as_text(rows, limit=0) or "no tape yet")
+        )
+    st.text("\n\n".join(blocks) if blocks else "no tape yet")
+    st.stop()
 
 if st.session_state.pop("_pending_chat_submit", False):
     with st.spinner("Savant processing live data layers..."):

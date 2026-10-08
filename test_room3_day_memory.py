@@ -11,6 +11,16 @@ class _SS(dict):
         return super().get(k, default)
 
 
+def test_kept_sessions_includes_yesterday_until_4pm(tmp_path, monkeypatch):
+    monkeypatch.setattr(mem, "MEM_DIR", tmp_path)
+    (tmp_path / "2026-10-07.jsonl").write_text("{}\n")
+    (tmp_path / "2026-10-08.jsonl").write_text("{}\n")
+    morning = datetime(2026, 10, 8, 10, 0, tzinfo=ET)
+    assert mem.kept_sessions(now=morning) == ["2026-10-07", "2026-10-08"]
+    after = datetime(2026, 10, 8, 16, 0, tzinfo=ET)
+    assert mem.kept_sessions(now=after) == ["2026-10-08"]
+
+
 def test_purge_after_next_day_4pm(tmp_path, monkeypatch):
     monkeypatch.setattr(mem, "MEM_DIR", tmp_path)
     sess = "2026-10-07"
@@ -58,3 +68,55 @@ def test_between_keeps_match_and_fills(tmp_path, monkeypatch):
     assert rows[1]["lines"][0]["match"] == 88
     assert rows[0]["fills"] == 1
     assert rows[0]["arm"] is True
+
+
+def test_idle_after_flatten_stops(tmp_path, monkeypatch):
+    monkeypatch.setattr(mem, "MEM_DIR", tmp_path)
+    live = _SS(
+        room3_engine_armed=True,
+        room3_filter_universe=["BIYA"],
+        room3_tradable_today=1000,
+        room3_watch_book={"lines": {}},
+        room3_trade_history=[{"id": "1", "ticker": "BIYA", "pnl": -1}],
+        room3_open_positions=[],
+    )
+    t0 = datetime(2026, 10, 7, 10, 10, tzinfo=ET)
+    mem.remember(live, now=t0)
+    live["room3_filter_universe"] = []
+    t1 = datetime(2026, 10, 7, 16, 5, tzinfo=ET)
+    mem.remember(live, now=t1)
+    t2 = datetime(2026, 10, 7, 16, 10, tzinfo=ET)
+    mem.remember(live, now=t2)
+    rows = mem.load_session("2026-10-07")
+    assert len(rows) == 2
+    assert rows[1].get("ended") is True
+
+
+def test_same_book_keeps_once_a_minute(tmp_path, monkeypatch):
+    monkeypatch.setattr(mem, "MEM_DIR", tmp_path)
+    ss = _SS(
+        room3_engine_armed=True,
+        room3_filter_universe=["BIYA"],
+        room3_tradable_today=1000,
+        room3_watch_book={
+            "lines": {
+                "BIYA:1m": {
+                    "ticker": "BIYA",
+                    "timeframe": "1m",
+                    "match_pct": 90,
+                    "nearest_strategy": "2B (1M)",
+                    "state": "watching",
+                    "size_usd": 50,
+                }
+            }
+        },
+        room3_trade_history=[],
+        room3_open_positions=[],
+    )
+    t0 = datetime(2026, 10, 7, 10, 10, tzinfo=ET)
+    mem.remember(ss, now=t0)
+    mem.remember(ss, now=datetime(2026, 10, 7, 10, 10, 20, tzinfo=ET))
+    mem.remember(ss, now=datetime(2026, 10, 7, 10, 11, 5, tzinfo=ET))
+    rows = mem.load_session("2026-10-07")
+    assert len(rows) == 2
+    assert rows[0]["lines"][0]["match"] == 90

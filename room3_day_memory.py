@@ -1,8 +1,10 @@
 """Same-session book memory so a later question can reconstruct the watch book.
 
-Pulse writes a snapshot on every pass (~15s) from session start to finish
-(Match%, state, Size$, fills, Arm). Kept until 16:00 ET the next calendar
-day, then deleted. Not a forever archive.
+Pulse writes while the session is live (Arm / Set $ / belt / opens): Match%,
+state, Size$, fills, Arm. On change immediately; otherwise about once a
+minute. Stops after flatten (no belt, no leftover opens). Kept until
+16:00 ET the next calendar day, then deleted. Not a forever archive.
+Operator Room 3 has no tape UI. Agent reads Cloud ?hub=3&mem=1.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from zoneinfo import ZoneInfo
 ET = ZoneInfo("America/New_York")
 MEM_DIR = Path(__file__).resolve().parent / "room3_data" / "day_memory"
 PURGE_HOUR = 16
-MIN_GAP_SEC = 0
+LIVE_KEEP_SEC = 60
 
 
 def session_key(now: datetime | None = None) -> str:
@@ -98,7 +100,7 @@ def snapshot(ss: Any, *, now: datetime | None = None) -> dict[str, Any]:
             lines.append(_compact_line(line, book))
     window = ""
     try:
-        window = room3_engine.session_label(room3_engine.detect_session_window())
+        window = room3_engine.session_label(room3_engine.detect_session_window(clock))
     except Exception:
         window = ""
     wins = sum(1 for r in hist if float(r.get("pnl") or r.get("realized_pl") or 0) > 0)
@@ -137,22 +139,79 @@ def _fp(snap: dict[str, Any]) -> str:
     bits = [
         str(int(snap.get("arm") or 0)),
         str(int(snap.get("unattended") or 0)),
+        str(int(snap.get("pause") or 0)),
+        str(snap.get("window") or ""),
         ",".join(snap.get("belt") or []),
         str(int(snap.get("fills") or 0)),
         str(int(snap.get("tradable") or 0)),
+        str(int(snap.get("day_pnl") or 0)),
     ]
+    for op in snap.get("opens") or []:
+        bits.append(f"o{op.get('ticker')}:{op.get('tf')}:{op.get('letter')}:{op.get('qty')}")
     for ln in snap.get("lines") or []:
         bits.append(
             f"{ln.get('ticker')}:{ln.get('tf')}:{ln.get('match')}:{ln.get('state')}:"
-            f"{ln.get('strategy')}:{ln.get('size')}"
+            f"{ln.get('strategy')}:{ln.get('size')}:{ln.get('why')}"
         )
         for kid in ln.get("children") or []:
             bits.append(f"c{kid.get('letter')}:{kid.get('match')}")
     return "|".join(bits)
 
 
+def _window_closed(snap: dict[str, Any]) -> bool:
+    return str(snap.get("window") or "").strip().lower().startswith("closed")
+
+
+def _watching(snap: dict[str, Any]) -> bool:
+    return bool(snap.get("belt") or snap.get("opens"))
+
+
+def _warming(snap: dict[str, Any]) -> bool:
+    """Arm / Set $ before the first name. Not overnight Arm after flatten."""
+    if _watching(snap) or _window_closed(snap) or snap.get("ended"):
+        return False
+    return bool(snap.get("arm") or float(snap.get("tradable") or 0) > 0)
+
+
+def _last_row(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if not data:
+        return None
+    tail = data[-120000:] if len(data) > 120000 else data
+    for line in reversed(tail.decode("utf-8", "replace").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            prev = json.loads(line)
+        except json.JSONDecodeError:
+            break
+        if isinstance(prev, dict):
+            return prev
+    return None
+
+
+def _keep_alive_due(prev: dict[str, Any] | None, snap: dict[str, Any]) -> bool:
+    if not prev:
+        return True
+    last_iso = str(prev.get("iso") or "")
+    if not last_iso:
+        return True
+    try:
+        prev_t = datetime.fromisoformat(last_iso)
+        clock = datetime.fromisoformat(str(snap["iso"]))
+        return (clock - prev_t).total_seconds() >= LIVE_KEEP_SEC
+    except Exception:
+        return True
+
+
 def remember(ss: Any, *, now: datetime | None = None) -> Path | None:
-    """Append one compact snapshot if the book changed or ~45s passed. Never raise into pulse."""
+    """Append a compact snapshot while the session is live. Never raise into pulse."""
     try:
         purge(now=now)
         snap = snapshot(ss, now=now)
@@ -160,36 +219,39 @@ def remember(ss: Any, *, now: datetime | None = None) -> Path | None:
         if not sess:
             return None
         path = _path(sess)
-        last_fp = ""
-        last_iso = ""
-        if path.is_file():
-            tail = path.read_text()[-4000:]
-            for line in reversed(tail.splitlines()):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    prev = json.loads(line)
-                except json.JSONDecodeError:
-                    break
-                last_fp = str(prev.get("_fp") or _fp(prev))
-                last_iso = str(prev.get("iso") or "")
-                break
-        fp = _fp(snap)
-        if MIN_GAP_SEC > 0 and fp == last_fp and last_iso:
-            try:
-                prev_t = datetime.fromisoformat(last_iso)
-                clock = datetime.fromisoformat(str(snap["iso"]))
-                if (clock - prev_t).total_seconds() < MIN_GAP_SEC:
-                    return None
-            except Exception:
-                pass
-        snap["_fp"] = fp
+        prev = _last_row(path)
+        watching = _watching(snap)
+        ever = bool(
+            prev
+            and (prev.get("ended") or prev.get("had_watch") or _watching(prev))
+        )
+        warming = (not ever) and _warming(snap)
+        if watching or warming:
+            fp = _fp(snap)
+            last_fp = str((prev or {}).get("_fp") or (_fp(prev) if prev else ""))
+            if prev and fp == last_fp and not _keep_alive_due(prev, snap):
+                return None
+            if watching:
+                snap["had_watch"] = True
+            snap["_fp"] = fp
+        elif prev and _watching(prev):
+            snap["ended"] = True
+            snap["_fp"] = _fp(snap)
+        else:
+            return None
         with path.open("a") as fh:
             fh.write(json.dumps(snap, default=str) + "\n")
         return path
     except Exception:
         return None
+
+
+def kept_sessions(*, now: datetime | None = None) -> list[str]:
+    """Session files still on disk. Today's file, plus yesterday until 16:00 ET."""
+    purge(now=now)
+    if not MEM_DIR.is_dir():
+        return []
+    return sorted(p.stem for p in MEM_DIR.glob("*.jsonl"))
 
 
 def load_session(sess: str | None = None) -> list[dict[str, Any]]:
@@ -233,8 +295,8 @@ def between(start: str, end: str, *, sess: str | None = None) -> list[dict[str, 
     return hit
 
 
-def as_text(rows: list[dict[str, Any]], *, limit: int = 240) -> str:
-    """Human tape for a later question or the Cloud expander."""
+def as_text(rows: list[dict[str, Any]], *, limit: int = 0) -> str:
+    """Human tape for a later question. limit 0 = the whole session."""
     chunk = rows[-limit:] if limit and len(rows) > limit else rows
     out = []
     for row in chunk:
@@ -267,13 +329,6 @@ def as_text(rows: list[dict[str, Any]], *, limit: int = 240) -> str:
     if limit and len(rows) > limit:
         out.insert(0, f"… {len(rows) - limit} earlier snaps omitted")
     return "\n".join(out) if out else "no tape yet"
-
-
-def tape_bytes(sess: str | None = None) -> bytes:
-    path = _path(sess or session_key())
-    if not path.is_file():
-        return b""
-    return path.read_bytes()
 
 
 def purge(*, now: datetime | None = None) -> list[str]:
