@@ -51,10 +51,16 @@ def test_between_keeps_match_and_fills(tmp_path, monkeypatch):
                     "nearest_strategy": "S1 (15M)",
                     "state": "watching",
                     "size_usd": 750,
+                    "feed": "massive",
+                    "fat_tape": True,
+                    "slices": [{"o": 2.1, "h": 2.4, "l": 2.0, "c": 2.2, "v": 1000}],
                 }
             }
         },
-        room3_trade_history=[{"id": "1", "ticker": "XHG", "strategy": "S1 (15M)", "pnl": 10.5}],
+        room3_trade_history=[{
+            "id": "1", "ticker": "XHG", "strategy": "S1 (15M)", "pnl": 10.5,
+            "entry_price": 2.1, "exit_price": 2.3, "qty": 10,
+        }],
         room3_open_positions=[],
     )
     t0 = datetime(2026, 10, 7, 9, 32, tzinfo=ET)
@@ -65,6 +71,10 @@ def test_between_keeps_match_and_fills(tmp_path, monkeypatch):
     rows = mem.between("09:30", "10:00", sess="2026-10-07")
     assert len(rows) == 2
     assert rows[0]["lines"][0]["match"] == 92
+    assert rows[0]["lines"][0]["feed"] == "massive"
+    assert rows[0]["lines"][0]["fat"] is True
+    assert rows[0]["lines"][0]["last"]["c"] == 2.2
+    assert rows[0]["log"][0]["entry"] == 2.1
     assert rows[1]["lines"][0]["match"] == 88
     assert rows[0]["fills"] == 1
     assert rows[0]["arm"] is True

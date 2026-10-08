@@ -57,6 +57,16 @@ def _compact_line(line: dict[str, Any], book: dict[str, Any]) -> dict[str, Any]:
                 "layout": str(child.get("layout_id") or "")[:16],
             }
         )
+    last = {}
+    slices = [s for s in (line.get("slices") or []) if isinstance(s, dict)]
+    if slices:
+        bar = slices[-1]
+        last = {
+            "c": round(float(bar.get("c") or 0), 4),
+            "h": round(float(bar.get("h") or 0), 4),
+            "l": round(float(bar.get("l") or 0), 4),
+            "v": round(float(bar.get("v") or 0), 0),
+        }
     return {
         "ticker": ticker,
         "tf": tf,
@@ -65,6 +75,10 @@ def _compact_line(line: dict[str, Any], book: dict[str, Any]) -> dict[str, Any]:
         "strategy": str(line.get("nearest_strategy") or "")[:24],
         "state": room3_watcher._display_state(line, book),
         "size": round(float(line.get("size_usd") or 0), 2),
+        "feed": str(line.get("feed") or "")[:12],
+        "fat": bool(line.get("fat_tape")),
+        "bar_done": bool(line.get("_fat_bar_complete")),
+        "last": last,
         "why": str(line.get("patience_note") or room3_watcher._why_not_firing(line, book) or "")[:72],
         "children": kids,
     }
@@ -77,7 +91,10 @@ def _compact_trade(row: dict[str, Any]) -> dict[str, Any]:
         "tf": str(row.get("matrix_timeframe") or row.get("timeframe") or row.get("tf") or ""),
         "letter": str(row.get("matrix_strategy") or row.get("strategy") or row.get("letter") or ""),
         "side": str(row.get("side") or ""),
-        "pnl": round(float(row.get("pnl") or row.get("realized_pl") or 0), 2),
+        "qty": round(float(row.get("qty") or 0), 4),
+        "entry": round(float(row.get("entry_price") or row.get("entry_px") or 0), 4),
+        "exit": round(float(row.get("exit_price") or row.get("exit_px") or 0), 4),
+        "pnl": round(float(row.get("pnl") or row.get("realized_pl") or row.get("pnl_usd") or 0), 2),
         "in": str(row.get("entry_time") or row.get("filled_at") or row.get("t_in") or "")[:19],
         "out": str(row.get("exit_time") or row.get("t_out") or "")[:19],
     }
@@ -114,6 +131,7 @@ def snapshot(ss: Any, *, now: datetime | None = None) -> dict[str, Any]:
         "pause": bool(ss.get("room3_pause_entries")),
         "kill": bool(ss.get("room3_kill_flat")),
         "tradable": round(float(ss.get("room3_tradable_today") or 0), 2),
+        "gates": sorted(str(x) for x in (ss.get("room3_allowed_sessions") or [])),
         "window": window,
         "belt": [str(t).upper() for t in (ss.get("room3_filter_universe") or []) if str(t).strip()],
         "equity": round(float(ss.get("room3_account_equity") or ss.get("room3_broker_equity") or 0), 2),
@@ -145,13 +163,15 @@ def _fp(snap: dict[str, Any]) -> str:
         str(int(snap.get("fills") or 0)),
         str(int(snap.get("tradable") or 0)),
         str(int(snap.get("day_pnl") or 0)),
+        ",".join(snap.get("gates") or []),
     ]
     for op in snap.get("opens") or []:
         bits.append(f"o{op.get('ticker')}:{op.get('tf')}:{op.get('letter')}:{op.get('qty')}")
     for ln in snap.get("lines") or []:
         bits.append(
             f"{ln.get('ticker')}:{ln.get('tf')}:{ln.get('match')}:{ln.get('state')}:"
-            f"{ln.get('strategy')}:{ln.get('size')}:{ln.get('why')}"
+            f"{ln.get('strategy')}:{ln.get('size')}:{ln.get('feed')}:{ln.get('fat')}:"
+            f"{(ln.get('last') or {}).get('c')}:{ln.get('why')}"
         )
         for kid in ln.get("children") or []:
             bits.append(f"c{kid.get('letter')}:{kid.get('match')}")
@@ -308,20 +328,32 @@ def as_text(rows: list[dict[str, Any]], *, limit: int = 0) -> str:
         wins = int(row.get("wins") or 0)
         if fills:
             wr = f" WR {wins}/{fills}"
+        gates = ",".join(row.get("gates") or []) or "—"
         out.append(
             f"{row.get('ts')} {arm}{un} ${row.get('tradable') or 0:.0f} "
-            f"pnl ${row.get('day_pnl') or 0:+.0f}{wr} belt {belt}"
+            f"gates {gates} pnl ${row.get('day_pnl') or 0:+.0f}{wr} belt {belt}"
         )
         for ln in row.get("lines") or []:
+            last = ln.get("last") or {}
+            px = f" @{last.get('c')}" if last.get("c") else ""
+            fat = " fat" if ln.get("fat") else ""
+            feed = f" {ln.get('feed')}" if ln.get("feed") else ""
             out.append(
                 f"  {ln.get('ticker')} {ln.get('tf')} {ln.get('strategy')} "
-                f"{ln.get('match')}% {ln.get('state')} ${ln.get('size') or 0:.0f} "
-                f"{ln.get('why') or ''}".rstrip()
+                f"{ln.get('match')}% {ln.get('state')} ${ln.get('size') or 0:.0f}"
+                f"{feed}{fat}{px} {ln.get('why') or ''}".rstrip()
             )
             for kid in ln.get("children") or []:
                 out.append(
                     f"    {kid.get('letter')} {kid.get('match')}% {kid.get('layout')}"
                 )
+        for tr in (row.get("log") or [])[-8:]:
+            if not tr.get("ticker"):
+                continue
+            out.append(
+                f"  FILL {tr.get('ticker')} {tr.get('tf')} {tr.get('letter')} "
+                f"{tr.get('entry') or ''}→{tr.get('exit') or ''} ${tr.get('pnl') or 0:+.2f}"
+            )
         for op in row.get("opens") or []:
             out.append(
                 f"  OPEN {op.get('ticker')} {op.get('tf')} {op.get('letter')} qty {op.get('qty')}"
