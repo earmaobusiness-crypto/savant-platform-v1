@@ -2,8 +2,10 @@
 
 Pulse writes while the session is live (Arm / Set $ / belt / opens): Match%,
 state, Size$, fills, Arm. On change immediately; otherwise about once a
-minute. Stops after flatten (no belt, no leftover opens). Kept until
-16:00 ET the next calendar day, then deleted. Not a forever archive.
+minute. Only while that session box is ticked (pre-market, market hours,
+post-market). A box that is off is skipped, including a gap in the middle,
+and the next ticked box starts again if names, Arm, or Set $ are still up.
+Stops at 8:00 PM. Kept until 20:00 ET the next calendar day, then deleted.
 Operator Room 3 has no tape UI. Agent reads Cloud ?hub=3&mem=1.
 """
 
@@ -17,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
 MEM_DIR = Path(__file__).resolve().parent / "room3_data" / "day_memory"
-PURGE_HOUR = 16
+PURGE_HOUR = 20
 LIVE_KEEP_SEC = 60
 
 
@@ -178,6 +180,17 @@ def _fp(snap: dict[str, Any]) -> str:
     return "|".join(bits)
 
 
+def _gate_open(ss: Any, clock: datetime) -> bool:
+    """True only inside a session box the operator left ticked."""
+    import room3_engine
+
+    window = room3_engine.detect_session_window(clock)
+    if window == room3_engine.SESSION_CLOSED:
+        return False
+    allowed = {str(x) for x in (ss.get("room3_allowed_sessions") or [])}
+    return window in allowed
+
+
 def _window_closed(snap: dict[str, Any]) -> bool:
     return str(snap.get("window") or "").strip().lower().startswith("closed")
 
@@ -234,12 +247,29 @@ def remember(ss: Any, *, now: datetime | None = None) -> Path | None:
     """Append a compact snapshot while the session is live. Never raise into pulse."""
     try:
         purge(now=now)
-        snap = snapshot(ss, now=now)
+        clock = now or datetime.now(ET)
+        if clock.tzinfo is None:
+            clock = clock.replace(tzinfo=ET)
+        else:
+            clock = clock.astimezone(ET)
+        snap = snapshot(ss, now=clock)
         sess = str(snap.get("session") or "")
         if not sess:
             return None
         path = _path(sess)
         prev = _last_row(path)
+        if not _gate_open(ss, clock):
+            if (
+                prev
+                and not prev.get("gate_off")
+                and (prev.get("had_watch") or _watching(prev) or prev.get("arm"))
+            ):
+                snap["gate_off"] = True
+                snap["_fp"] = _fp(snap)
+                with path.open("a") as fh:
+                    fh.write(json.dumps(snap, default=str) + "\n")
+                return path
+            return None
         watching = _watching(snap)
         ever = bool(
             prev
@@ -267,7 +297,7 @@ def remember(ss: Any, *, now: datetime | None = None) -> Path | None:
 
 
 def kept_sessions(*, now: datetime | None = None) -> list[str]:
-    """Session files still on disk. Today's file, plus yesterday until 16:00 ET."""
+    """Session files still on disk. Today's file, plus yesterday until 20:00 ET."""
     purge(now=now)
     if not MEM_DIR.is_dir():
         return []

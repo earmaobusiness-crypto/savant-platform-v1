@@ -164,6 +164,39 @@ def test_flatten_leftover_keeps_pulse_alive(monkeypatch=None):
     assert "TNON" in str(ss.get("room3_filter_universe") or [])
 
 
+def test_armed_empty_tab_does_not_wipe_live_belt():
+    import room3_watcher as w
+
+    today = room3_pulse._pulse_day_key()
+    book = w.set_filter_universe(w.empty_book(), ["JZ", "BIAF"])
+    _reset_bag(
+        {
+            "room3_unattended_armed": True,
+            "room3_engine_armed": True,
+            "room3_filter_universe": ["JZ", "BIAF"],
+            "room3_tradable_today": 1000,
+            "room3_watch_book": book,
+            "filter_universe_day_key": today,
+        }
+    )
+    stray = room3_pulse.PulseState(
+        {
+            "room3_engine_armed": True,
+            "room3_kill_flat": False,
+            "room3_unattended_armed": False,
+            "room3_filter_universe": [],
+            "room3_tradable_today": 0,
+            "room3_watch_book": w.empty_book(),
+            "room3_open_positions": [],
+        }
+    )
+    room3_pulse.mark_unattended(stray)
+    room3_pulse.stamp_belt_and_maps(stray)
+    assert room3_pulse.bag().get("room3_filter_universe") == ["JZ", "BIAF"]
+    assert room3_pulse.bag().get("room3_tradable_today") == 1000
+    assert "JZ:1m" in ((room3_pulse.bag().get("room3_watch_book") or {}).get("lines") or {})
+
+
 def test_stamp_force_clears_maps_with_empty_belt():
     import room3_watcher as w
 
@@ -274,6 +307,7 @@ if __name__ == "__main__":
     test_kill_stops_unattended()
     test_session_must_be_flat_when_closed()
     test_flatten_leftover_keeps_pulse_alive()
+    test_armed_empty_tab_does_not_wipe_live_belt()
     test_stamp_force_clears_maps_with_empty_belt()
     test_stamp_fresh_disarm_keeps_today_pulse_maps()
     test_stamp_wipes_stale_friday_maps_on_fresh_tab()

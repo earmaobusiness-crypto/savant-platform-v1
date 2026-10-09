@@ -11,25 +11,27 @@ class _SS(dict):
         return super().get(k, default)
 
 
-def test_kept_sessions_includes_yesterday_until_4pm(tmp_path, monkeypatch):
+def test_kept_sessions_includes_yesterday_until_8pm(tmp_path, monkeypatch):
     monkeypatch.setattr(mem, "MEM_DIR", tmp_path)
     (tmp_path / "2026-10-07.jsonl").write_text("{}\n")
     (tmp_path / "2026-10-08.jsonl").write_text("{}\n")
     morning = datetime(2026, 10, 8, 10, 0, tzinfo=ET)
     assert mem.kept_sessions(now=morning) == ["2026-10-07", "2026-10-08"]
-    after = datetime(2026, 10, 8, 16, 0, tzinfo=ET)
+    afternoon = datetime(2026, 10, 8, 16, 0, tzinfo=ET)
+    assert mem.kept_sessions(now=afternoon) == ["2026-10-07", "2026-10-08"]
+    after = datetime(2026, 10, 8, 20, 0, tzinfo=ET)
     assert mem.kept_sessions(now=after) == ["2026-10-08"]
 
 
-def test_purge_after_next_day_4pm(tmp_path, monkeypatch):
+def test_purge_after_next_day_8pm(tmp_path, monkeypatch):
     monkeypatch.setattr(mem, "MEM_DIR", tmp_path)
     sess = "2026-10-07"
     path = tmp_path / f"{sess}.jsonl"
     path.write_text("{}\n")
-    still = datetime(2026, 10, 8, 15, 59, tzinfo=ET)
+    still = datetime(2026, 10, 8, 19, 59, tzinfo=ET)
     assert mem.purge(now=still) == []
     assert path.exists()
-    gone = mem.purge(now=datetime(2026, 10, 8, 16, 0, tzinfo=ET))
+    gone = mem.purge(now=datetime(2026, 10, 8, 20, 0, tzinfo=ET))
     assert gone == [sess]
     assert not path.exists()
 
@@ -38,6 +40,7 @@ def test_between_keeps_match_and_fills(tmp_path, monkeypatch):
     monkeypatch.setattr(mem, "MEM_DIR", tmp_path)
     ss = _SS(
         room3_engine_armed=True,
+        room3_allowed_sessions=["rth"],
         room3_unattended_armed=True,
         room3_filter_universe=["XHG"],
         room3_tradable_today=1000,
@@ -84,6 +87,7 @@ def test_idle_after_flatten_stops(tmp_path, monkeypatch):
     monkeypatch.setattr(mem, "MEM_DIR", tmp_path)
     live = _SS(
         room3_engine_armed=True,
+        room3_allowed_sessions=["rth"],
         room3_filter_universe=["BIYA"],
         room3_tradable_today=1000,
         room3_watch_book={"lines": {}},
@@ -99,13 +103,14 @@ def test_idle_after_flatten_stops(tmp_path, monkeypatch):
     mem.remember(live, now=t2)
     rows = mem.load_session("2026-10-07")
     assert len(rows) == 2
-    assert rows[1].get("ended") is True
+    assert rows[1].get("gate_off") is True
 
 
 def test_same_book_keeps_once_a_minute(tmp_path, monkeypatch):
     monkeypatch.setattr(mem, "MEM_DIR", tmp_path)
     ss = _SS(
         room3_engine_armed=True,
+        room3_allowed_sessions=["rth"],
         room3_filter_universe=["BIYA"],
         room3_tradable_today=1000,
         room3_watch_book={
@@ -130,3 +135,34 @@ def test_same_book_keeps_once_a_minute(tmp_path, monkeypatch):
     rows = mem.load_session("2026-10-07")
     assert len(rows) == 2
     assert rows[0]["lines"][0]["match"] == 90
+
+
+def test_unticked_window_is_a_gap(tmp_path, monkeypatch):
+    monkeypatch.setattr(mem, "MEM_DIR", tmp_path)
+    ss = _SS(
+        room3_engine_armed=True,
+        room3_allowed_sessions=["premarket", "postmarket"],
+        room3_filter_universe=["JZ"],
+        room3_tradable_today=1000,
+        room3_watch_book={"lines": {}},
+        room3_trade_history=[],
+        room3_open_positions=[],
+    )
+    off = _SS(
+        room3_engine_armed=True,
+        room3_allowed_sessions=["rth"],
+        room3_filter_universe=["JZ"],
+        room3_tradable_today=1000,
+        room3_watch_book={"lines": {}},
+        room3_trade_history=[],
+        room3_open_positions=[],
+    )
+    assert mem.remember(off, now=datetime(2026, 10, 7, 8, 15, tzinfo=ET)) is None
+    mem.remember(ss, now=datetime(2026, 10, 8, 8, 0, tzinfo=ET))
+    mem.remember(ss, now=datetime(2026, 10, 8, 11, 0, tzinfo=ET))
+    mem.remember(ss, now=datetime(2026, 10, 8, 11, 30, tzinfo=ET))
+    mem.remember(ss, now=datetime(2026, 10, 8, 16, 5, tzinfo=ET))
+    rows = mem.load_session("2026-10-08")
+    assert [r["ts"][:5] for r in rows] == ["08:00", "11:00", "16:05"]
+    assert rows[1].get("gate_off") is True
+    assert rows[2].get("gate_off") is not True

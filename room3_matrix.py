@@ -590,7 +590,7 @@ def size_explain(session_state: Any | None = None) -> str:
         "Uniqueness still cuts size when two strategies are almost equally close. "
         "Match uses median/MAD z-scores (clip ±5) then weighted cosine "
         "(velocity + volume dims lead). "
-        "Ticket ≤ 5% of that name’s session $vol so far and ≤ 5% of this 1m print. "
+        "Ticket ≤ 7% of that name’s session $vol so far. This print stays at 5% so one order does not lift the bar. "
         "Watch-book Size $ is the planned amount, not a fill."
     )
 
@@ -600,8 +600,8 @@ SIZE_EXPLAIN = (
     f"{TF_BUCKET_FRAC['1m']:.1%} 1m, and a quiet ticket fires at ≥{FIRE_FLOOR_PCT}% "
     f"(fat tape may fire at ≥{MATCH_THRESHOLD_PCT}%). "
     "At $2M the working tickets are 1m $100k · 5m $200k · 15m $300k; letters that earned "
-    "the full slot may take it. Ticket ≤ 5% of that name’s session $vol so far and "
-    "≤ 5% of this 1m print. A smaller Set $ uses the "
+    "the full slot may take it. Ticket ≤ 7% of that name’s session $vol so far. "
+    "This print stays at 5% so one order does not lift the bar. A smaller Set $ uses the "
     "same percents — the slot shrinks, the cap does not bind. "
     "Leftover is fluid: extra fills and a still-moving 15m collect idle cash "
     "from buckets that are not hot. A hot 5m/1m keeps its pot and can pull quiet 15m leftover."
@@ -7585,8 +7585,8 @@ def compute_entry_plan(
     Size from TF remaining pot (first fire takes that pot, not 1/N crumbs)
     → match → uniqueness → borrow idle TFs. Never more than remaining
     Trading-today cash. Letter ticket cap clips last so extra book does not
-    land on letters that failed at $2M. Ticket then ≤ 5% of session $vol so
-    far and ≤ 5% of this 1m print.
+    land on letters that failed at $2M. Ticket then ≤ 7% of session $vol so
+    far. This print stays at 5% so one order does not lift the bar.
     """
     tf = _normalize_watch_tf(timeframe)
     if tf not in TF_BUCKET_FRAC:
@@ -7646,11 +7646,25 @@ def compute_entry_plan(
     )
     if clipped + 1e-9 < notional:
         notional = clipped
-        tape_bit = " · 5% of tape"
+        session_cap = (
+            room3_recipes.PARTICIPATION_CAP * float(session_dvol)
+            if session_dvol is not None and float(session_dvol) > 0
+            else None
+        )
+        print_cap = (
+            room3_recipes.PRINT_PARTICIPATION_CAP * float(print_dvol)
+            if print_dvol is not None and float(print_dvol) > 0
+            else None
+        )
+        # Name the ceiling that actually cut the ticket. The print is the slippage bite.
+        if print_cap is not None and (session_cap is None or print_cap <= session_cap + 1e-6):
+            tape_bit = " · 5% of this print"
+        else:
+            tape_bit = " · 7% of session so far"
     elif session_dvol is not None or print_dvol is not None:
         if clipped <= 0:
             notional = 0.0
-            tape_bit = " · 5% of tape $0"
+            tape_bit = " · tape $0"
     qty = 0.0
     if price > 0 and notional >= price:
         qty = math.floor(notional / price)

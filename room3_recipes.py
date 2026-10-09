@@ -621,9 +621,11 @@ _UNSIZED_5M_CAP = 200_000.0
 _UNSIZED_1M_CAP = 100_000.0
 _UNSIZED_15M_CAP = 300_000.0
 
-# Operator 2026-10-03: ticket ≤ 5% of volume at entry.
-# Session $vol so far (that name, 4:00 → now) and this 1m print. No volume → no ticket.
-PARTICIPATION_CAP = 0.05
+# Operator 2026-10-09: ticket ≤ 7% of session $vol so far.
+# This print stays at 5% so one order does not lift the bar (slippage).
+# No volume → no ticket. Ceiling only. A ticket already under it does not get sized up.
+PARTICIPATION_CAP = 0.07
+PRINT_PARTICIPATION_CAP = 0.05
 
 
 def bar_dollar_vol(bar: dict[str, Any] | None) -> float:
@@ -642,7 +644,7 @@ def participation_clip_usd(
     session_dvol: float | None = None,
     print_dvol: float | None = None,
 ) -> float:
-    """Clip a ticket to 5% of session $vol so far and 5% of this print."""
+    """Clip a ticket to 7% of session $vol so far and 5% of this print."""
     want = max(0.0, float(take or 0))
     if session_dvol is None and print_dvol is None:
         return want
@@ -650,7 +652,7 @@ def participation_clip_usd(
     if session_dvol is not None and float(session_dvol) > 0:
         caps.append(PARTICIPATION_CAP * float(session_dvol))
     if print_dvol is not None and float(print_dvol) > 0:
-        caps.append(PARTICIPATION_CAP * float(print_dvol))
+        caps.append(PRINT_PARTICIPATION_CAP * float(print_dvol))
     if not caps:
         return 0.0
     return min(want, min(caps))

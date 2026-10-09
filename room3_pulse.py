@@ -138,6 +138,10 @@ def mark_unattended(ss: Any) -> None:
     )
     if bag_live and session_fresh_disarm:
         return
+    # An armed tab with no names must not blank a belt the pulse already has.
+    worker_uni = [str(t).upper() for t in (b.get("room3_filter_universe") or []) if str(t).strip()]
+    if not belt and worker_uni and not killed:
+        return
     try:
         ss.room3_unattended_armed = flag
     except Exception:
@@ -183,6 +187,9 @@ def stamp_belt_and_maps(ss: Any, *, force: bool = False) -> None:
     )
     stale_worker = room3_watcher.belt_snapshot_is_stale(worker_snap, today)
     if not force and bag_live and session_fresh_disarm and not stale_worker:
+        return
+    # Same guard as mark_unattended: empty armed heartbeat must not erase today's names.
+    if not force and not uni and worker_uni and not stale_worker and not killed:
         return
     book = dict(ss.get("room3_watch_book") or room3_watcher.empty_book())
     book["keep_tickers"] = sorted(_open_syms(ss))

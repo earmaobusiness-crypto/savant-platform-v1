@@ -17,7 +17,7 @@ Open the operator’s Cloud Room 3 URL (prefer the last `?hub=3&belt=...` they g
 4. Reply briefly in chat (what changed vs last note, anything alarming).
 
 ## What you missed
-You are not 24/7. After a gap, reconstruct from **day memory**. Pulse writes it on Cloud. The operator page has **no** tape UI. Open Cloud `?hub=3&mem=1` (agent dump — Match%, state, Size$, Arm, belt, opens, fills). That plus today's log / session history. Memory is kept until **16:00 ET the next calendar day**, then deleted. If the dump is empty (no Cloud push / pulse never ran / rebuild wiped the disk), say so. Do not invent Match% or fills. Do not claim you watched live if you only pulled the tape after.
+You are not 24/7. After a gap, reconstruct from **day memory**. Pulse writes it on Cloud. The operator page has **no** tape UI. Open Cloud `?hub=3&mem=1` (agent dump — Match%, state, Size$, Arm, belt, opens, fills). That plus today's log / session history. Memory is kept until **20:00 ET the next calendar day**, then deleted. The tape only runs while that session box is ticked (pre-market, market hours, post-market). A box left off is a gap, and the next ticked box starts again. It stops at 8:00 PM. If the dump is empty (no Cloud push / pulse never ran / rebuild wiped the disk), say so. Do not invent Match% or fills. Do not claim you watched live if you only pulled the tape after.
 
 ## Forbidden
 - Treating “loop armed” / `sleep` started as the job.
