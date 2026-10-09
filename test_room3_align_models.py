@@ -65,6 +65,32 @@ def test_adaptive_zscore_drops_constant_dim():
     assert int(hit["spatial_match_pct"]) >= 85
 
 
+def test_shelf_letter_yields_when_an_older_letter_already_matches():
+    rows = [
+        {"letter": "S1 (1M)", "strategy": "S1 (1M)", "layout_id": "S", "spatial_match_pct": 96, "cosine_similarity": 0.96, "structural_move_pct": 4},
+        {"letter": "2A (1M)", "strategy": "2A (1M)", "layout_id": "2", "spatial_match_pct": 88, "cosine_similarity": 0.88, "structural_move_pct": 10},
+    ]
+    kept = m.kept_hot(rows, "spatial_match_pct")
+    assert kept["strategy"] == "2A (1M)"
+    kids = [
+        {"letter": "S1 (15M)", "strategy": "S1 (15M)", "match_pct": 91},
+        {"letter": "2B (15M)", "strategy": "2B (15M)", "match_pct": 86},
+    ]
+    assert m.kept_hot(kids, "match_pct")["strategy"] == "2B (15M)"
+
+
+def test_shelf_letter_fires_when_it_is_the_only_match():
+    live = [8.1, 2.4, 3.15, 4.05, 5.15, 6.05, 0.0, 0.39]
+    layouts = [
+        {"layout_id": "1", "strategy": "1A (1M)", "vector": [1.0, 9.0, 0.2, 0.1, 8.0, 0.2, 0.0, -0.8], "timeframe_resolution": "1m"},
+        {"layout_id": "2", "strategy": "2B (1M)", "vector": [0.2, 0.3, 8.0, 7.5, 0.1, 6.0, 0.0, 0.9], "timeframe_resolution": "1m"},
+        {"layout_id": "S", "strategy": "S1 (1M)", "vector": list(live), "timeframe_resolution": "1m"},
+    ]
+    hit = m.match_spatial(live, layouts, watch_timeframe="1m")
+    assert hit["nearest_strategy"] == "S1 (1M)"
+    assert int(hit["spatial_match_pct"]) >= 85
+
+
 def test_weights_prioritize_velocity_and_volume():
     assert m.FEATURE_MATCH_WEIGHTS[0] >= m.FEATURE_MATCH_WEIGHTS[1] >= m.FEATURE_MATCH_WEIGHTS[2]
     assert m.FEATURE_MATCH_WEIGHTS[3] > m.FEATURE_MATCH_WEIGHTS[5]

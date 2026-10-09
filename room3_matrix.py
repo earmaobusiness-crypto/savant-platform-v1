@@ -765,6 +765,40 @@ def build_live_feature_vector(line: dict[str, Any]) -> list[float] | None:
     ]
 
 
+# Shelf letters minted from a review dump. They yield to an older live letter
+# that already clears 85% on this bar. They fire when they are the only match.
+_SHELF_LETTERS = {"S1"}
+
+
+def _row_letter(row: dict[str, Any] | None) -> str:
+    if not isinstance(row, dict):
+        return ""
+    raw = str(row.get("letter") or row.get("strategy") or "")
+    return room3_recipes._letter_head(raw)
+
+
+def kept_hot(rows: list[dict[str, Any]] | None, pct_key: str = "match_pct") -> dict[str, Any] | None:
+    """Letter that fires. A shelf letter does not kick off an older one already ≥85%."""
+    ready: list[dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        pct = int(row.get(pct_key) or row.get("spatial_match_pct") or row.get("match_pct") or 0)
+        if pct < MATCH_THRESHOLD_PCT or not _row_letter(row):
+            continue
+        ready.append(row)
+    if not ready:
+        return None
+    ready.sort(
+        key=lambda r: -int(r.get(pct_key) or r.get("spatial_match_pct") or r.get("match_pct") or 0)
+    )
+    top = ready[0]
+    if _row_letter(top) not in _SHELF_LETTERS:
+        return top
+    older = [r for r in ready if _row_letter(r) not in _SHELF_LETTERS]
+    return older[0] if older else top
+
+
 def match_spatial(
     snapshot_vec: list[float],
     layouts: list[dict[str, Any]],
@@ -860,6 +894,20 @@ def match_spatial(
         )
         if len(ranked) >= 8:
             break
+    # A shelf letter (S1) does not take a bar an older live letter already matches.
+    # It still fires when it is the only one at ≥85%. More knowledge adds a shot.
+    # It does not replace one.
+    kept = kept_hot(ranked, "spatial_match_pct")
+    if kept and _row_letter(kept) != _row_letter({"strategy": nearest_strategy}):
+        nearest = str(kept.get("layout_id") or nearest)
+        nearest_strategy = str(kept.get("strategy") or nearest_strategy)
+        structural_move = float(kept.get("structural_move_pct") or structural_move)
+        best_cosine = float(kept.get("cosine_similarity") or best_cosine)
+        for hit in ranked_hits:
+            if str(hit.get("strategy") or "") == nearest_strategy:
+                best_ticker = str(hit.get("ticker") or best_ticker)
+                best_tf = str(hit.get("timeframe") or best_tf)
+                break
     # No positive hit → do not invent "NEW_LAYOUT" (Room 2 mint jargon). Show blank.
     if best_cosine <= 0:
         nearest = "—"

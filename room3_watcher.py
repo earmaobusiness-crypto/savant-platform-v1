@@ -804,7 +804,9 @@ def tick_watcher(
         hot = None
         kids = [c for c in (line.get("children") or []) if isinstance(c, dict)]
         if kids:
-            hot = max(kids, key=lambda c: int(c.get("match_pct") or 0))
+            hot = room3_matrix.kept_hot(kids, "match_pct")
+            if hot is None:
+                hot = max(kids, key=lambda c: int(c.get("match_pct") or 0))
         hot_strat = str((hot or {}).get("strategy") or line.get("nearest_strategy") or line.get("strategy") or "")
         hot_layout = str((hot or {}).get("layout_id") or line.get("nearest_layout") or line.get("entry_layout") or "")
         hot_struct = float(
