@@ -552,16 +552,28 @@ def _apply_signals(ss: PulseState, book: dict[str, Any], signals: list[dict], *,
                 line["exit_signal"] = None
 
 
+def note_session(ss: Any) -> None:
+    """Write the session tape. Quiet belt, no fill, disconnect, and flatten still count."""
+    try:
+        import room3_day_memory
+
+        room3_day_memory.remember(ss)
+    except Exception:
+        pass
+
+
 def run_pulse(ss: PulseState) -> str:
     paper = str(ss.get("room3_execution_mode") or "paper") != "live"
     if ss.get("room3_kill_flat"):
         note = _flatten_open(ss, paper=paper)
         ss.room3_worker_note = note
         persist_bag(ss)
+        note_session(ss)
         return note
     synced = _sync_alpaca(ss, paper=paper, include_fills=_fills_due(ss))
     if not synced.get("ok"):
         ss.room3_worker_note = "broker disconnected"
+        note_session(ss)
         return ss.room3_worker_note
     tradable = float(ss.get("room3_tradable_today") or 0)
     open_syms = _open_syms(ss)
@@ -588,6 +600,7 @@ def run_pulse(ss: PulseState) -> str:
         note = _flatten_open(ss, paper=paper)
         ss.room3_worker_note = note
         persist_bag(ss)
+        note_session(ss)
         return note
     uni = [str(t).upper() for t in (ss.get("room3_filter_universe") or []) if str(t).strip()]
     book = dict(ss.get("room3_watch_book") or room3_watcher.empty_book())
@@ -620,12 +633,7 @@ def run_pulse(ss: PulseState) -> str:
     )
     ss.room3_worker_note = note
     persist_bag(ss)
-    try:
-        import room3_day_memory
-
-        room3_day_memory.remember(ss)
-    except Exception:
-        pass
+    note_session(ss)
     return note
 
 

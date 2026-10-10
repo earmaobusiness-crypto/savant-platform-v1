@@ -5785,6 +5785,7 @@ def _room3_heartbeat_tick() -> None:
             st.dataframe(rows, use_container_width=True, hide_index=True)
         else:
             st.caption("No TF maps open yet.")
+        room3_pulse.note_session(st.session_state)
         return
     mode = str(st.session_state.get("room3_execution_mode") or ROOM3_MODE_PAPER)
     if str(st.session_state.get("room3_broker") or "") == "alpaca":
@@ -5826,6 +5827,7 @@ def _room3_heartbeat_tick() -> None:
         rows = room3_watcher.book_status_rows(book)
         if rows:
             st.dataframe(rows, use_container_width=True, hide_index=True)
+        room3_pulse.note_session(st.session_state)
         return
     st.session_state.room3_watch_book = book
 
@@ -5937,6 +5939,7 @@ def _room3_heartbeat_tick() -> None:
 
     _relabel_unlabeled_closes_from_lots()
     _persist_screener_to_disk()
+    room3_pulse.note_session(st.session_state)
 
     window = room3_engine.detect_session_window()
     gates = _current_gates("entry")
