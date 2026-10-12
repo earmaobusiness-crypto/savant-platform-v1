@@ -342,10 +342,20 @@ def extra_pack(
         lows = window["Low"].astype(float)
         spread_bar = float(((highs - lows) / closes.replace(0, float("nan")) * 100).mean() or 0)
         idx = list(window.index)
+        opens = window["Open"].astype(float)
         if len(idx) >= 3:
             deltas = [(idx[i] - idx[i - 1]).total_seconds() for i in range(1, len(idx))]
             typical = sorted(deltas)[len(deltas) // 2] if deltas else 0
-            halt_gap = bool(typical and max(deltas) > typical * 4)
+            # A quiet hole is a dead print. A halt-like hole is at least five
+            # minutes and the next bar opens 3% away. Still not an exchange flag.
+            for i, gap in enumerate(deltas, start=1):
+                if not typical or gap < max(typical * 4, 300):
+                    continue
+                prev_c = float(closes.iloc[i - 1] or 0)
+                next_o = float(opens.iloc[i] or 0)
+                if prev_c > 0 and next_o > 0 and abs(next_o - prev_c) / prev_c >= 0.03:
+                    halt_gap = True
+                    break
 
     if full_day is not None and not getattr(full_day, "empty", True):
         try:
@@ -360,12 +370,26 @@ def extra_pack(
 
     depth = int(NEWS_DEPTH_DAYS.get(tf, 14))
     filings = filings_before(ticker, as_of, lookback_days=depth)
-    bases = [f["form"].split("/")[0].upper() for f in filings]
-    offering = any(b in OFFERING_FORMS for b in bases)
-    dilution = any(b in DILUTION_FORMS for b in bases)
-    insider = any(b in INSIDER_FORMS for b in bases)
-    catalyst = any(b in CATALYST_FORMS for b in bases)
-    rotation = (win_vol / float_shares) if float_shares > 0 else 0.0
+
+    def _form_base(form: str) -> str:
+        return str(form or "").split("/")[0].upper()
+
+    def _filed_that_day(kinds: frozenset[str]) -> bool:
+        # A filing date is the session, not this minute, and not the lookback.
+        for f in filings:
+            if str(f.get("date") or "")[:10] != as_of.isoformat():
+                continue
+            if _form_base(f.get("form") or "") in kinds:
+                return True
+        return False
+
+    offering = _filed_that_day(OFFERING_FORMS)
+    dilution = _filed_that_day(DILUTION_FORMS)
+    insider = _filed_that_day(INSIDER_FORMS)
+    catalyst = any(_form_base(f.get("form") or "") in CATALYST_FORMS for f in filings)
+    # Yahoo float is today's figure. A past session does not get it.
+    float_as_of = as_of == datetime.now(ET).date()
+    rotation = (win_vol / float_shares) if float_shares > 0 and float_as_of else 0.0
 
     def _cell(ok: bool | None, note: str, **extra: Any) -> dict[str, Any]:
         cell = {"ok": ok, "note": note}
@@ -379,20 +403,40 @@ def extra_pack(
         "sec": _cell(catalyst, "EDGAR as-of window", filings=filings[:8]),
         "news": _cell(catalyst, "dated filings stand in for wires (RSS is current-only)"),
         "social": _cell(None, "historical social not archived — live only"),
-        "float": _cell(float_shares > 0, "Yahoo float (current snapshot)", value=int(float_shares)),
-        "short_interest": _cell(short_pct > 0, "Yahoo SI % of float", value=round(short_pct, 4)),
-        "dilution": _cell(dilution, "S-3 / 424B / 8-K in lookback"),
-        "halt": _cell(halt_gap, "bar-gap proxy in precursor window"),
+        "float": _cell(
+            True if float_shares > 0 and float_as_of else None,
+            "Yahoo float this session" if float_as_of else "Yahoo float is today, not that morning",
+            value=int(float_shares) if float_as_of and float_shares > 0 else None,
+        ),
+        "short_interest": _cell(
+            True if short_pct > 0 and float_as_of else None,
+            "Yahoo SI this session" if float_as_of else "Yahoo SI is today, not that morning",
+            value=round(short_pct, 4) if float_as_of and short_pct > 0 else None,
+        ),
+        "dilution": _cell(dilution, "filed this session date — the day, not this minute", scope="day"),
+        "halt": _cell(halt_gap, "five-minute hole and a 3% reopen — not an exchange halt flag"),
         "spread": _cell(True, "bar range %", value=round(spread_bar or spread_live, 4)),
         "prints": _cell(tf == "1m", "aggressive tape (1m)"),
         "bid_ask": _cell(bool(bid and ask), "inside spread", value=round(spread_live, 4)),
         "premarket_rvol": _cell(tf in ("5m", "15m"), "pre-open vs RTH", value=round(pm_rvol, 3)),
-        "float_rotation": _cell(rotation > 0, "window volume / float", value=round(rotation, 6)),
-        "offering": _cell(offering, "shelf / 424B in lookback"),
-        "insider": _cell(insider, "Form 4 in lookback"),
-        "borrow": _cell(short_ratio > 0, "days-to-cover proxy", value=round(short_ratio, 3)),
+        "float_rotation": _cell(
+            True if rotation > 0 else None,
+            "window volume / that morning's float" if float_as_of else "needs that morning's float",
+            value=round(rotation, 6) if rotation > 0 else None,
+        ),
+        "offering": _cell(offering, "filed this session date — the day, not this minute", scope="day"),
+        "insider": _cell(insider, "filed this session date — the day, not this minute", scope="day"),
+        "borrow": _cell(
+            True if short_ratio > 0 and float_as_of else None,
+            "days-to-cover this session" if float_as_of else "Yahoo borrow is today, not that morning",
+            value=round(short_ratio, 3) if float_as_of and short_ratio > 0 else None,
+        ),
         "sector": _cell(None, "peer tape not dated — live only"),
-        "days_to_cover": _cell(short_ratio > 0, "Yahoo shortRatio", value=round(short_ratio, 3)),
+        "days_to_cover": _cell(
+            True if short_ratio > 0 and float_as_of else None,
+            "Yahoo shortRatio this session" if float_as_of else "Yahoo shortRatio is today, not that morning",
+            value=round(short_ratio, 3) if float_as_of and short_ratio > 0 else None,
+        ),
     }
     return pack
 
