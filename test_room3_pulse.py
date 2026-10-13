@@ -299,6 +299,44 @@ def test_stamp_keeps_leftover_open_maps():
     assert "FTFT:1m" in ((ss.get("room3_watch_book") or {}).get("lines") or {})
 
 
+def test_open_shares_become_a_trade():
+    """A fill on the unattended pulse used to stay 'order working', so the exit never ran."""
+    ss = room3_pulse.PulseState(
+        {
+            "room3_open_positions": [{"symbol": "GIXI", "qty": 19}],
+            "room3_watch_book": {
+                "lines": {
+                    "GIXI|5m": {
+                        "ticker": "GIXI",
+                        "timeframe": "5m",
+                        "state": "committed",
+                        "order_pending": True,
+                        "entry_strategy": "S1 (5M)",
+                        "entry_layout": "S",
+                        "entry_qty": 19,
+                        "entry_price": 6.5,
+                    },
+                    "GIXI|1m": {
+                        "ticker": "GIXI",
+                        "timeframe": "1m",
+                        "state": "committed",
+                        "order_pending": True,
+                        "entry_strategy": "6A (1M)",
+                        "entry_qty": 6,
+                        "entry_price": 6.6,
+                    },
+                }
+            },
+        }
+    )
+    room3_pulse._own_open_shares(ss)
+    lines = ss.room3_watch_book["lines"]
+    assert lines["GIXI|5m"]["state"] == "in"
+    assert "order_pending" not in lines["GIXI|5m"]
+    assert lines["GIXI|1m"]["state"] == "watching"
+    assert "order_pending" not in lines["GIXI|1m"]
+
+
 if __name__ == "__main__":
     test_pulse_state_duck_types_session()
     test_mark_unattended_requires_arm_and_belt()
@@ -312,4 +350,5 @@ if __name__ == "__main__":
     test_stamp_fresh_disarm_keeps_today_pulse_maps()
     test_stamp_wipes_stale_friday_maps_on_fresh_tab()
     test_stamp_keeps_leftover_open_maps()
+    test_open_shares_become_a_trade()
     print("ok")

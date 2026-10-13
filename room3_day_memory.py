@@ -1,7 +1,8 @@
 """Same-session book memory so a later question can reconstruct the watch book.
 
 Pulse writes while the session is live (Arm / Set $ / belt / opens): Match%,
-state, Size$, fills, Arm. On change immediately; otherwise about once a
+state, Size$, the bars that line just matched, the open lot's letter and
+timeframe, fills, Arm. On change immediately; otherwise about once a
 minute. Only while that session box is ticked (pre-market, market hours,
 post-market). A box that is off is skipped, including a gap in the middle,
 and the next ticked box starts again if names, Arm, or Set $ are still up.
@@ -61,15 +62,38 @@ def _compact_line(line: dict[str, Any], book: dict[str, Any]) -> dict[str, Any]:
         )
     last = {}
     slices = [s for s in (line.get("slices") or []) if isinstance(s, dict)]
-    if slices:
-        bar = slices[-1]
+    bars = []
+    for bar in slices[-24:]:
+        try:
+            bars.append(
+                {
+                    "o": round(float(bar.get("o") or 0), 4),
+                    "h": round(float(bar.get("h") or 0), 4),
+                    "l": round(float(bar.get("l") or 0), 4),
+                    "c": round(float(bar.get("c") or 0), 4),
+                    "v": round(float(bar.get("v") or 0), 0),
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+    if bars:
         last = {
-            "c": round(float(bar.get("c") or 0), 4),
-            "h": round(float(bar.get("h") or 0), 4),
-            "l": round(float(bar.get("l") or 0), 4),
-            "v": round(float(bar.get("v") or 0), 0),
+            "c": bars[-1]["c"],
+            "h": bars[-1]["h"],
+            "l": bars[-1]["l"],
+            "v": bars[-1]["v"],
         }
-    return {
+    entry = {}
+    if str(line.get("state") or "") in ("in", "committed") or line.get("entry_strategy"):
+        try:
+            entry = {
+                "letter": str(line.get("entry_strategy") or "")[:24],
+                "px": round(float(line.get("entry_price") or 0), 4),
+                "qty": round(float(line.get("entry_qty") or 0), 4),
+            }
+        except (TypeError, ValueError):
+            entry = {}
+    row = {
         "ticker": ticker,
         "tf": tf,
         "match": int(line.get("match_pct") or 0),
@@ -81,9 +105,64 @@ def _compact_line(line: dict[str, Any], book: dict[str, Any]) -> dict[str, Any]:
         "fat": bool(line.get("fat_tape")),
         "bar_done": bool(line.get("_fat_bar_complete")),
         "last": last,
+        "bars": bars,
         "why": str(line.get("patience_note") or room3_watcher._why_not_firing(line, book) or "")[:72],
         "children": kids,
     }
+    if entry.get("letter") or entry.get("qty"):
+        row["entry"] = entry
+    return row
+
+
+def _open_rows(ss: Any, positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Broker shares, with the lot's letter and timeframe when the book has one."""
+    import room3_engine
+
+    rows: list[dict[str, Any]] = []
+    covered: set[str] = set()
+    try:
+        lots = room3_engine.lots.open_lots(ss)
+    except Exception:
+        lots = []
+    for lot in lots:
+        if not isinstance(lot, dict):
+            continue
+        ticker = str(lot.get("ticker") or "").upper()
+        if not ticker:
+            continue
+        covered.add(ticker)
+        try:
+            qty = float(lot.get("qty") or 0)
+            px = round(float(lot.get("entry_px") or 0), 4)
+        except (TypeError, ValueError):
+            qty, px = 0.0, 0.0
+        rows.append(
+            {
+                "ticker": ticker,
+                "qty": qty,
+                "tf": str(lot.get("tf") or ""),
+                "letter": str(lot.get("letter") or lot.get("strategy") or ""),
+                "entry": px,
+            }
+        )
+    for pos in positions:
+        ticker = str(pos.get("ticker") or pos.get("symbol") or "").upper()
+        if not ticker or ticker in covered:
+            continue
+        try:
+            qty = float(pos.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        rows.append(
+            {
+                "ticker": ticker,
+                "qty": qty,
+                "tf": str(pos.get("timeframe") or pos.get("tf") or ""),
+                "letter": str(pos.get("letter") or pos.get("strategy") or ""),
+                "entry": 0.0,
+            }
+        )
+    return rows
 
 
 def _compact_trade(row: dict[str, Any]) -> dict[str, Any]:
@@ -124,6 +203,7 @@ def snapshot(ss: Any, *, now: datetime | None = None) -> dict[str, Any]:
         window = ""
     wins = sum(1 for r in hist if float(r.get("pnl") or r.get("realized_pl") or 0) > 0)
     pnl = sum(float(r.get("pnl") or r.get("realized_pl") or 0) for r in hist)
+    open_rows = _open_rows(ss, opens)
     return {
         "ts": clock.strftime("%H:%M:%S"),
         "iso": clock.isoformat(),
@@ -140,15 +220,7 @@ def snapshot(ss: Any, *, now: datetime | None = None) -> dict[str, Any]:
         "day_pnl": round(pnl, 2),
         "fills": len(hist),
         "wins": wins,
-        "opens": [
-            {
-                "ticker": str(p.get("ticker") or p.get("symbol") or "").upper(),
-                "qty": float(p.get("qty") or 0),
-                "tf": str(p.get("timeframe") or p.get("tf") or ""),
-                "letter": str(p.get("letter") or p.get("strategy") or ""),
-            }
-            for p in opens
-        ],
+        "opens": open_rows,
         "log": [_compact_trade(r) for r in hist[-40:]],
         "lines": lines,
         "note": str(ss.get("room3_worker_note") or "")[:120],
@@ -373,6 +445,21 @@ def as_text(rows: list[dict[str, Any]], *, limit: int = 0) -> str:
                 f"{ln.get('match')}% {ln.get('state')} ${ln.get('size') or 0:.0f}"
                 f"{feed}{fat}{px} {ln.get('why') or ''}".rstrip()
             )
+            held = ln.get("entry") if isinstance(ln.get("entry"), dict) else None
+            if held and (held.get("letter") or held.get("qty")):
+                out.append(
+                    f"    held {held.get('letter') or '—'} qty {held.get('qty')} @{held.get('px')}"
+                )
+            bars = ln.get("bars") or []
+            hot = str(ln.get("state") or "") in ("in", "queued", "ready") or int(ln.get("match") or 0) >= 85
+            if hot and bars:
+                out.append(
+                    "    bars "
+                    + " ".join(
+                        f"{b.get('o')},{b.get('h')},{b.get('l')},{b.get('c')},{b.get('v')}"
+                        for b in bars
+                    )
+                )
             for kid in ln.get("children") or []:
                 out.append(
                     f"    {kid.get('letter')} {kid.get('match')}% {kid.get('layout')}"
@@ -386,7 +473,8 @@ def as_text(rows: list[dict[str, Any]], *, limit: int = 0) -> str:
             )
         for op in row.get("opens") or []:
             out.append(
-                f"  OPEN {op.get('ticker')} {op.get('tf')} {op.get('letter')} qty {op.get('qty')}"
+                f"  OPEN {op.get('ticker')} {op.get('tf')} {op.get('letter')} "
+                f"qty {op.get('qty')} @{op.get('entry') or ''}".rstrip()
             )
     if limit and len(rows) > limit:
         out.insert(0, f"… {len(rows) - limit} earlier snaps omitted")

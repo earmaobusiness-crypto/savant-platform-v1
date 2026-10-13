@@ -752,6 +752,26 @@ def peek_live_bar_rows(
     return _rows_from_1m(hit.get("frame"), tf, bars_keep), str(hit.get("source") or "yahoo")
 
 
+def day_range_pct(ticker: str) -> float | None:
+    """How far today's high sits above today's low, on the tape already pulled.
+
+    The match window is only the last few bars. This reads the whole day in
+    that pull, so a name that already ran 90% is visible. No pull, no number.
+    """
+    hit = _LIVE_1M.get(str(ticker or "").upper())
+    frame = hit.get("frame") if isinstance(hit, dict) else None
+    if _frame_empty(frame):
+        return None
+    try:
+        hi = float(frame["High"].max())
+        lo = float(frame["Low"].min())
+    except (KeyError, TypeError, ValueError):
+        return None
+    if lo <= 0 or hi < lo:
+        return None
+    return (hi - lo) / lo * 100.0
+
+
 def live_bar_rows(
     ticker: str,
     tf: str,

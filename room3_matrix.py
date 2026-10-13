@@ -23,12 +23,33 @@ MATCH_THRESHOLD_PCT = 85
 FIRE_FLOOR_PCT = 88
 
 
+# A name already 90% off its low (high so far vs low so far) may fire at 70.
+# Quiet tape still waits for 88. The gene stays 85.
+WIDE_RANGE_PCT = 90.0
+WIDE_RANGE_MATCH_PCT = 70
+
+
 def fat_clears_fire_floor(match_pct: int | None, *, fat: bool) -> bool:
     """Quiet 85–87 watches. This-print fat 85–87 may fire. Gene stays 85."""
     cur = int(match_pct or 0)
     if cur >= FIRE_FLOOR_PCT:
         return True
     return bool(fat and cur >= MATCH_THRESHOLD_PCT)
+
+
+def wide_range_clears(match_pct: int | None, day_range: float | None) -> bool:
+    """70 may fire once this name is already 90% off its low. Otherwise no."""
+    try:
+        rng = float(day_range) if day_range is not None else -1.0
+    except (TypeError, ValueError):
+        return False
+    return rng >= WIDE_RANGE_PCT and int(match_pct or 0) >= WIDE_RANGE_MATCH_PCT
+
+
+def fire_cleared(match_pct: int | None, *, fat: bool, day_range: float | None = None) -> bool:
+    if wide_range_clears(match_pct, day_range):
+        return True
+    return fat_clears_fire_floor(match_pct, fat=fat)
 CHILD_READY_PCT = 84  # show a strategy sub-lane; fire still waits for MATCH_THRESHOLD
 EXIT_MATCH_FLOOR_PCT = 65
 STOP_LOSS_PCT = 2.5
@@ -585,7 +606,7 @@ def size_explain(session_state: Any | None = None) -> str:
         "instead of sitting in 15m. "
         f"A family prints at ≥{MATCH_THRESHOLD_PCT}% but a quiet ticket only fires at "
         f"≥{FIRE_FLOOR_PCT}% — the {MATCH_THRESHOLD_PCT}–{FIRE_FLOOR_PCT - 1}% band watches unless "
-        "this print is fat. "
+        "this print is fat. A name already 90% off its low may fire at ≥70%. "
         "Weaker match uses less of its slot. "
         "Uniqueness still cuts size when two strategies are almost equally close. "
         "Match uses median/MAD z-scores (clip ±5) then weighted cosine "
@@ -598,7 +619,7 @@ def size_explain(session_state: Any | None = None) -> str:
 SIZE_EXPLAIN = (
     f"Trading today opens {TF_BUCKET_FRAC['15m']:.0%} 15m / {TF_BUCKET_FRAC['5m']:.1%} 5m / "
     f"{TF_BUCKET_FRAC['1m']:.1%} 1m, and a quiet ticket fires at ≥{FIRE_FLOOR_PCT}% "
-    f"(fat tape may fire at ≥{MATCH_THRESHOLD_PCT}%). "
+    f"(fat tape may fire at ≥{MATCH_THRESHOLD_PCT}%; a name already 90% off its low may fire at ≥70%). "
     "At $2M the working tickets are 1m $100k · 5m $200k · 15m $300k; letters that earned "
     "the full slot may take it. Ticket ≤ 7% of that name’s session $vol so far. "
     "This print stays at 5% so one order does not lift the bar. A smaller Set $ uses the "
@@ -4990,7 +5011,25 @@ def _sync_hot_children(
     return out
 
 
-def _child_match_floor(session_state: Any, child: dict[str, Any], tf: str) -> float:
+def _line_day_range(line: dict[str, Any] | None) -> float | None:
+    if not isinstance(line, dict):
+        return None
+    raw = line.get("day_range_pct")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _child_match_floor(
+    session_state: Any,
+    child: dict[str, Any],
+    tf: str,
+    *,
+    day_range: float | None = None,
+) -> float:
     floor = float(MATCH_THRESHOLD_PCT)
     try:
         floor += float(
@@ -5003,6 +5042,8 @@ def _child_match_floor(session_state: Any, child: dict[str, Any], tf: str) -> fl
         )
     except Exception:
         pass
+    if day_range is not None and day_range >= WIDE_RANGE_PCT:
+        floor = min(floor, float(WIDE_RANGE_MATCH_PCT))
     return max(70.0, min(95.0, floor))
 
 
@@ -5047,7 +5088,10 @@ def _try_queue_child_entry(
         ):
             continue
         pct = int(child.get("match_pct") or 0)
-        floor = _child_match_floor(session_state, child, tf)
+        day_range = _line_day_range(line)
+        if day_range is not None:
+            child["day_range_pct"] = day_range
+        floor = _child_match_floor(session_state, child, tf, day_range=day_range)
         if pct < floor:
             if pct >= WARMING_MATCH_PCT:
                 child["patience_note"] = f"warming {pct}% · need ≥{int(floor)}%"
@@ -6963,7 +7007,12 @@ def _entry_trigger_ready(
         except Exception:
             line["_fat_bar_complete"] = False
     cur = int(match_pct if match_pct is not None else (line.get("match_pct") or 0))
-    if cur and not fat_clears_fire_floor(cur, fat=fat):
+    day_range = _line_day_range(line)
+    if cur and not fire_cleared(cur, fat=fat, day_range=day_range):
+        if day_range is not None and day_range >= WIDE_RANGE_PCT:
+            return False, (
+                f"family at {cur}% · 90% off the low fires at ≥{WIDE_RANGE_MATCH_PCT}%"
+            )
         return False, f"family at {cur}% · fires at ≥{FIRE_FLOOR_PCT}%"
     if room3_recipes.normalize_tf(tf) == "1m" and _1m_name_shots_blocked(
         session_state, str(line.get("ticker") or "")
@@ -7823,6 +7872,12 @@ def maybe_queue_matrix_signals(
     line["second_cosine"] = float(match.get("second_cosine") or 0)
 
     ticker = str(line.get("ticker") or "").upper()
+    try:
+        import room3_precursor as _pre
+
+        line["day_range_pct"] = _pre.day_range_pct(ticker)
+    except Exception:
+        line["day_range_pct"] = None
     slices = list(line.get("slices") or [])
     last_px = float(slices[-1].get("c") or 0) if slices else 0.0
     _sync_hot_children(

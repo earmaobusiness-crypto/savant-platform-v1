@@ -77,6 +77,8 @@ def test_between_keeps_match_and_fills(tmp_path, monkeypatch):
     assert rows[0]["lines"][0]["feed"] == "massive"
     assert rows[0]["lines"][0]["fat"] is True
     assert rows[0]["lines"][0]["last"]["c"] == 2.2
+    assert rows[0]["lines"][0]["bars"][0]["o"] == 2.1
+    assert rows[0]["lines"][0]["bars"][0]["c"] == 2.2
     assert rows[0]["log"][0]["entry"] == 2.1
     assert rows[1]["lines"][0]["match"] == 88
     assert rows[0]["fills"] == 1
@@ -166,3 +168,34 @@ def test_unticked_window_is_a_gap(tmp_path, monkeypatch):
     assert [r["ts"][:5] for r in rows] == ["08:00", "11:00", "16:05"]
     assert rows[1].get("gate_off") is True
     assert rows[2].get("gate_off") is not True
+
+
+def test_open_carries_the_lot(tmp_path, monkeypatch):
+    monkeypatch.setattr(mem, "MEM_DIR", tmp_path)
+    ss = _SS(
+        room3_engine_armed=True,
+        room3_allowed_sessions=["rth"],
+        room3_filter_universe=["GIXI"],
+        room3_tradable_today=1000,
+        room3_watch_book={"lines": {}},
+        room3_trade_history=[],
+        room3_open_positions=[{"symbol": "GIXI", "qty": 19}],
+        room3_lots=[
+            {
+                "status": "open",
+                "ticker": "GIXI",
+                "tf": "5m",
+                "letter": "S1",
+                "strategy": "S1 (5M)",
+                "qty": 19,
+                "entry_px": 6.5,
+            }
+        ],
+    )
+    mem.remember(ss, now=datetime(2026, 10, 12, 11, 32, tzinfo=ET))
+    rows = mem.load_session("2026-10-12")
+    assert rows[0]["opens"][0]["tf"] == "5m"
+    assert rows[0]["opens"][0]["letter"] == "S1"
+    assert rows[0]["opens"][0]["entry"] == 6.5
+    text = mem.as_text(rows)
+    assert "OPEN GIXI 5m S1 qty 19.0 @6.5" in text

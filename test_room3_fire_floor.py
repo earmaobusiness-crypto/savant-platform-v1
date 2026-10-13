@@ -60,6 +60,39 @@ def test_fat_eighty_five_clears_fire_floor():
     assert "fires at ≥88%" not in note
 
 
+def test_wide_day_may_fire_at_seventy():
+    """90% off the low may fire at 70. A quieter day still waits for 88."""
+    assert m.wide_range_clears(74, 90) is True
+    assert m.wide_range_clears(69, 120) is False
+    assert m.wide_range_clears(74, 80) is False
+    assert m.fire_cleared(74, fat=False, day_range=100) is True
+    assert m.fire_cleared(74, fat=False, day_range=40) is False
+    ready, note = m._entry_trigger_ready(
+        {"ticker": "STAK", "day_range_pct": 124},
+        _slices(),
+        last_px=11.0,
+        tf="15m",
+        strategy="1A (15M)",
+        layout_id="L1",
+        structural=12.0,
+        match_pct=74,
+    )
+    assert "fires at ≥88%" not in note
+    blocked, quiet = m._entry_trigger_ready(
+        {"ticker": "STAK", "day_range_pct": 40},
+        _slices(),
+        last_px=11.0,
+        tf="15m",
+        strategy="1A (15M)",
+        layout_id="L1",
+        structural=12.0,
+        match_pct=74,
+    )
+    assert blocked is False
+    assert "fires at ≥88%" in quiet
+    assert m._child_match_floor(None, {"layout_id": "L1", "strategy": "1A (15M)"}, "15m", day_range=124) == 70
+
+
 def test_eighty_eight_is_past_the_floor():
     """88 clears the money gate — whatever the letter's own Hunt then decides."""
     _ready, note = m._entry_trigger_ready(

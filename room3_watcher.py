@@ -1022,7 +1022,9 @@ def _display_state(line: dict[str, Any], book: dict[str, Any] | None = None) -> 
         if match >= STICKY_MIN_MATCH_PCT:
             return "warming"
         return "scanning"
-    if match >= room3_matrix.MATCH_THRESHOLD_PCT:
+    if match >= room3_matrix.MATCH_THRESHOLD_PCT or room3_matrix.wide_range_clears(
+        match, line.get("day_range_pct")
+    ):
         return "ready"
     if match >= STICKY_MIN_MATCH_PCT:
         return "warming"
@@ -1075,14 +1077,20 @@ def _why_not_firing(line: dict[str, Any], book: dict[str, Any] | None = None) ->
     if note:
         return note[:48]
     fire = room3_matrix.FIRE_FLOOR_PCT
-    if match >= room3_matrix.MATCH_THRESHOLD_PCT:
+    wide = room3_matrix.wide_range_clears(match, line.get("day_range_pct"))
+    if match >= room3_matrix.MATCH_THRESHOLD_PCT or wide:
         fat = room3_recipes.tape_is_fat(
             line.get("slices") or [],
             print_bar=line.get("_print_bar"),
         )
-        if match < fire and not room3_matrix.fat_clears_fire_floor(match, fat=fat):
+        if match < fire and not room3_matrix.fire_cleared(
+            match, fat=fat, day_range=line.get("day_range_pct")
+        ):
             return f"family at {match}% · fires at ≥{fire}% — watching"
-        gate = f"fat tape · {match}%" if match < fire else f"≥{fire}%"
+        if wide and match < fire:
+            gate = f"90% off the low · {match}%"
+        else:
+            gate = f"fat tape · {match}%" if match < fire else f"≥{fire}%"
         if book and book.get("engine_armed"):
             if book.get("pause_entries"):
                 return f"{gate} · Pause is on — no new entries"

@@ -322,6 +322,67 @@ def _session_trading_allowed(ss: PulseState) -> bool:
     return window in set(ss.get("room3_allowed_sessions") or [])
 
 
+def _own_open_shares(ss: Any) -> None:
+    """Shares at the broker are a trade. A working order must become `in` so the exit can run.
+
+    The open tab already does this. The unattended pulse did not, so a fill sat
+    as "order working" until the session ended and no letter exit fired.
+    One name has one pile. The line whose size is closest to that pile owns it.
+    The other working lines on that name go back to watching.
+    """
+    book = ss.get("room3_watch_book") or {}
+    lines = book.get("lines") if isinstance(book, dict) else None
+    if not isinstance(lines, dict):
+        return
+    held: dict[str, float] = {}
+    for pos in ss.get("room3_open_positions") or []:
+        if not isinstance(pos, dict):
+            continue
+        sym = str(pos.get("symbol") or pos.get("ticker") or "").upper()
+        try:
+            qty = abs(float(pos.get("qty") or 0))
+        except (TypeError, ValueError):
+            qty = 0.0
+        if sym and qty > 0:
+            held[sym] = held.get(sym, 0.0) + qty
+    for sym, qty in held.items():
+        owned = [
+            ln
+            for ln in lines.values()
+            if isinstance(ln, dict) and str(ln.get("ticker") or "").upper() == sym
+        ]
+        if any(str(ln.get("state") or "") == "in" for ln in owned):
+            continue
+        pending = [
+            ln
+            for ln in owned
+            if str(ln.get("state") or "") == "committed" or ln.get("order_pending")
+        ]
+        if not pending:
+            continue
+
+        def _gap(ln: dict) -> float:
+            try:
+                q = abs(float(ln.get("entry_qty") or 0))
+            except (TypeError, ValueError):
+                q = 0.0
+            if q <= 0:
+                return 1e9
+            return abs(q - qty)
+
+        pick = min(pending, key=_gap)
+        pick["state"] = "in"
+        pick.pop("order_pending", None)
+        for ln in pending:
+            if ln is pick:
+                continue
+            ln["state"] = "watching"
+            ln.pop("order_pending", None)
+            ln["entry_signal"] = None
+            ln["patience"] = False
+            ln.pop("patience_note", None)
+
+
 def _open_syms(ss: Any) -> set[str]:
     out: set[str] = set()
     for pos in ss.get("room3_open_positions") or []:
@@ -363,6 +424,7 @@ def _sync_alpaca(ss: PulseState, *, paper: bool, include_fills: bool = True) -> 
         if isinstance(p, dict) and abs(float(p.get("qty") or 0)) >= 1e-9
     ]
     room3_engine.lots.reconcile_to_broker(ss, ss.room3_open_positions)
+    _own_open_shares(ss)
     room3_engine.lots.heal_lots_from_watch(
         ss, ss.get("room3_watch_book"), ss.room3_open_positions
     )
